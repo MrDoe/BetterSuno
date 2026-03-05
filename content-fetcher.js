@@ -331,6 +331,15 @@
                 });
             }
 
+            // Send incremental update after each page
+            api.runtime.sendMessage({
+                action: "songs_page",
+                songs: allSongs,
+                pageNum: pageNum,
+                totalSongs: allSongs.length,
+                checkNewOnly: checkNewOnly
+            });
+
             if (foundKnownSong) {
                 keepGoing = false;
                 break;

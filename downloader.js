@@ -1,11 +1,138 @@
 // downloader.js — popup.js adapted as a content script for the Library tab panel
 // Runs after content.js has injected the panel DOM.
+// Uses IndexedDB for persistent storage across browser sessions
 
 (function initDownloader() {
     const api = (typeof browser !== 'undefined') ? browser : chrome;
 
     let allSongs = [];
     let filteredSongs = [];
+
+    // ========================================================================
+    // IndexedDB Helper Functions
+    // ========================================================================
+    
+    const IDB_NAME = 'SunoNotificationsDB';
+    const IDB_VERSION = 1;
+    let dbInstance = null;
+
+    async function getDB() {
+        if (dbInstance) return dbInstance;
+        
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(IDB_NAME, IDB_VERSION);
+            
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                dbInstance = request.result;
+                resolve(dbInstance);
+            };
+            
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains('songsList')) {
+                    db.createObjectStore('songsList', { keyPath: 'id' });
+                }
+                if (!db.objectStoreNames.contains('userPreferences')) {
+                    db.createObjectStore('userPreferences', { keyPath: 'key' });
+                }
+            };
+        });
+    }
+
+    async function saveSongsToIDB(songs) {
+        try {
+            const db = await getDB();
+            const tx = db.transaction('songsList', 'readwrite');
+            const store = tx.objectStore('songsList');
+            store.clear();
+            
+            songs.forEach(song => {
+                store.add({ ...song, timestamp: Date.now() });
+            });
+            
+            return new Promise((resolve, reject) => {
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        } catch (e) {
+            console.error('[IDB] Failed to save songs:', e);
+        }
+    }
+
+    async function loadSongsFromIDB() {
+        try {
+            const db = await getDB();
+            const tx = db.transaction('songsList', 'readonly');
+            const store = tx.objectStore('songsList');
+            const request = store.getAll();
+            
+            return new Promise((resolve, reject) => {
+                request.onsuccess = () => resolve(request.result || []);
+                request.onerror = () => reject(request.error);
+            });
+        } catch (e) {
+            console.error('[IDB] Failed to load songs:', e);
+            return [];
+        }
+    }
+
+    async function savePreferenceToIDB(key, value) {
+        try {
+            const db = await getDB();
+            const tx = db.transaction('userPreferences', 'readwrite');
+            const store = tx.objectStore('userPreferences');
+            store.put({
+                key,
+                value,
+                timestamp: Date.now()
+            });
+            
+            return new Promise((resolve, reject) => {
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        } catch (e) {
+            console.error('[IDB] Failed to save preference:', e);
+        }
+    }
+
+    async function loadPreferenceFromIDB(key) {
+        try {
+            const db = await getDB();
+            const tx = db.transaction('userPreferences', 'readonly');
+            const store = tx.objectStore('userPreferences');
+            const request = store.get(key);
+            
+            return new Promise((resolve, reject) => {
+                request.onsuccess = () => resolve(request.result?.value || null);
+                request.onerror = () => reject(request.error);
+            });
+        } catch (e) {
+            console.error('[IDB] Failed to load preference:', e);
+            return null;
+        }
+    }
+
+    async function deletePreferenceFromIDB(key) {
+        try {
+            const db = await getDB();
+            const tx = db.transaction('userPreferences', 'readwrite');
+            const store = tx.objectStore('userPreferences');
+            store.delete(key);
+            
+            return new Promise((resolve, reject) => {
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        } catch (e) {
+            console.error('[IDB] Failed to delete preference:', e);
+        }
+    }
+
+    // ========================================================================
+    // DOM Elements
+    // ========================================================================
 
     const statusDiv = document.getElementById("status");
     const folderInput = document.getElementById("folder");
@@ -14,12 +141,12 @@
         return el ? el.value : 'mp3';
     }
     const formatRadios = document.querySelectorAll('input[name="format"]');
-    const publicCheckbox = document.getElementById("publicOnly");
-    const maxPagesInput = document.getElementById("maxPages");
-    const stopBtn = document.getElementById("stopBtn");
+    
+    // Default settings (no longer in UI)
+    const maxPages = 0; // 0 = unlimited
+    const isPublicOnly = false; // fetch all songs
     const downloadBtn = document.getElementById("downloadBtn");
     const stopDownloadBtn = document.getElementById("stopDownloadBtn");
-    const backBtn = document.getElementById("backBtn");
     const filterInput = document.getElementById("filterInput");
     const filterLiked = document.getElementById("filterLiked");
     const filterStems = document.getElementById("filterStems");
@@ -30,7 +157,6 @@
     const downloadImageCheckbox = document.getElementById("downloadImage");
     const songList = document.getElementById("songList");
     const songCount = document.getElementById("songCount");
-    const settingsPanel = document.getElementById("settingsPanel");
     const songListContainer = document.getElementById("songListContainer");
     const versionFooter = document.getElementById("versionFooter");
 
@@ -49,9 +175,14 @@
     loadFromStorage();
 
     // Save format preference when changed
-    formatRadios.forEach(r => r.addEventListener("change", () => {
-        api.storage.local.set({ sunoFormat: getSelectedFormat() });
+    formatRadios.forEach(r => r.addEventListener("change", async () => {
+        await savePreferenceToIDB('sunoFormat', getSelectedFormat());
     }));
+
+    // Save folder preference when changed
+    folderInput.addEventListener("change", () => {
+        saveToStorage();
+    });
 
     // Check if fetching is in progress
     checkFetchState();
@@ -64,12 +195,10 @@
             downloadBtn.disabled = true;
             downloadBtn.textContent = "Downloading...";
             stopDownloadBtn.classList.remove("hidden");
-            backBtn.disabled = true;
         } else {
             downloadBtn.disabled = false;
             downloadBtn.textContent = "Download Selected";
             stopDownloadBtn.classList.add("hidden");
-            backBtn.disabled = false;
         }
     }
 
@@ -77,7 +206,6 @@
         try {
             const response = await api.runtime.sendMessage({ action: "get_fetch_state" });
             if (response && response.isFetching) {
-                stopBtn.classList.remove("hidden");
                 statusDiv.innerText = "Fetching in progress...";
             }
         } catch (e) {
@@ -86,15 +214,28 @@
     }
 
     function startAutoFetch() {
-        const isPublicOnly = publicCheckbox.checked;
-        const maxPages = parseInt(maxPagesInput.value) || 0;
-        stopBtn.classList.remove("hidden");
         statusDiv.innerText = "Fetching songs...";
-        api.runtime.sendMessage({
-            action: "fetch_songs",
-            isPublicOnly: isPublicOnly,
-            maxPages: maxPages
-        });
+        console.log('[Downloader] Starting auto fetch...');
+        try {
+            api.runtime.sendMessage({
+                action: "fetch_songs",
+                isPublicOnly: isPublicOnly,
+                maxPages: maxPages
+            }, (response) => {
+                if (chrome.runtime.lastError) {
+                    console.debug('[Downloader] Message error:', chrome.runtime.lastError);
+                    statusDiv.innerText = "Fetching songs in background...";
+                } else if (response && response.error) {
+                    console.error('[Downloader] Fetch songs error:', response.error);
+                    statusDiv.innerText = response.error;
+                } else {
+                    console.log('[Downloader] Fetch request sent successfully');
+                }
+            });
+        } catch (e) {
+            console.debug('[Downloader] Could not send fetch request:', e.message);
+            statusDiv.innerText = "Fetching songs in background...";
+        }
     }
 
     async function checkDownloadState() {
@@ -111,79 +252,97 @@
 
     async function loadFromStorage() {
         try {
-            const result = await api.storage.local.get(['sunoSongsList', 'sunoFormat']);
-            const data = result.sunoSongsList;
+            console.log('[Downloader] Loading songs from IndexedDB...');
+            // Load songs from IndexedDB
+            const savedSongs = await loadSongsFromIDB();
+            const savedFormat = await loadPreferenceFromIDB('sunoFormat');
+            const savedSongsMeta = await loadPreferenceFromIDB('sunoSongsList');
 
-            // Load saved format preference first (outside data check so it always loads)
-            if (result.sunoFormat) {
-                const radio = document.querySelector(`input[name="format"][value="${result.sunoFormat}"]`);
+            console.log('[Downloader] Loaded', savedSongs?.length || 0, 'songs from IndexedDB');
+
+            // Load saved format preference first
+            if (savedFormat) {
+                const radio = document.querySelector(`input[name="format"][value="${savedFormat}"]`);
                 if (radio) radio.checked = true;
             }
-            if (data) {
-                allSongs = data.songs || [];
+            
+            if (savedSongs && savedSongs.length > 0) {
+                allSongs = savedSongs;
                 filteredSongs = [...allSongs];
 
-                // Restore settings
-                if (data.folder) folderInput.value = data.folder;
-                if (data.format) {
-                    const radio = document.querySelector(`input[name="format"][value="${data.format}"]`);
-                    if (radio) radio.checked = true;
+                // Restore settings from metadata
+                if (savedSongsMeta) {
+                    if (savedSongsMeta.folder) folderInput.value = savedSongsMeta.folder;
+                    if (savedSongsMeta.format) {
+                        const radio = document.querySelector(`input[name="format"][value="${savedSongsMeta.format}"]`);
+                        if (radio) radio.checked = true;
+                    }
                 }
-                if (data.publicOnly !== undefined) publicCheckbox.checked = data.publicOnly;
-                if (data.maxPages !== undefined) maxPagesInput.value = data.maxPages;
 
-                if (allSongs.length > 0) {
-                    // Go directly to song list
-                    settingsPanel.style.display = "none";
-                    songListContainer.style.display = "block";
-                    filterInput.value = "";
-                    selectAllCheckbox.checked = true;
-                    await loadFilterPreferences();
-                    renderSongList();
-                    statusDiv.innerText = `${allSongs.length} cached songs. Checking for new...`;
+                // Go directly to song list
+                songListContainer.style.display = "block";
+                filterInput.value = "";
+                selectAllCheckbox.checked = true;
+                await loadFilterPreferences();
+                renderSongList();
+                statusDiv.innerText = `${allSongs.length} cached songs. Checking for new...`;
 
-                    // Check for new songs
-                    setTimeout(() => checkForNewSongs(), 100);
-                    return;
-                }
+                console.log('[Downloader] Showing cached songs, checking for new songs...');
+                // Check for new songs
+                setTimeout(() => checkForNewSongs(), 100);
+                return;
             }
         } catch (e) {
-            console.error('Failed to load from storage:', e);
+            console.error('[Downloader] Error loading from storage:', e);
         }
 
+        console.log('[Downloader] No cached songs found, starting auto-fetch...');
         // No cached songs — auto-start a full fetch immediately
-        settingsPanel.style.display = "block";
-        songListContainer.style.display = "none";
+        songListContainer.style.display = "block";
         startAutoFetch();
     }
 
     function checkForNewSongs() {
-        const isPublicOnly = publicCheckbox.checked;
-        const maxPages = parseInt(maxPagesInput.value) || 0;
+        const isPublicOnly = false; // filterPublic not available here
+        const maxPages = 0;
         const knownIds = allSongs.map(s => s.id);
 
-        api.runtime.sendMessage({
-            action: "fetch_songs",
-            isPublicOnly: isPublicOnly,
-            maxPages: maxPages,
-            checkNewOnly: true,
-            knownIds: knownIds
-        });
+        console.log('[Downloader] Checking for new songs. Currently have', allSongs.length, 'songs cached.');
+        
+        try {
+            api.runtime.sendMessage({
+                action: "fetch_songs",
+                isPublicOnly: isPublicOnly,
+                maxPages: maxPages,
+                checkNewOnly: true,
+                knownIds: knownIds
+            }, (response) => {
+                if (chrome.runtime.lastError) {
+                    console.debug('[Downloader] Check for new songs error:', chrome.runtime.lastError);
+                } else if (response && response.error) {
+                    console.log('[Downloader] Check for new songs error:', response.error);
+                } else {
+                    console.log('[Downloader] Check for new songs request sent');
+                }
+            });
+        } catch (e) {
+            console.debug('[Downloader] Could not check for new songs:', e.message);
+        }
     }
 
     async function saveToStorage() {
         try {
-            await api.storage.local.set({
-                sunoSongsList: {
-                    songs: allSongs,
-                    folder: folderInput.value,
-                    format: getSelectedFormat(),
-                    publicOnly: publicCheckbox.checked,
-                    maxPages: parseInt(maxPagesInput.value) || 0,
-                    timestamp: Date.now()
-                },
-                sunoFormat: getSelectedFormat()
-            });
+            // Save songs to IndexedDB
+            await saveSongsToIDB(allSongs);
+            
+            // Save metadata
+            const metadata = {
+                folder: folderInput.value,
+                format: getSelectedFormat(),
+                timestamp: Date.now()
+            };
+            await savePreferenceToIDB('sunoSongsList', metadata);
+            await savePreferenceToIDB('sunoFormat', getSelectedFormat());
         } catch (e) {
             console.error('Failed to save to storage:', e);
         }
@@ -191,11 +350,9 @@
 
     async function saveFilterPreferences() {
         try {
-            await api.storage.local.set({
-                sunoFilterLiked: filterLiked.checked,
-                sunoFilterStems: filterStems.checked,
-                sunoFilterPublic: filterPublic.checked
-            });
+            await savePreferenceToIDB('sunoFilterLiked', filterLiked.checked);
+            await savePreferenceToIDB('sunoFilterStems', filterStems.checked);
+            await savePreferenceToIDB('sunoFilterPublic', filterPublic.checked);
         } catch (e) {
             console.error('Failed to save filter preferences:', e);
         }
@@ -203,16 +360,13 @@
 
     async function loadFilterPreferences() {
         try {
-            const result = await api.storage.local.get(['sunoFilterLiked', 'sunoFilterStems', 'sunoFilterPublic']);
-            if (result.sunoFilterLiked !== undefined) {
-                filterLiked.checked = result.sunoFilterLiked;
-            }
-            if (result.sunoFilterStems !== undefined) {
-                filterStems.checked = result.sunoFilterStems;
-            }
-            if (result.sunoFilterPublic !== undefined) {
-                filterPublic.checked = result.sunoFilterPublic;
-            }
+            const liked = await loadPreferenceFromIDB('sunoFilterLiked');
+            const stems = await loadPreferenceFromIDB('sunoFilterStems');
+            const pub = await loadPreferenceFromIDB('sunoFilterPublic');
+            
+            if (liked !== null) filterLiked.checked = liked;
+            if (stems !== null) filterStems.checked = stems;
+            if (pub !== null) filterPublic.checked = pub;
         } catch (e) {
             console.error('Failed to load filter preferences:', e);
         }
@@ -235,27 +389,9 @@
 
     async function clearStorage() {
         try {
-            await api.storage.local.remove('sunoSongsList');
+            await deletePreferenceFromIDB('sunoSongsList');
         } catch (e) {}
     }
-
-    // Stop fetching
-    stopBtn.addEventListener("click", () => {
-        api.runtime.sendMessage({ action: "stop_fetch" });
-        stopBtn.classList.add("hidden");
-        statusDiv.innerText = "Stopped by user.\n" + statusDiv.innerText;
-    });
-
-    // Back button — clears cached songs and restarts auto-fetch
-    backBtn.addEventListener("click", () => {
-        settingsPanel.style.display = "block";
-        songListContainer.style.display = "none";
-        stopBtn.classList.add("hidden");
-        allSongs = [];
-        filteredSongs = [];
-        clearStorage();
-        setTimeout(() => startAutoFetch(), 100);
-    });
 
     // Filter input
     filterInput.addEventListener("input", () => {
@@ -305,13 +441,17 @@
 
         setDownloadUiState(true);
 
-        api.runtime.sendMessage({
-            action: "download_selected",
-            folderName: folder,
-            format: format,
-            songs: songsToDownload,
-            downloadOptions: downloadOptions
-        });
+        try {
+            api.runtime.sendMessage({
+                action: "download_selected",
+                folderName: folder,
+                format: format,
+                songs: songsToDownload,
+                downloadOptions: downloadOptions
+            });
+        } catch (e) {
+            console.debug('[Downloader] Could not send download request:', e.message);
+        }
 
         const selectedTypes = [];
         if (downloadOptions.music) selectedTypes.push(format.toUpperCase());
@@ -322,7 +462,11 @@
 
     // Stop downloading
     stopDownloadBtn.addEventListener("click", () => {
-        api.runtime.sendMessage({ action: "stop_download" });
+        try {
+            api.runtime.sendMessage({ action: "stop_download" });
+        } catch (e) {
+            console.debug('[Downloader] Could not send stop download request:', e.message);
+        }
         statusDiv.innerText = "Stopping download...\n" + statusDiv.innerText;
         // Keep UI in running state until background confirms stop/complete
     });
@@ -331,6 +475,37 @@
     api.runtime.onMessage.addListener((message) => {
         if (message.action === "log") {
             statusDiv.innerText = message.text + "\n" + statusDiv.innerText;
+        }
+
+        if (message.action === "songs_page_update") {
+            // Incremental page update
+            const newSongs = message.songs || [];
+            const wasCheckingNew = message.checkNewOnly && allSongs.length > 0;
+
+            if (wasCheckingNew) {
+                // Merge with existing songs
+                const addedCount = mergeSongs(newSongs);
+                statusDiv.innerText = `Page ${message.pageNum}: ${message.totalSongs} new songs found...`;
+            } else {
+                // Fresh fetch - replace all
+                allSongs = newSongs;
+                filteredSongs = [...allSongs];
+
+                // Show song list immediately after first page
+                if (message.pageNum === 1) {
+                    songListContainer.style.display = "block";
+                    filterInput.value = "";
+                    selectAllCheckbox.checked = true;
+                    loadFilterPreferences().then(() => {
+                        renderSongList();
+                    });
+                } else {
+                    // Just update the list
+                    applyFilter();
+                }
+                saveToStorage();
+                statusDiv.innerText = `Page ${message.pageNum}: ${allSongs.length} songs...`;
+            }
         }
 
         if (message.action === "download_state") {
@@ -354,28 +529,28 @@
                     statusDiv.innerText = `${allSongs.length} songs (no new songs found).`;
                 }
             } else {
-                // Fresh fetch - replace all
+                // Fresh fetch complete
                 allSongs = newSongs;
                 filteredSongs = [...allSongs];
 
-                settingsPanel.style.display = "none";
-                songListContainer.style.display = "block";
-
-                filterInput.value = "";
-                selectAllCheckbox.checked = true;
-
-                loadFilterPreferences().then(() => {
-                    renderSongList();
-                });
+                // Only show song list if not already visible (page updates already showed it)
+                if (songListContainer.style.display !== "block") {
+                    songListContainer.style.display = "block";
+                    filterInput.value = "";
+                    selectAllCheckbox.checked = true;
+                    loadFilterPreferences().then(() => {
+                        renderSongList();
+                    });
+                } else {
+                    // Just update the final list
+                    applyFilter();
+                }
                 saveToStorage();
-                statusDiv.innerText = `Found ${allSongs.length} songs.`;
+                statusDiv.innerText = `✅ Complete! Found ${allSongs.length} songs total.`;
             }
-
-            stopBtn.classList.add("hidden");
         }
 
         if (message.action === "fetch_error") {
-            stopBtn.classList.add("hidden");
             statusDiv.innerText = message.error;
         }
 
@@ -419,7 +594,14 @@
     function renderSongList() {
         songList.innerHTML = "";
 
-        filteredSongs.forEach(song => {
+        const songsToRender = [...filteredSongs].sort((a, b) => {
+            const aTs = getSongTimestamp(a);
+            const bTs = getSongTimestamp(b);
+            if (bTs !== aTs) return bTs - aTs;
+            return (a.title || '').localeCompare(b.title || '');
+        });
+
+        songsToRender.forEach(song => {
             const item = document.createElement("div");
             item.className = "song-item";
 
@@ -504,5 +686,11 @@
         } catch {
             return '';
         }
+    }
+
+    function getSongTimestamp(song) {
+        const raw = song?.created_at || song?.createdAt || song?.timestamp;
+        const ts = raw ? Date.parse(raw) : NaN;
+        return Number.isFinite(ts) ? ts : 0;
     }
 })();

@@ -18,7 +18,7 @@
       </div>
       <div id="suno-notif-tabs">
         <button class="suno-notif-tab active" data-tab="notifications">Notifications</button>
-        <button class="suno-notif-tab"  data-tab="library">Library</button>
+        <button class="suno-notif-tab"  data-tab="library">Download Songs</button>
         <button class="suno-notif-tab" data-tab="settings">Settings</button>
       </div>
       <div id="suno-notif-list" class="suno-notif-content">
@@ -26,22 +26,6 @@
       </div>
       <div id="suno-notif-library-content" class="suno-notif-content" style="display: none;">
         <div id="suno-downloader-wrapper">
-          <div id="settingsPanel">
-            <div class="form-group">
-              <label>Download Folder</label>
-              <input type="text" id="folder" value="Suno_Songs" placeholder="Folder name in Downloads" />
-            </div>
-            <div class="form-group">
-              <label>Max Pages to Load</label>
-              <input type="number" id="maxPages" value="0" min="0" style="width: 100px" placeholder="0 for unlimited" />
-            </div>
-            <div class="checkbox-label">
-              <input title="Fetch public songs only" type="checkbox" id="publicOnly" />
-              Fetch Public Songs Only
-            </div>
-            <button id="stopBtn" class="btn-stop hidden">Stop Fetching</button>
-          </div>
-
           <div id="songListContainer">
             <div id="downloadTypeControls">
               <label>Download:</label>
@@ -92,7 +76,6 @@
             <div id="songList"></div>
 
             <div class="btn-row">
-              <button id="backBtn" class="btn-secondary">← Back</button>
               <button id="downloadBtn" class="btn-primary" style="flex: 2">Download Selected</button>
               <button id="stopDownloadBtn" class="btn-stop hidden">Stop</button>
             </div>
@@ -105,30 +88,23 @@
       <div id="suno-notif-settings-content" class="suno-notif-content" style="display: none;">
         <div class="suno-notif-settings-form">
           <div class="suno-notif-setting-row">
-            <label>
-              <input type="checkbox" id="suno-setting-enabled" class="suno-setting" data-key="enabled">
-              Enabled
-            </label>
-          </div>
-          <div class="suno-notif-setting-row">
             <label>Polling Interval (seconds):</label>
-            <input type="number" id="suno-setting-interval" class="suno-setting" data-key="intervalMs" min="10" step="10">
+            <input type="number" id="suno-setting-interval" class="suno-setting" data-key="intervalMs" min="10" step="10" value="120">
           </div>
           <div class="suno-notif-setting-row">
             <label>
-              <input type="checkbox" id="suno-setting-desktop" class="suno-setting" data-key="desktopNotificationsEnabled">
+              <input type="checkbox" checked="" id="suno-setting-desktop" class="suno-setting" data-key="desktopNotificationsEnabled">
               Desktop Notifications
             </label>
           </div>
           <div class="suno-notif-setting-row">
-            <label>Load notifications after (UTC):</label>
-            <input type="datetime-local" id="suno-setting-after-utc" class="suno-setting" data-key="initialAfterUtc">
+            <label>Download Folder:</label>
+            <input type="text" id="folder" class="suno-setting" data-key="downloadFolder" value="Suno_Songs" placeholder="Folder name in Downloads" style="flex: 1;" />
+          </div>
+          <div class="suno-notif-setting-row">
+            <button id="suno-fetch-songs-btn" class="btn-primary" style="padding: 8px 16px; cursor: pointer;">Fetch Songs</button>
           </div>
         </div>
-      </div>
-      <div id="suno-notif-footer">
-        <button id="suno-notif-load">Load existing</button>
-        <button id="suno-notif-clear">Clear all</button>
       </div>
     </div>
     <button id="suno-notif-bell" title="BetterSuno">
@@ -144,15 +120,11 @@
   const panel = root.querySelector('#suno-notif-panel');
   const list = root.querySelector('#suno-notif-list');
   const status = root.querySelector('#suno-notif-status');
-  const clearBtn = root.querySelector('#suno-notif-clear');
-  const loadBtn = root.querySelector('#suno-notif-load');
   const tabButtons = root.querySelectorAll('.suno-notif-tab');
   const title = root.querySelector('#suno-notif-title');
   const settingsContent = root.querySelector('#suno-notif-settings-content');
   const libraryContent = root.querySelector('#suno-notif-library-content');
   
-  let currentTab = 'notifications';
-
   // ---- Toggle panel ----
   bell.addEventListener('click', () => {
     panelOpen = !panelOpen;
@@ -173,15 +145,6 @@
     }
   });
 
-  // ---- Clear notifications ----
-  clearBtn.addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'clearNotifications', tabId: 'global' }, () => {
-      lastSeenCount = 0;
-      badge.style.display = 'none';
-      badge.textContent = '0';
-    });
-  });
-
   // ---- Tab switching ----
   tabButtons.forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -193,25 +156,20 @@
       e.target.classList.add('active');
       
       // Switch content visibility
-      const footer = root.querySelector('#suno-notif-footer');
+      title.textContent = 'BetterSuno';
+      
       if (tab === 'notifications') {
-        title.textContent = 'BetterSuno';
         list.style.display = 'block';
         settingsContent.style.display = 'none';
         libraryContent.style.display = 'none';
-        footer.style.display = 'flex';
       } else if (tab === 'library') {
-        title.textContent = 'Library';
         list.style.display = 'none';
         settingsContent.style.display = 'none';
         libraryContent.style.display = 'block';
-        footer.style.display = 'none';
       } else {
-        title.textContent = 'Settings';
         list.style.display = 'none';
         settingsContent.style.display = 'block';
         libraryContent.style.display = 'none';
-        footer.style.display = 'none';
         loadSettings();
       }
     });
@@ -219,75 +177,73 @@
 
   // ---- Load settings from background ----
   function loadSettings() {
-    chrome.runtime.sendMessage({ type: 'contentGetState' }, (response) => {
-      if (chrome.runtime.lastError || !response) return;
-      const state = response;
-      
-      document.getElementById('suno-setting-enabled').checked = state.enabled || false;
-      document.getElementById('suno-setting-interval').value = (state.intervalMs || 120000) / 1000;
-      document.getElementById('suno-setting-desktop').checked = state.desktopNotificationsEnabled !== false;
-      
-      // Convert UTC to local datetime for display
-      if (state.initialAfterUtc) {
-        const utcDate = new Date(state.initialAfterUtc);
-        document.getElementById('suno-setting-after-utc').value = utcDate.toISOString().slice(0, 16);
-      } else {
-        document.getElementById('suno-setting-after-utc').value = '';
-      }
-    });
+    try {
+      chrome.runtime.sendMessage({ type: 'contentGetState' }, (response) => {
+        if (chrome.runtime.lastError || !response) return;
+        const state = response;
+        
+        document.getElementById('suno-setting-interval').value = (state.intervalMs || 120000) / 1000;
+        document.getElementById('suno-setting-desktop').checked = state.desktopNotificationsEnabled !== false;
+      });
+    } catch (e) {
+      console.debug('[SunoNotif] Extension context unavailable');
+    }
   }
 
   // ---- Save settings on change ----
   const settingsControls = root.querySelectorAll('.suno-setting');
   settingsControls.forEach(control => {
     control.addEventListener('change', () => {
-      const enabled = document.getElementById('suno-setting-enabled').checked;
       const intervalSeconds = Number(document.getElementById('suno-setting-interval').value);
       const intervalMs = intervalSeconds * 1000;
       const desktopNotifications = document.getElementById('suno-setting-desktop').checked;
-      const afterUtcInput = document.getElementById('suno-setting-after-utc').value;
       
-      // Convert local datetime to UTC ISO string
-      let initialAfterUtc = null;
-      if (afterUtcInput) {
-        const localDate = new Date(afterUtcInput);
-        initialAfterUtc = localDate.toISOString();
+      try {
+        chrome.runtime.sendMessage({
+          type: 'contentUpdateSettings',
+          tabId: 'global',
+          settings: {
+            enabled: true,
+            intervalMs,
+            desktopNotificationsEnabled: desktopNotifications
+          }
+        }, (response) => {
+          if (!chrome.runtime.lastError) {
+            console.log('[SunoNotif] Settings updated');
+          }
+        });
+      } catch (e) {
+        console.debug('[SunoNotif] Could not send settings update');
       }
-      
-      chrome.runtime.sendMessage({
-        type: 'contentUpdateSettings',
-        tabId: 'global',
-        settings: {
-          enabled,
-          intervalMs,
-          desktopNotificationsEnabled: desktopNotifications,
-          initialAfterUtc
-        }
-      }, (response) => {
-        if (!chrome.runtime.lastError) {
-          console.log('[SunoNotif] Settings updated');
-        }
-      });
     });
   });
 
-  // ---- Load existing notifications from Suno ----
-  loadBtn.addEventListener('click', () => {
-    console.log('[SunoNotif] Load existing clicked');
-    loadBtn.textContent = 'Loading…';
-    loadBtn.disabled = true;
-    chrome.runtime.sendMessage({ type: 'contentFetchExisting' }, (result) => {
-      console.log('[SunoNotif] Load existing response:', result);
-      loadBtn.disabled = false;
-      if (result?.ok) {
-        loadBtn.textContent = `Loaded ${result.count}`;
-      } else {
-        loadBtn.textContent = 'Load existing';
-        console.log('[SunoNotif] Load failed:', result?.reason || 'unknown error');
+  // ---- Fetch Songs button ----
+  const fetchSongsBtn = root.querySelector('#suno-fetch-songs-btn');
+  if (fetchSongsBtn) {
+    fetchSongsBtn.addEventListener('click', () => {
+      fetchSongsBtn.disabled = true;
+      fetchSongsBtn.textContent = 'Fetching...';
+      
+      try {
+        chrome.runtime.sendMessage({
+          action: 'fetch_songs',
+          isPublicOnly: false,
+          maxPages: 0
+        });
+      } catch (e) {
+        console.debug('[SunoNotif] Could not send fetch songs command');
       }
-      refresh();
+      
+      // Re-enable button after a short delay
+      setTimeout(() => {
+        fetchSongsBtn.disabled = false;
+        fetchSongsBtn.textContent = 'Fetch Songs';
+      }, 1000);
+      
+      console.log('[SunoNotif] Fetch songs request sent');
     });
-  });
+  }
 
   // ---- Time formatting ----
   function formatAgo(ts) {
@@ -436,10 +392,14 @@
         root.remove();
         return;
       }
-      chrome.runtime.sendMessage({ type: 'contentGetState' }, (response) => {
-        if (chrome.runtime.lastError || !response) return;
-        renderNotifications(response.notifications, response.enabled);
-      });
+      try {
+        chrome.runtime.sendMessage({ type: 'contentGetState' }, (response) => {
+          if (chrome.runtime.lastError || !response) return;
+          renderNotifications(response.notifications, response.enabled);
+        });
+      } catch (e) {
+        console.debug('[SunoNotif] Could not refresh state');
+      }
     } catch (e) {
       // Extension context invalidated (likely extension reloaded)
       clearInterval(refreshInterval);
@@ -456,28 +416,42 @@
 
   // ---- Ensure button stays visible (combat Suno's CSS/JS that may hide it) ----
   function ensureVisibility() {
-    if (!root.parentNode) return; // Element was removed
-    
+    // Re-attach root if Suno replaces/removes body children during SPA updates.
+    if (!document.documentElement.contains(root)) {
+      if (document.body) {
+        document.body.appendChild(root);
+      } else {
+        document.documentElement.appendChild(root);
+      }
+    }
+
+    root.style.setProperty('position', 'fixed', 'important');
+    root.style.setProperty('bottom', '20px', 'important');
+    root.style.setProperty('right', '20px', 'important');
+    root.style.setProperty('left', 'auto', 'important');
+    root.style.setProperty('top', 'auto', 'important');
     root.style.setProperty('display', 'block', 'important');
     root.style.setProperty('visibility', 'visible', 'important');
     root.style.setProperty('opacity', '1', 'important');
     root.style.setProperty('pointer-events', 'auto', 'important');
     root.style.setProperty('z-index', '9999999999', 'important');
-    
+
     bell.style.setProperty('display', 'flex', 'important');
     bell.style.setProperty('visibility', 'visible', 'important');
     bell.style.setProperty('opacity', '1', 'important');
     bell.style.setProperty('pointer-events', 'auto', 'important');
   }
 
-  // Run visibility check frequently during and after page load
+  // Run visibility check frequently to ensure bell always stays visible.
   let visibilityCheckInterval = setInterval(ensureVisibility, 100);
-  
-  // After 10 seconds, slow down to every 2 seconds as a fallback
-  setTimeout(() => {
-    clearInterval(visibilityCheckInterval);
-    visibilityCheckInterval = setInterval(ensureVisibility, 2000);
-  }, 10000);
+  ensureVisibility();
+
+  // Watch for DOM mutations and immediately re-assert visibility after route/layout changes.
+  const visibilityObserver = new MutationObserver(() => ensureVisibility());
+  visibilityObserver.observe(document.documentElement, {
+    childList: true,
+    subtree: true
+  });
 
   // ============================================================================
   // Notifications Initialization — (downloader.js handles Library tab)
@@ -487,14 +461,22 @@
   refresh();
 
   // Auto-load existing notifications if there are none stored yet
-  chrome.runtime.sendMessage({ type: 'contentGetState' }, (response) => {
-    if (chrome.runtime.lastError || !response) return;
-    if (!response.notifications || response.notifications.length === 0) {
-      chrome.runtime.sendMessage({ type: 'contentFetchExisting' }, () => {
-        refresh();
-      });
-    }
-  });
+  try {
+    chrome.runtime.sendMessage({ type: 'contentGetState' }, (response) => {
+      if (chrome.runtime.lastError || !response) return;
+      if (!response.notifications || response.notifications.length === 0) {
+        try {
+          chrome.runtime.sendMessage({ type: 'contentFetchExisting' }, () => {
+            refresh();
+          });
+        } catch (e) {
+          console.debug('[SunoNotif] Could not fetch existing notifications');
+        }
+      }
+    });
+  } catch (e) {
+    console.debug('[SunoNotif] Extension context unavailable');
+  }
 
   // Periodic refresh as fallback (in case stateUpdate messages are missed)
   refreshInterval = setInterval(refresh, 30000);

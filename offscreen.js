@@ -47,6 +47,18 @@ const STATES = {};  // tabId → last known state
 const LAST_REQUEST_AT = {}; // tabId → timestamp (ms)
 var LAST_REQUEST_AT_ALL = 0; // global timestamp (ms)
 
+// Notify background that offscreen document is running
+try {
+  const port = chrome.runtime.connect({ name: "offscreen-document" });
+  log("Connected to background");
+  
+  port.onDisconnect.addListener(() => {
+    log("Disconnected from background");
+  });
+} catch (e) {
+  log("Failed to connect to background:", e.message);
+}
+
 // Alle 30 Sekunden Keepalive-Ping an background senden
 setInterval(() => {
   chrome.runtime.sendMessage({ type: "offscreenKeepalivePing" });

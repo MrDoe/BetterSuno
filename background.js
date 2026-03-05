@@ -1,4 +1,9 @@
 // background.js — Verbesserte Token-Verwaltung ohne Tab-Dependency
+// Import IndexedDB functions
+import * as IDBStore from './idb-store.js';
+
+// Verify module imported successfully
+console.log('[BACKGROUND-INIT] IDBStore module loaded:', typeof IDBStore, 'functions available:', Object.keys(IDBStore).length);
 
 function logFormatDate(ts) {
   const date = ts ? new Date(ts) : null;
@@ -14,6 +19,9 @@ function logFormatDate(ts) {
 function log(...args) {
   console.log("[BACKGROUND]", ...args, "at", logFormatDate(Date.now()));
 }
+
+// Log that background.js is loading
+log("=== BACKGROUND.JS LOADING ===");
 
 setInterval(() => {
   log("heartbeat");
@@ -37,8 +45,12 @@ const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
 let stateReady;
 const stateReadyPromise = new Promise(r => { stateReady = r; });
 
+// Offscreen document creation guard (prevent race conditions)
+let offscreenCreating = false;
+let offscreenExists = false;
+
 // ============================================================================
-// Persistence via chrome.storage.local
+// Persistence via IndexedDB (persistent across browser sessions)
 // ============================================================================
 
 // Fields that are worth saving across restarts.
@@ -52,41 +64,39 @@ const PERSIST_FIELDS = [
   'desktopNotificationsEnabled',
 ];
 
-function saveState() {
-  const toSave = {};
-  for (const [key, st] of Object.entries(tabState)) {
-    toSave[key] = {};
-    for (const f of PERSIST_FIELDS) {
-      toSave[key][f] = st[f];
+async function saveState() {
+  try {
+    for (const [tabId, st] of Object.entries(tabState)) {
+      const toSave = {};
+      for (const f of PERSIST_FIELDS) {
+        toSave[f] = st[f];
+      }
+      await IDBStore.saveTabState(tabId, toSave);
     }
+  } catch (err) {
+    log('saveState error:', err.message);
   }
-  chrome.storage.local.set({ sunoState: toSave }, () => {
-    if (chrome.runtime.lastError) {
-      log('saveState error:', chrome.runtime.lastError.message);
-    }
-  });
 }
 
 async function loadState() {
-  return new Promise(resolve => {
-    chrome.storage.local.get('sunoState', result => {
-      const saved = result.sunoState || {};
-      for (const [key, fields] of Object.entries(saved)) {
-        const st = ensureTabState(key);
-        for (const f of PERSIST_FIELDS) {
-          if (fields[f] !== undefined) st[f] = fields[f];
-        }
-        log('loadState: restored', (fields.notifications || []).length, 'notifications for', key);
+  try {
+    const states = await IDBStore.getAllTabStates();
+    for (const [tabId, fields] of Object.entries(states)) {
+      const st = ensureTabState(tabId);
+      for (const f of PERSIST_FIELDS) {
+        if (fields[f] !== undefined) st[f] = fields[f];
       }
-      resolve();
-    });
-  });
+      log('loadState: restored', (fields.notifications || []).length, 'notifications for', tabId);
+    }
+  } catch (err) {
+    log('loadState error:', err.message);
+  }
 }
 
 function ensureTabState(tabId) {
   if (!tabState[tabId]) {
     tabState[tabId] = {
-      enabled: false,
+      enabled: true,
       intervalMs: DEFAULT_INTERVAL_MS,
       initialAfterUtc: null,
       token: null,
@@ -403,13 +413,70 @@ async function ensureValidToken(tabId) {
 // ============================================================================
 
 async function ensureOffscreen() {
-  const exists = await chrome.offscreen.hasDocument();
-  if (!exists) {
+  // Quick return if we already know it exists
+  if (offscreenExists) {
+    return;
+  }
+
+  // If creation is already in progress, wait for it
+  if (offscreenCreating) {
+    let attempts = 0;
+    while (offscreenCreating && attempts < 50) {
+      await new Promise(r => setTimeout(r, 100));
+      attempts++;
+    }
+    return;
+  }
+
+  try {
+    const exists = await chrome.offscreen.hasDocument();
+    if (exists) {
+      offscreenExists = true;
+      return;
+    }
+
+    // Mark as creating to prevent race conditions
+    offscreenCreating = true;
+    
     await chrome.offscreen.createDocument({
       url: "offscreen.html",
       reasons: ["BLOBS"],
       justification: "Suno polling"
     });
+    
+    offscreenExists = true;
+    log("✓ Offscreen document created successfully");
+  } catch (err) {
+    // If error is that document already exists, that's fine
+    if (err.message && err.message.includes("offscreen document may be created")) {
+      log("ℹ Offscreen document already exists");
+      offscreenExists = true;
+    } else {
+      log("⚠ Error creating offscreen document:", err.message);
+    }
+  } finally {
+    offscreenCreating = false;
+  }
+}
+
+/**
+ * Send a message to the offscreen document with error handling
+ * If the offscreen document is not available, marks it for recreation
+ */
+async function sendToOffscreen(message) {
+  try {
+    await chrome.runtime.sendMessage(message);
+  } catch (err) {
+    // If offscreen is not available, mark it for recreation
+    if (err.message && (err.message.includes("Could not establish connection") || err.message.includes("Receiving end does not exist"))) {
+      log("⚠ Offscreen document disconnected, marking for recreation");
+      offscreenExists = false;
+      offscreenCreating = false;
+      // Try to recreate it
+      await ensureOffscreen();
+    } else {
+      log("⚠ Error sending to offscreen:", err.message);
+    }
   }
 }
 
@@ -643,7 +710,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     saveState();
 
     ensureOffscreen().then(() => {
-      chrome.runtime.sendMessage({
+      sendToOffscreen({
         type: "offscreenSetState",
         tabId: msg.tabId,
         state: { ...st }
@@ -660,7 +727,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     saveState();
 
-    chrome.runtime.sendMessage({
+    sendToOffscreen({
       type: "offscreenSetState",
       tabId: msg.tabId,
       state: { ...st }
@@ -803,9 +870,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === "fetch_songs") {
+    log("[MSG] fetch_songs received - isPublicOnly:", msg.isPublicOnly, "maxPages:", msg.maxPages, "checkNewOnly:", msg.checkNewOnly, "knownIds count:", msg.knownIds?.length || 0);
     stopFetchRequested = false;
     isFetching = true;
     fetchRequestorTabId = sender.tab?.id || null;
+    log("[MSG] Starting fetchSongsList for tab", fetchRequestorTabId);
     fetchSongsList(msg.isPublicOnly, msg.maxPages, msg.checkNewOnly, msg.knownIds);
   }
 
@@ -817,6 +886,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "stop_fetch") {
     stopFetchRequested = true;
     isFetching = false;
+    // Set the stop flag in the page context so content-fetcher.js sees it
+    if (fetchRequestorTabId) {
+      chrome.scripting.executeScript({
+        target: { tabId: fetchRequestorTabId },
+        func: () => { window.sunoStopFetch = true; }
+      }).catch(() => {});
+    }
   }
 
   if (msg.action === "check_stop") {
@@ -884,6 +960,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   }
 
+  if (msg.action === "songs_page") {
+    // Incremental page update
+    const destTab = sender.tab?.id || fetchRequestorTabId;
+    if (destTab) {
+      chrome.tabs.sendMessage(destTab, {
+        action: "songs_page_update",
+        songs: msg.songs,
+        pageNum: msg.pageNum,
+        totalSongs: msg.totalSongs,
+        checkNewOnly: msg.checkNewOnly
+      }).catch(() => {});
+    }
+  }
+
   if (msg.action === "fetch_error_internal") {
     isFetching = false;
     const destTab = sender.tab?.id || fetchRequestorTabId;
@@ -938,14 +1028,12 @@ async function getSunoTab() {
 
 async function persistDownloadState(extra = {}) {
   try {
-    await chrome.storage.local.set({
-      [DOWNLOAD_STATE_KEY]: {
-        isDownloading,
-        stopRequested: stopDownloadRequested,
-        jobId: currentDownloadJobId,
-        activeDownloadIds: Array.from(activeDownloadIds),
-        ...extra
-      }
+    await IDBStore.savePreference(DOWNLOAD_STATE_KEY, {
+      isDownloading,
+      stopRequested: stopDownloadRequested,
+      jobId: currentDownloadJobId,
+      activeDownloadIds: Array.from(activeDownloadIds),
+      ...extra
     });
   } catch (e) {
     // ignore
@@ -954,8 +1042,8 @@ async function persistDownloadState(extra = {}) {
 
 async function readPersistedDownloadState() {
   try {
-    const result = await chrome.storage.local.get(DOWNLOAD_STATE_KEY);
-    return result?.[DOWNLOAD_STATE_KEY] || null;
+    const result = await IDBStore.getPreference(DOWNLOAD_STATE_KEY);
+    return result || null;
   } catch (e) {
     return null;
   }
@@ -1000,20 +1088,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
       notifyTab({ action: "log", text: "🔑 Extracting Auth Token..." });
     }
 
-    const tokenResults = await chrome.scripting.executeScript({
-      target: { tabId: tabId },
-      world: "MAIN",
-      func: async () => {
-        try {
-          if (window.Clerk && window.Clerk.session) {
-            return await window.Clerk.session.getToken();
-          }
-          return null;
-        } catch (e) { return null; }
-      }
-    });
-
-    const token = tokenResults[0]?.result;
+    const token = await ensureValidToken(tabId);
 
     if (!token) {
       notifyTab({ action: "fetch_error", error: "❌ Error: Could not find Auth Token. Log in first!" });
@@ -1391,7 +1466,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       if (st.enabled) {
         log('⏰ WATCHDOG: ensuring offscreen is alive for', tabId);
         await ensureOffscreen();
-        chrome.runtime.sendMessage({
+        await sendToOffscreen({
           type: "offscreenSetState",
           tabId,
           state: { ...st }
@@ -1401,6 +1476,24 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+// Handle offscreen document connection/disconnection
+try {
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name === 'offscreen-document') {
+      log("\u2713 Offscreen document connected");
+      offscreenExists = true;
+      
+      port.onDisconnect.addListener(() => {
+        log("\u26a0 Offscreen document disconnected");
+        offscreenExists = false;
+        offscreenCreating = false;
+      });
+    }
+  });
+} catch (e) {
+  log("Note: onConnect listener failed (may not be available)");
+}
+
 // Restore persisted state, then restart polling for any state that was enabled.
 loadState().then(() => {
   stateReady();  // unblock alarm handlers
@@ -1408,7 +1501,7 @@ loadState().then(() => {
     if (st.enabled) {
       log('loadState: restarting polling for', tabId);
       ensureOffscreen().then(() => {
-        chrome.runtime.sendMessage({
+        sendToOffscreen({
           type: "offscreenSetState",
           tabId,
           state: { ...st }
