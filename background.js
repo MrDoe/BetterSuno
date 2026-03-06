@@ -875,6 +875,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     isFetching = true;
     fetchRequestorTabId = sender.tab?.id || null;
     log("[MSG] Starting fetchSongsList for tab", fetchRequestorTabId);
+    // inform the page that fetching has begun so UI can show stop button
+    if (fetchRequestorTabId) {
+      try {
+        chrome.tabs.sendMessage(fetchRequestorTabId, { action: "fetch_started" });
+      } catch (e) {
+        // tab may have closed
+      }
+    }
     fetchSongsList(msg.isPublicOnly, msg.maxPages, msg.checkNewOnly, msg.knownIds);
   }
 
@@ -892,6 +900,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         target: { tabId: fetchRequestorTabId },
         func: () => { window.sunoStopFetch = true; }
       }).catch(() => {});
+
+      // Notify the requesting tab so its UI can warn the user
+      try {
+        chrome.tabs.sendMessage(fetchRequestorTabId, { action: "fetch_stopped" });
+      } catch (e) {
+        // ignore if tab gone
+      }
     }
   }
 

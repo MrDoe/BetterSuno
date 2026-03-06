@@ -30,6 +30,7 @@ BetterSuno is a Chrome/Chromium extension that enhances the Suno.com experience 
 - Desktop notification toggle
 - Download folder preference
 - Manual "Fetch Songs" action
+- **Stop Fetch** button in Settings (warns that song list may be incomplete if stopped early)
 
 ## Installation (Developer Mode)
 
@@ -37,7 +38,7 @@ BetterSuno is a Chrome/Chromium extension that enhances the Suno.com experience 
 2. Enable **Developer mode**.
 3. Click **Load unpacked**.
 4. Select this folder:
-   - `/home/christoph/Downloads/SunoNotifications`
+   - `/home/christoph/Downloads/BetterSunoications`
 5. Open `https://suno.com` and log in.
 
 The extension injects its UI directly into Suno pages.

@@ -12,7 +12,7 @@
     // IndexedDB Helper Functions
     // ========================================================================
     
-    const IDB_NAME = 'SunoNotificationsDB';
+    const IDB_NAME = 'BetterSunoicationsDB';
     const IDB_VERSION = 1;
     let dbInstance = null;
 
@@ -147,6 +147,7 @@
     const isPublicOnly = false; // fetch all songs
     const downloadBtn = document.getElementById("downloadBtn");
     const stopDownloadBtn = document.getElementById("stopDownloadBtn");
+    const stopFetchBtn = document.getElementById("bettersuno-stop-fetch-btn");
     const filterInput = document.getElementById("filterInput");
     const filterLiked = document.getElementById("filterLiked");
     const filterStems = document.getElementById("filterStems");
@@ -159,6 +160,17 @@
     const songCount = document.getElementById("songCount");
     const songListContainer = document.getElementById("songListContainer");
     const versionFooter = document.getElementById("versionFooter");
+
+    // hide stop-fetch button initially
+    if (stopFetchBtn) {
+        stopFetchBtn.style.display = 'none';
+    }
+
+    function setFetchUiState(active) {
+        if (stopFetchBtn) {
+            stopFetchBtn.style.display = active ? 'inline-block' : 'none';
+        }
+    }
 
     try {
         const version = api.runtime.getManifest()?.version;
@@ -214,6 +226,14 @@
     }
 
     function startAutoFetch() {
+        // confirm before fetching entire list
+        const proceed = confirm("BetterSuno will fetch your complete song list from Suno. It may take some time. Continue?");
+        if (!proceed) {
+            statusDiv.innerText = "Fetch cancelled.";
+            console.log('[Downloader] User cancelled song list fetch');
+            return;
+        }
+
         statusDiv.innerText = "Fetching songs...";
         console.log('[Downloader] Starting auto fetch...');
         try {
@@ -296,8 +316,8 @@
             console.error('[Downloader] Error loading from storage:', e);
         }
 
-        console.log('[Downloader] No cached songs found, starting auto-fetch...');
-        // No cached songs — auto-start a full fetch immediately
+        console.log('[Downloader] No cached songs found, will prompt before auto-fetch...');
+        // No cached songs — ask user before starting a full fetch
         songListContainer.style.display = "block";
         startAutoFetch();
     }
@@ -477,7 +497,15 @@
             statusDiv.innerText = message.text + "\n" + statusDiv.innerText;
         }
 
+        if (message.action === "fetch_started") {
+            // background informs us fetching has started (manual or auto)
+            setFetchUiState(true);
+            statusDiv.innerText = "Fetching songs...";
+        }
         if (message.action === "songs_page_update") {
+            // start or continue fetching, ensure UI shows stop button
+            setFetchUiState(true);
+
             // Incremental page update
             const newSongs = message.songs || [];
             const wasCheckingNew = message.checkNewOnly && allSongs.length > 0;
@@ -517,6 +545,7 @@
         }
 
         if (message.action === "songs_fetched") {
+            setFetchUiState(false);
             const newSongs = message.songs || [];
             const wasCheckingNew = message.checkNewOnly && allSongs.length > 0;
 
@@ -549,7 +578,13 @@
                 statusDiv.innerText = `✅ Complete! Found ${allSongs.length} songs total.`;
             }
         }
-
+        if (message.action === "fetch_stopped") {
+            setFetchUiState(false);
+            statusDiv.innerText = "⏹️ Fetch stopped by user – song list may be incomplete.";
+        }
+        if (message.action === "fetch_error") {
+            setFetchUiState(false);
+        }
         if (message.action === "fetch_error") {
             statusDiv.innerText = message.error;
         }

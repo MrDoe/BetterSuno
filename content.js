@@ -1,6 +1,6 @@
 // content.js — Floating notification panel injected into suno.com
 (function () {
-  if (document.getElementById('suno-notif-root')) return; // already injected
+  if (document.getElementById('bettersuno-root')) return; // already injected
 
   // Track how many notifications we've seen so we know which are "new"
   let lastSeenCount = 0;
@@ -8,24 +8,24 @@
 
   // ---- Build DOM ----
   const root = document.createElement('div');
-  root.id = 'suno-notif-root';
+  root.id = 'bettersuno-root';
 
   root.innerHTML = `
-    <div id="suno-notif-panel">
-      <div id="suno-notif-header">
-        <h3 id="suno-notif-title">BetterSuno</h3>
-        <span class="suno-notif-status" id="suno-notif-status">inactive</span>
+    <div id="bettersuno-panel">
+      <div id="bettersuno-header">
+        <h3 id="bettersuno-title">BetterSuno</h3>
+        <span class="bettersuno-status" id="bettersuno-status">inactive</span>
       </div>
-      <div id="suno-notif-tabs">
-        <button class="suno-notif-tab active" data-tab="notifications">Notifications</button>
-        <button class="suno-notif-tab"  data-tab="library">Download Songs</button>
-        <button class="suno-notif-tab" data-tab="settings">Settings</button>
+      <div id="bettersuno-tabs">
+        <button class="bettersuno-tab active" data-tab="notifications">Notifications</button>
+        <button class="bettersuno-tab"  data-tab="library">Download Songs</button>
+        <button class="bettersuno-tab" data-tab="settings">Settings</button>
       </div>
-      <div id="suno-notif-list" class="suno-notif-content">
-        <div class="suno-notif-empty">No notifications yet</div>
+      <div id="bettersuno-list" class="bettersuno-content">
+        <div class="bettersuno-empty">No notifications yet</div>
       </div>
-      <div id="suno-notif-library-content" class="suno-notif-content" style="display: none;">
-        <div id="suno-downloader-wrapper">
+      <div id="bettersuno-download-content" class="bettersuno-content" style="display: none;">
+        <div id="bettersuno-downloader-wrapper">
           <div id="songListContainer">
             <div id="downloadTypeControls">
               <label>Download:</label>
@@ -85,45 +85,53 @@
           <div id="versionFooter" class="version-footer"></div>
         </div>
       </div>
-      <div id="suno-notif-settings-content" class="suno-notif-content" style="display: none;">
-        <div class="suno-notif-settings-form">
-          <div class="suno-notif-setting-row">
-            <label>Polling Interval (seconds):</label>
-            <input type="number" id="suno-setting-interval" class="suno-setting" data-key="intervalMs" min="10" step="10" value="120">
+      <div id="bettersuno-settings-content" class="bettersuno-content" style="display: none;">
+        <div class="bettersuno-settings-form">
+          <div class="bettersuno-setting-row">
+            <h4>Notification Settings</h4>
           </div>
-          <div class="suno-notif-setting-row">
+          <div class="bettersuno-setting-row">
+            <label>Polling Interval (seconds):</label>
+            <input type="number" id="bettersuno-setting-interval" class="bettersuno-setting" data-key="intervalMs" min="10" step="10" value="120">
+          </div>
+          <div class="bettersuno-setting-row">
             <label>
-              <input type="checkbox" checked="" id="suno-setting-desktop" class="suno-setting" data-key="desktopNotificationsEnabled">
+              <input type="checkbox" checked="" id="bettersuno-setting-desktop" class="bettersuno-setting" data-key="desktopNotificationsEnabled">
               Desktop Notifications
             </label>
           </div>
-          <div class="suno-notif-setting-row">
-            <label>Download Folder:</label>
-            <input type="text" id="folder" class="suno-setting" data-key="downloadFolder" value="Suno_Songs" placeholder="Folder name in Downloads" style="flex: 1;" />
+          <hr>
+          <div class="bettersuno-setting-row">
+            <h4>Download Settings</h4>
           </div>
-          <div class="suno-notif-setting-row">
-            <button id="suno-fetch-songs-btn" class="btn-primary" style="padding: 8px 16px; cursor: pointer;">Fetch Songs</button>
+          <div class="bettersuno-setting-row">
+            <label>Download Folder:</label>
+            <input type="text" id="folder" class="bettersuno-setting" data-key="downloadFolder" value="Suno_Songs" placeholder="Folder name in Downloads" style="flex: 1;" />
+          </div>
+          <div class="bettersuno-setting-row" style="display: inline-flex; gap: 5px; align-items: flex-start;">
+            <button id="bettersuno-fetch-songs-btn" class="btn-primary" style="padding: 8px 16px; cursor: pointer;">Fetch Songs</button>
+            <button id="bettersuno-stop-fetch-btn" class="btn-stop" style="padding: 8px 16px; cursor: pointer; display: none;">Stop Fetch</button>
           </div>
         </div>
       </div>
     </div>
-    <button id="suno-notif-bell" title="BetterSuno">
+    <button id="bettersuno-bell" title="BetterSuno">
       <svg viewBox="0 0 24 24"><path d="m12 17.27 6.18 3.73-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-      <span id="suno-notif-badge">0</span>
+      <span id="bettersuno-badge">0</span>
     </button>
   `;
 
   document.body.appendChild(root);
 
-  const bell = root.querySelector('#suno-notif-bell');
-  const badge = root.querySelector('#suno-notif-badge');
-  const panel = root.querySelector('#suno-notif-panel');
-  const list = root.querySelector('#suno-notif-list');
-  const status = root.querySelector('#suno-notif-status');
-  const tabButtons = root.querySelectorAll('.suno-notif-tab');
-  const title = root.querySelector('#suno-notif-title');
-  const settingsContent = root.querySelector('#suno-notif-settings-content');
-  const libraryContent = root.querySelector('#suno-notif-library-content');
+  const bell = root.querySelector('#bettersuno-bell');
+  const badge = root.querySelector('#bettersuno-badge');
+  const panel = root.querySelector('#bettersuno-panel');
+  const list = root.querySelector('#bettersuno-list');
+  const status = root.querySelector('#bettersuno-status');
+  const tabButtons = root.querySelectorAll('.bettersuno-tab');
+  const title = root.querySelector('#bettersuno-title');
+  const settingsContent = root.querySelector('#bettersuno-settings-content');
+  const libraryContent = root.querySelector('#bettersuno-download-content');
   
   // ---- Toggle panel ----
   bell.addEventListener('click', () => {
@@ -182,21 +190,21 @@
         if (chrome.runtime.lastError || !response) return;
         const state = response;
         
-        document.getElementById('suno-setting-interval').value = (state.intervalMs || 120000) / 1000;
-        document.getElementById('suno-setting-desktop').checked = state.desktopNotificationsEnabled !== false;
+        document.getElementById('bettersuno-setting-interval').value = (state.intervalMs || 120000) / 1000;
+        document.getElementById('bettersuno-setting-desktop').checked = state.desktopNotificationsEnabled !== false;
       });
     } catch (e) {
-      console.debug('[SunoNotif] Extension context unavailable');
+      console.debug('[BetterSuno] Extension context unavailable');
     }
   }
 
   // ---- Save settings on change ----
-  const settingsControls = root.querySelectorAll('.suno-setting');
+  const settingsControls = root.querySelectorAll('.bettersuno-setting');
   settingsControls.forEach(control => {
     control.addEventListener('change', () => {
-      const intervalSeconds = Number(document.getElementById('suno-setting-interval').value);
+      const intervalSeconds = Number(document.getElementById('bettersuno-setting-interval').value);
       const intervalMs = intervalSeconds * 1000;
-      const desktopNotifications = document.getElementById('suno-setting-desktop').checked;
+      const desktopNotifications = document.getElementById('bettersuno-setting-desktop').checked;
       
       try {
         chrome.runtime.sendMessage({
@@ -209,21 +217,27 @@
           }
         }, (response) => {
           if (!chrome.runtime.lastError) {
-            console.log('[SunoNotif] Settings updated');
+            console.log('[BetterSuno] Settings updated');
           }
         });
       } catch (e) {
-        console.debug('[SunoNotif] Could not send settings update');
+        console.debug('[BetterSuno] Could not send settings update');
       }
     });
   });
 
   // ---- Fetch Songs button ----
-  const fetchSongsBtn = root.querySelector('#suno-fetch-songs-btn');
+  const fetchSongsBtn = root.querySelector('#bettersuno-fetch-songs-btn');
   if (fetchSongsBtn) {
     fetchSongsBtn.addEventListener('click', () => {
-      fetchSongsBtn.disabled = true;
-      fetchSongsBtn.textContent = 'Fetching...';
+      // confirm with the user before doing a full fetch
+      const ok = confirm("Fetch your entire song library from Suno? This may take a while. Proceed?");
+      if (!ok) {
+        return;
+      }
+
+      // hide the button immediately to prevent multiple clicks
+      fetchSongsBtn.style.display = 'none';
       
       try {
         chrome.runtime.sendMessage({
@@ -232,16 +246,31 @@
           maxPages: 0
         });
       } catch (e) {
-        console.debug('[SunoNotif] Could not send fetch songs command');
+        console.debug('[BetterSuno] Could not send fetch songs command');
       }
       
-      // Re-enable button after a short delay
-      setTimeout(() => {
-        fetchSongsBtn.disabled = false;
-        fetchSongsBtn.textContent = 'Fetch Songs';
-      }, 1000);
+      // Re-enable button after fetching completes (downloader.js will send a message when done)
       
-      console.log('[SunoNotif] Fetch songs request sent');
+      
+      console.log('[BetterSuno] Fetch songs request sent');
+    });
+  }
+
+  // stop fetching button
+  const stopFetchBtn = root.querySelector('#bettersuno-stop-fetch-btn');
+  if (stopFetchBtn) {
+    stopFetchBtn.addEventListener('click', () => {
+      const warn = confirm("Stopping the fetch early will likely leave your song list incomplete. Are you sure you want to stop?");
+      if (!warn) return;
+      // hide the button immediately to avoid double-clicks
+      stopFetchBtn.style.display = 'none';
+      fetchSongsBtn.style.display = 'block'; // re-show fetch button
+      try {
+        chrome.runtime.sendMessage({ action: 'stop_fetch' });
+      } catch (e) {
+        console.debug('[BetterSuno] Could not send stop fetch command');
+      }
+      console.log('[BetterSuno] Stop fetch request sent');
     });
   }
 
@@ -344,28 +373,28 @@
     }
 
     if (!notifications || notifications.length === 0) {
-      list.innerHTML = '<div class="suno-notif-empty">No notifications yet</div>';
+      list.innerHTML = '<div class="bettersuno-empty">No notifications yet</div>';
       return;
     }
 
     const html = notifications.slice(0, 50).map(n => {
       const d = describeNotif(n);
       const avatarHtml = d.avatar
-        ? `<a href="https://suno.com/@${d.firstHandle}" target="_blank"><img class="suno-notif-avatar" src="${d.avatar}"></a>`
+        ? `<a href="https://suno.com/@${d.firstHandle}" target="_blank"><img class="bettersuno-avatar" src="${d.avatar}"></a>`
         : '';
       const contentImgHtml = d.contentImg
-        ? `<a href="${d.url}" target="_blank"><img class="suno-notif-content-img" src="${d.contentImg}"></a>`
+        ? `<a href="${d.url}" target="_blank"><img class="bettersuno-content-img" src="${d.contentImg}"></a>`
         : '';
 
       return `
-        <div class="suno-notif-item">
+        <div class="bettersuno-item">
           ${avatarHtml}
-          <div class="suno-notif-body">
-            <div class="suno-notif-text">
+          <div class="bettersuno-body">
+            <div class="bettersuno-text">
               <a href="https://suno.com/@${d.firstHandle}" target="_blank">${d.who}</a>
               ${d.text}
             </div>
-            <div class="suno-notif-time">${formatAgo(d.ts)}</div>
+            <div class="bettersuno-time">${formatAgo(d.ts)}</div>
           </div>
           ${contentImgHtml}
         </div>
@@ -398,7 +427,7 @@
           renderNotifications(response.notifications, response.enabled);
         });
       } catch (e) {
-        console.debug('[SunoNotif] Could not refresh state');
+        console.debug('[BetterSuno] Could not refresh state');
       }
     } catch (e) {
       // Extension context invalidated (likely extension reloaded)
@@ -470,12 +499,12 @@
             refresh();
           });
         } catch (e) {
-          console.debug('[SunoNotif] Could not fetch existing notifications');
+          console.debug('[BetterSuno] Could not fetch existing notifications');
         }
       }
     });
   } catch (e) {
-    console.debug('[SunoNotif] Extension context unavailable');
+    console.debug('[BetterSuno] Extension context unavailable');
   }
 
   // Periodic refresh as fallback (in case stateUpdate messages are missed)

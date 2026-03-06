@@ -1,6 +1,6 @@
 // idb-store.js — IndexedDB wrapper for persistent storage across browser sessions
 
-const DB_NAME = 'SunoNotificationsDB';
+const DB_NAME = 'BetterSunoicationsDB';
 const DB_VERSION = 1;
 
 let dbInstance = null;

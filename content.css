@@ -1,18 +1,18 @@
 /* Suno Notification Collector — floating panel injected into suno.com */
 
-#suno-notif-root {
-  --suno-bg: #18181b;
-  --suno-bg-hover: #27272a;
-  --suno-border: #3f3f46;
-  --suno-text: #f4f4f5;
-  --suno-text-muted: #a1a1aa;
-  --suno-accent: #8b5cf6;
-  --suno-accent-hover: #7c3aed;
+#bettersuno-root {
+  --bettersuno-bg: #18181b;
+  --bettersuno-bg-hover: #27272a;
+  --bettersuno-border: #3f3f46;
+  --bettersuno-text: #f4f4f5;
+  --bettersuno-text-muted: #a1a1aa;
+  --bettersuno-accent: #8b5cf6;
+  --bettersuno-accent-hover: #7c3aed;
 
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
   font-size: 14px !important;
   line-height: 1.4 !important;
-  color: var(--suno-text) !important;
+  color: var(--bettersuno-text) !important;
   position: fixed !important;
   bottom: 20px !important;
   right: 20px !important;
@@ -37,19 +37,19 @@
   filter: none !important;
 }
 
-#suno-notif-title {
+#bettersuno-title {
   font-size: 16px !important;
   font-weight: 600 !important;
-  color: var(--suno-text) !important;
+  color: var(--bettersuno-text) !important;
   margin: 0 !important;
 }
 
 /* ---- Bell button ---- */
-#suno-notif-bell {
+#bettersuno-bell {
   width: 48px !important;
   height: 48px !important;
   border-radius: 50% !important;
-  background: var(--suno-accent) !important;
+  background: var(--bettersuno-accent) !important;
   border: none !important;
   cursor: pointer !important;
   display: flex !important;
@@ -66,19 +66,19 @@
   margin: 0 !important;
 }
 
-#suno-notif-bell:hover {
-  background: var(--suno-accent-hover) !important;
+#bettersuno-bell:hover {
+  background: var(--bettersuno-accent-hover) !important;
   transform: scale(1.08) !important;
 }
 
-#suno-notif-bell svg {
+#bettersuno-bell svg {
   width: 24px !important;
   height: 24px !important;
   fill: #fff !important;
   pointer-events: none !important;
 }
 
-#suno-notif-badge {
+#bettersuno-badge {
   position: absolute !important;
   top: -4px !important;
   right: -4px !important;
@@ -99,7 +99,7 @@
 }
 
 /* ---- Panel ---- */
-#suno-notif-panel {
+#bettersuno-panel {
   display: none !important;
   position: absolute !important;
   bottom: 60px !important;
@@ -107,8 +107,8 @@
   width: 380px !important;
   height: 640px !important;
   max-height: 640px !important;
-  background: var(--suno-bg) !important;
-  border: 1px solid var(--suno-border) !important;
+  background: var(--bettersuno-bg) !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 12px !important;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5) !important;
   overflow: hidden !important;
@@ -117,61 +117,61 @@
   z-index: 999999999 !important;
 }
 
-#suno-notif-panel.open {
+#bettersuno-panel.open {
   display: flex !important;
 }
 
 /* Header */
-#suno-notif-header {
+#bettersuno-header {
   display: flex !important;
   align-items: center !important;
   justify-content: space-between !important;
   padding: 12px 16px !important;
-  border-bottom: 1px solid var(--suno-border) !important;
+  border-bottom: 1px solid var(--bettersuno-border) !important;
   flex-shrink: 0 !important;
 }
 
-#suno-notif-header h3 {
+#bettersuno-header h3 {
   margin: 0 !important;
   font-size: 15px !important;
   font-weight: 600 !important;
 }
 
-#suno-notif-header .suno-notif-status {
+#bettersuno-header .bettersuno-status {
   font-size: 11px !important;
-  color: var(--suno-text-muted) !important;
+  color: var(--bettersuno-text-muted) !important;
 }
 
-#suno-notif-header .suno-notif-status.active {
+#bettersuno-header .bettersuno-status.active {
   color: #22c55e !important;
 }
 
 /* List */
-#suno-notif-list {
+#bettersuno-list {
   overflow-y: auto !important;
   flex: 1 !important;
   padding: 4px 0 !important;
   pointer-events: auto !important;
 }
 
-#suno-notif-list::-webkit-scrollbar {
+#bettersuno-list::-webkit-scrollbar {
   width: 6px !important;
 }
 
-#suno-notif-list::-webkit-scrollbar-thumb {
-  background: var(--suno-border) !important;
+#bettersuno-list::-webkit-scrollbar-thumb {
+  background: var(--bettersuno-border) !important;
   border-radius: 3px !important;
 }
 
-.suno-notif-empty {
+.bettersuno-empty {
   padding: 24px 16px !important;
   text-align: center !important;
-  color: var(--suno-text-muted) !important;
+  color: var(--bettersuno-text-muted) !important;
   font-size: 13px !important;
 }
 
 /* Individual notification row */
-.suno-notif-item {
+.bettersuno-item {
   display: flex !important;
   align-items: center !important;
   gap: 10px !important;
@@ -181,11 +181,11 @@
   pointer-events: auto !important;
 }
 
-.suno-notif-item:hover {
-  background: var(--suno-bg-hover) !important;
+.bettersuno-item:hover {
+  background: var(--bettersuno-bg-hover) !important;
 }
 
-.suno-notif-item img.suno-notif-avatar {
+.bettersuno-item img.bettersuno-avatar {
   width: 36px !important;
   height: 36px !important;
   border-radius: 50% !important;
@@ -194,7 +194,7 @@
   pointer-events: auto !important;
 }
 
-.suno-notif-item img.suno-notif-content-img {
+.bettersuno-item img.bettersuno-content-img {
   width: 40px !important;
   height: 40px !important;
   border-radius: 6px !important;
@@ -204,78 +204,78 @@
   pointer-events: auto !important;
 }
 
-.suno-notif-item .suno-notif-body {
+.bettersuno-item .bettersuno-body {
   flex: 1 !important;
   min-width: 0 !important;
   pointer-events: auto !important;
 }
 
-.suno-notif-item .suno-notif-body a {
-  color: var(--suno-accent) !important;
+.bettersuno-item .bettersuno-body a {
+  color: var(--bettersuno-accent) !important;
   text-decoration: none !important;
   font-weight: 600 !important;
   pointer-events: auto !important;
 }
 
-.suno-notif-item .suno-notif-body a:hover {
+.bettersuno-item .bettersuno-body a:hover {
   text-decoration: underline !important;
 }
 
-.suno-notif-item .suno-notif-text {
+.bettersuno-item .bettersuno-text {
   font-size: 13px !important;
-  color: var(--suno-text) !important;
+  color: var(--bettersuno-text) !important;
 }
 
-.suno-notif-item .suno-notif-time {
+.bettersuno-item .bettersuno-time {
   font-size: 11px !important;
-  color: var(--suno-text-muted) !important;
+  color: var(--bettersuno-text-muted) !important;
   margin-top: 2px !important;
 }
 
 /* Footer */
-#suno-notif-footer {
+#bettersuno-footer {
   display: flex !important;
-  border-top: 1px solid var(--suno-border) !important;
+  border-top: 1px solid var(--bettersuno-border) !important;
   flex-shrink: 0 !important;
 }
 
-#suno-notif-footer button {
+#bettersuno-footer button {
   flex: 1 !important;
   padding: 10px !important;
   background: none !important;
   border: none !important;
-  color: var(--suno-text-muted) !important;
+  color: var(--bettersuno-text-muted) !important;
   font-size: 12px !important;
   cursor: pointer !important;
   transition: background 0.1s, color 0.1s !important;
   pointer-events: auto !important;
 }
 
-#suno-notif-footer button:hover {
-  background: var(--suno-bg-hover) !important;
-  color: var(--suno-text) !important;
+#bettersuno-footer button:hover {
+  background: var(--bettersuno-bg-hover) !important;
+  color: var(--bettersuno-text) !important;
 }
 
-#suno-notif-footer button + button {
-  border-left: 1px solid var(--suno-border) !important;
+#bettersuno-footer button + button {
+  border-left: 1px solid var(--bettersuno-border) !important;
 }
 
 /* ---- Tabs ---- */
-#suno-notif-tabs {
+#bettersuno-tabs {
   display: flex !important;
-  border-bottom: 1px solid var(--suno-border) !important;
+  border-bottom: 1px solid var(--bettersuno-border) !important;
   flex-shrink: 0 !important;
   background: transparent !important;
   padding: 0 !important;
   margin: 0 !important;
 }
 
-.suno-notif-tab {
+.bettersuno-tab {
   flex: 1 !important;
   padding: 10px !important;
   background: transparent !important;
   border: none !important;
-  color: var(--suno-text-muted) !important;
+  color: var(--bettersuno-text-muted) !important;
   font-size: 12px !important;
   cursor: pointer !important;
   transition: color 0.1s, background 0.1s !important;
@@ -283,58 +283,65 @@
   pointer-events: auto !important;
 }
 
-.suno-notif-tab:hover {
-  background: var(--suno-bg-hover) !important;
-  color: var(--suno-text) !important;
+.bettersuno-tab:hover {
+  background: var(--bettersuno-bg-hover) !important;
+  color: var(--bettersuno-text) !important;
 }
 
-.suno-notif-tab.active {
-  color: var(--suno-accent) !important;
-  border-bottom: 2px solid var(--suno-accent) !important;
+.bettersuno-tab.active {
+  color: var(--bettersuno-accent) !important;
+  border-bottom: 2px solid var(--bettersuno-accent) !important;
   margin-bottom: -1px !important;
 }
 
-.suno-notif-tab + .suno-notif-tab {
-  border-left: 1px solid var(--suno-border) !important;
+.bettersuno-tab + .bettersuno-tab {
+  border-left: 1px solid var(--bettersuno-border) !important;
 }
 
 /* ---- Settings Content ---- */
-.suno-notif-content {
+.bettersuno-content {
   overflow-y: auto !important;
   flex: 1 !important;
   pointer-events: auto !important;
 }
 
-.suno-notif-content::-webkit-scrollbar {
+.bettersuno-content::-webkit-scrollbar {
   width: 6px !important;
 }
 
-.suno-notif-content::-webkit-scrollbar-thumb {
-  background: var(--suno-border) !important;
+.bettersuno-content::-webkit-scrollbar-thumb {
+  background: var(--bettersuno-border) !important;
   border-radius: 3px !important;
 }
 
-#suno-notif-settings-content {
+#bettersuno-settings-content {
   padding: 12px !important;
 }
 
-.suno-notif-settings-form {
+.bettersuno-settings-form {
   display: flex !important;
   flex-direction: column !important;
   gap: 12px !important;
   pointer-events: auto !important;
 }
 
-.suno-notif-setting-row {
+.bettersuno-setting-row {
   display: flex !important;
   flex-direction: column !important;
   gap: 4px !important;
   pointer-events: auto !important;
 }
 
-.suno-notif-setting-row label {
+.bettersuno-setting-row h4 {
+  margin: 0 !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  color: var(--bettersuno-text) !important;
+}
+
+.bettersuno-setting-row label {
   font-size: 12px !important;
-  color: var(--suno-text-muted) !important;
+  color: var(--bettersuno-text-muted) !important;
   display: flex !important;
   align-items: center !important;
   gap: 6px !important;
@@ -342,43 +349,43 @@
   cursor: pointer !important;
 }
 
-.suno-notif-setting-row label input[type="checkbox"] {
+.bettersuno-setting-row label input[type="checkbox"] {
   cursor: pointer !important;
-  accent-color: var(--suno-accent) !important;
+  accent-color: var(--bettersuno-accent) !important;
   pointer-events: auto !important;
 }
 
-.suno-notif-setting-row input[type="number"],
-.suno-notif-setting-row input[type="datetime-local"] {
+.bettersuno-setting-row input[type="number"],
+.bettersuno-setting-row input[type="datetime-local"] {
   padding: 6px !important;
-  background: var(--suno-bg-hover) !important;
-  border: 1px solid var(--suno-border) !important;
+  background: var(--bettersuno-bg-hover) !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 4px !important;
-  color: var(--suno-text) !important;
+  color: var(--bettersuno-text) !important;
   font-size: 12px !important;
   font-family: inherit !important;
   box-sizing: border-box !important;
   pointer-events: auto !important;
 }
 
-.suno-notif-setting-row input[type="number"]:focus,
-.suno-notif-setting-row input[type="datetime-local"]:focus {
+.bettersuno-setting-row input[type="number"]:focus,
+.bettersuno-setting-row input[type="datetime-local"]:focus {
   outline: none !important;
-  border-color: var(--suno-accent) !important;
+  border-color: var(--bettersuno-accent) !important;
   box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2) !important;
 }
 
 
 /* ========== Downloader (popup.html) embedded in Download tab ========== */
 
-#suno-notif-panel {
+#bettersuno-panel {
   color: #333 !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", sans-serif !important;
   font-size: 13px !important;
   padding: 0 !important;
 }
 
-#suno-notif-panel .note {
+#bettersuno-panel .note {
   font-size: 12px !important;
   color: #666 !important;
   margin-bottom: 14px !important;
@@ -389,11 +396,11 @@
   border-left: 3px solid #667eea !important;
 }
 
-#suno-notif-panel .form-group {
+#bettersuno-panel .form-group {
   margin-bottom: 14px !important;
 }
 
-#suno-notif-panel .form-group label {
+#bettersuno-panel .form-group label {
   display: block !important;
   font-size: 12px !important;
   font-weight: 600 !important;
@@ -403,8 +410,8 @@
   letter-spacing: 0.3px !important;
 }
 
-#suno-notif-panel input[type="text"],
-#suno-notif-panel input[type="number"] {
+#bettersuno-panel input[type="text"],
+#bettersuno-panel input[type="number"] {
   width: 100% !important;
   padding: 8px !important;
   border: 1px solid #ddd !important;
@@ -416,21 +423,21 @@
   color: #333 !important;
 }
 
-#suno-notif-panel input[type="text"]:focus,
-#suno-notif-panel input[type="number"]:focus {
+#bettersuno-panel input[type="text"]:focus,
+#bettersuno-panel input[type="number"]:focus {
   outline: none !important;
   border-color: #667eea !important;
   box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1) !important;
 }
 
-#suno-notif-panel input[type="checkbox"] {
+#bettersuno-panel input[type="checkbox"] {
   cursor: pointer !important;
   width: 16px !important;
   height: 16px !important;
   accent-color: #667eea !important;
 }
 
-#suno-notif-panel .checkbox-label {
+#bettersuno-panel .checkbox-label {
   display: flex !important;
   align-items: center !important;
   gap: 8px !important;
@@ -440,7 +447,7 @@
   color: #333 !important;
 }
 
-#suno-notif-panel button {
+#bettersuno-panel button {
   padding: 10px 14px !important;
   cursor: pointer !important;
   border: none !important;
@@ -451,75 +458,75 @@
   font-family: inherit !important;
 }
 
-#suno-notif-panel button:disabled
+#bettersuno-panel button:disabled
 {
   opacity: 0.5 !important;
   cursor: not-allowed !important;
 }
 
-#suno-notif-panel .btn-primary {
+#bettersuno-panel .btn-primary {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
   color: white !important;
 }
 
-#suno-notif-panel .btn-primary:hover:not(:disabled) {
+#bettersuno-panel .btn-primary:hover:not(:disabled) {
   transform: translateY(-1px) !important;
   box-shadow: 0 6px 12px rgba(102, 126, 234, 0.3) !important;
 }
 
-#suno-notif-panel .btn-stop {
+#bettersuno-panel .btn-stop {
   background: #ef5350 !important;
   color: white !important;
 }
 
-#suno-notif-panel .btn-stop:hover:not(:disabled) {
+#bettersuno-panel .btn-stop:hover:not(:disabled) {
   background: #e53935 !important;
 }
 
-#suno-notif-panel .btn-success {
+#bettersuno-panel .btn-success {
   background: linear-gradient(135deg, #26c281 0%, #2ecc71 100%) !important;
   color: white !important;
   width: 100% !important;
   margin-top: 8px !important;
 }
 
-#suno-notif-panel .btn-success:hover:not(:disabled) {
+#bettersuno-panel .btn-success:hover:not(:disabled) {
   transform: translateY(-1px) !important;
   box-shadow: 0 6px 12px rgba(38, 194, 129, 0.3) !important;
 }
 
-#suno-notif-panel .btn-secondary {
+#bettersuno-panel .btn-secondary {
   background: #f5f5f5 !important;
   color: #333 !important;
   border: 1px solid #ddd !important;
 }
 
-#suno-notif-panel .btn-secondary:hover:not(:disabled) {
+#bettersuno-panel .btn-secondary:hover:not(:disabled) {
   background: #efefef !important;
 }
 
-#suno-notif-panel .btn-row {
+#bettersuno-panel .btn-row {
   display: flex !important;
   gap: 10px !important;
   margin-top: 12px !important;
 }
 
-#suno-notif-panel .btn-row button {
+#bettersuno-panel .btn-row button {
   flex: 1 !important;
 }
 
-#suno-notif-panel .hidden {
+#bettersuno-panel .hidden {
   display: none !important;
 }
 
-#suno-notif-panel #settingsPanel,
-#suno-notif-panel #songListContainer {
+#bettersuno-panel #settingsPanel,
+#bettersuno-panel #songListContainer {
   background: #18181b !important;
   padding: 12px !important;
   border-radius: 0 !important;
 }
 
-#suno-notif-panel #status {
+#bettersuno-panel #status {
   margin-top: 10px !important;
   font-size: 11px !important;
   height: 80px !important;
@@ -539,7 +546,7 @@
   box-sizing: border-box !important;
 }
 
-#suno-notif-panel .version-footer {
+#bettersuno-panel .version-footer {
   font-size: 10px !important;
   color: #a1a1aa !important;
   text-align: center !important;
@@ -550,7 +557,7 @@
   user-select: none !important;
 }
 
-#suno-notif-panel #filterInput {
+#bettersuno-panel #filterInput {
   width: 100% !important;
   padding: 8px 10px !important;
   margin-bottom: 4px !important;
@@ -563,13 +570,13 @@
   box-sizing: border-box !important;
 }
 
-#suno-notif-panel #filterInput:focus {
+#bettersuno-panel #filterInput:focus {
   outline: none !important;
   border-color: #667eea !important;
   box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1) !important;
 }
 
-#suno-notif-panel #songList {
+#bettersuno-panel #songList {
   max-height: 220px !important;
   overflow-y: auto !important;
   border: 1px solid #3f3f46 !important;
@@ -578,16 +585,16 @@
   margin-bottom: 10px !important;
 }
 
-#suno-notif-panel #songList::-webkit-scrollbar {
+#bettersuno-panel #songList::-webkit-scrollbar {
   width: 6px !important;
 }
 
-#suno-notif-panel #songList::-webkit-scrollbar-thumb {
+#bettersuno-panel #songList::-webkit-scrollbar-thumb {
   background: #3f3f46 !important;
   border-radius: 3px !important;
 }
 
-#suno-notif-panel .song-item {
+#bettersuno-panel .song-item {
   display: flex !important;
   align-items: center !important;
   padding: 9px 10px !important;
@@ -597,25 +604,25 @@
   color: #f4f4f5 !important;
 }
 
-#suno-notif-panel .song-item:last-child {
+#bettersuno-panel .song-item:last-child {
   border-bottom: none !important;
 }
 
-#suno-notif-panel .song-item:hover {
+#bettersuno-panel .song-item:hover {
   background: #27272a !important;
 }
 
-#suno-notif-panel .song-item input[type="checkbox"] {
+#bettersuno-panel .song-item input[type="checkbox"] {
   margin-right: 8px !important;
   flex-shrink: 0 !important;
 }
 
-#suno-notif-panel .song-info {
+#bettersuno-panel .song-info {
   flex: 1 !important;
   overflow: hidden !important;
 }
 
-#suno-notif-panel .song-title {
+#bettersuno-panel .song-title {
   font-weight: 600 !important;
   white-space: nowrap !important;
   overflow: hidden !important;
@@ -624,7 +631,7 @@
   margin-bottom: 2px !important;
 }
 
-#suno-notif-panel .song-meta {
+#bettersuno-panel .song-meta {
   color: #a1a1aa !important;
   font-size: 10px !important;
   display: flex !important;
@@ -632,17 +639,17 @@
   align-items: center !important;
 }
 
-#suno-notif-panel .song-meta .public {
+#bettersuno-panel .song-meta .public {
   color: #22c55e !important;
   font-weight: 500 !important;
 }
 
-#suno-notif-panel .song-meta .private {
+#bettersuno-panel .song-meta .private {
   color: #ef4444 !important;
   font-weight: 500 !important;
 }
 
-#suno-notif-panel #selectControls {
+#bettersuno-panel #selectControls {
   display: flex !important;
   gap: 5px !important;
   align-items: center !important;
@@ -651,7 +658,7 @@
   color: #f4f4f5 !important;
 }
 
-#suno-notif-panel #filterControls {
+#bettersuno-panel #filterControls {
   display: flex !important;
   gap: 8px !important;
   margin-bottom: 4px !important;
@@ -664,21 +671,21 @@
   font-size: 12px !important;
 }
 
-#suno-notif-panel #filterControls label {
+#bettersuno-panel #filterControls label {
   margin: 0 !important;
   flex-shrink: 0 !important;
   font-size: 12px !important;
   color: #f4f4f5 !important;
 }
 
-#suno-notif-panel #songCount {
+#bettersuno-panel #songCount {
   font-size: 12px !important;
   color: #a1a1aa !important;
   margin-left: auto !important;
   flex-shrink: 0 !important;
 }
 
-#suno-notif-panel #downloadTypeControls {
+#bettersuno-panel #downloadTypeControls {
   display: flex !important;
   gap: 8px !important;
   margin-bottom: 6px !important;
@@ -691,14 +698,14 @@
   font-size: 12px !important;
 }
 
-#suno-notif-panel #downloadTypeControls label {
+#bettersuno-panel #downloadTypeControls label {
   margin: 0 !important;
   padding: 0 !important;
   font-size: 12px !important;
   color: #f4f4f5 !important;
 }
 
-#suno-notif-panel #fileFormat {
+#bettersuno-panel #fileFormat {
   display: flex !important;
   gap: 8px !important;
   align-items: center !important;
@@ -707,13 +714,13 @@
   font-size: 12px !important;
 }
 
-#suno-notif-panel #songListContainer input[type="text"] {
+#bettersuno-panel #songListContainer input[type="text"] {
   background: #27272a !important;
   border-color: #3f3f46 !important;
   color: #f4f4f5 !important;
 }
 
-#suno-notif-panel #songListContainer input[type="text"]:focus {
+#bettersuno-panel #songListContainer input[type="text"]:focus {
   border-color: #667eea !important;
 }
 
