@@ -1327,9 +1327,17 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
 
       // 3. Download Image
       if (shouldDownloadImage && song.image_url) {
+        // Use full-size image URL if available
+        let imageUrl = song.image_url;
+        if (imageUrl.includes('cdn1.suno.ai') && imageUrl.includes('_8k0.png')) {
+          imageUrl = imageUrl.replace('_8k0.png', '.png');
+        } else if (imageUrl.includes('cdn1.suno.ai') && imageUrl.includes('_8x8.png')) {
+          imageUrl = imageUrl.replace('_8x8.png', '.png');
+        }
+
         const baseName = `${safeTitle}_${song.id.slice(-4)}.jpg`;
         const filename = buildDownloadFilename(baseName);
-        await downloadOneFile(song.image_url, filename);
+        await downloadOneFile(imageUrl, filename);
       }
 
       downloadedCount++;

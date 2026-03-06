@@ -7,6 +7,79 @@
 
     let allSongs = [];
     let filteredSongs = [];
+    let currentPlayingSongId = null;
+
+    // ========================================================================
+    // Audio Player
+    // ========================================================================
+    const miniPlayer = document.getElementById('bettersuno-mini-player');
+    const audioElement = document.getElementById('bettersuno-audio-element');
+    const playPauseBtn = document.getElementById('player-play-pause');
+    const playerTitle = document.getElementById('player-song-title');
+    const progressBar = document.getElementById('player-progress-bar');
+    const playerTime = document.getElementById('player-time');
+
+    function togglePlay(song) {
+        if (!song || !song.audio_url) return;
+
+        if (currentPlayingSongId === song.id) {
+            if (audioElement.paused) {
+                audioElement.play();
+                playPauseBtn.textContent = '▪';
+            } else {
+                audioElement.pause();
+                playPauseBtn.textContent = '▶';
+            }
+        } else {
+            // New song
+            currentPlayingSongId = song.id;
+            audioElement.src = song.audio_url;
+            audioElement.play();
+            miniPlayer.style.display = 'block';
+            playerTitle.textContent = song.title || 'Untitled';
+            playPauseBtn.textContent = '▪';
+            
+            // Re-render list to show active state
+            renderSongList();
+        }
+    }
+
+    if (playPauseBtn) {
+        playPauseBtn.addEventListener('click', () => {
+            if (audioElement.paused) {
+                audioElement.play();
+                playPauseBtn.textContent = '▪';
+            } else {
+                audioElement.pause();
+                playPauseBtn.textContent = '▶';
+            }
+            renderSongList();
+        });
+    }
+
+    if (audioElement) {
+        audioElement.addEventListener('timeupdate', () => {
+            const percent = (audioElement.currentTime / audioElement.duration) * 100;
+            progressBar.style.width = `${percent}%`;
+            
+            const mins = Math.floor(audioElement.currentTime / 60);
+            const secs = Math.floor(audioElement.currentTime % 60).toString().padStart(2, '0');
+            playerTime.textContent = `${mins}:${secs}`;
+        });
+
+        audioElement.addEventListener('play', () => {
+            renderSongList();
+        });
+
+        audioElement.addEventListener('pause', () => {
+            renderSongList();
+        });
+
+        audioElement.addEventListener('ended', () => {
+            playPauseBtn.textContent = '▶';
+            renderSongList();
+        });
+    }
 
     // ========================================================================
     // IndexedDB Helper Functions
@@ -302,7 +375,6 @@
                 // Go directly to song list
                 songListContainer.style.display = "block";
                 filterInput.value = "";
-                selectAllCheckbox.checked = true;
                 await loadFilterPreferences();
                 renderSongList();
                 statusDiv.innerText = `${allSongs.length} cached songs. Checking for new...`;
@@ -523,7 +595,6 @@
                 if (message.pageNum === 1) {
                     songListContainer.style.display = "block";
                     filterInput.value = "";
-                    selectAllCheckbox.checked = true;
                     loadFilterPreferences().then(() => {
                         renderSongList();
                     });
@@ -566,7 +637,6 @@
                 if (songListContainer.style.display !== "block") {
                     songListContainer.style.display = "block";
                     filterInput.value = "";
-                    selectAllCheckbox.checked = true;
                     loadFilterPreferences().then(() => {
                         renderSongList();
                     });
@@ -642,6 +712,9 @@
         songsToRender.forEach(song => {
             const item = document.createElement("div");
             item.className = "song-item";
+            if (currentPlayingSongId === song.id) {
+                item.classList.add('playing');
+            }
 
             const checkbox = document.createElement("input");
             checkbox.type = "checkbox";
@@ -651,6 +724,12 @@
 
             const songInfo = document.createElement("div");
             songInfo.className = "song-info";
+            songInfo.style.cursor = 'pointer';
+
+            // When user clicks the song info (everything except the checkbox), play/pause
+            songInfo.addEventListener('click', (e) => {
+                togglePlay(song);
+            });
 
             const titleDiv = document.createElement("div");
             titleDiv.className = "song-title";
@@ -686,8 +765,34 @@
             songInfo.appendChild(titleDiv);
             songInfo.appendChild(metaDiv);
 
+            const actionsDiv = document.createElement("div");
+            actionsDiv.className = "song-actions";
+
+            const playBtn = document.createElement("button");
+            playBtn.className = "song-action-btn play-btn";
+            playBtn.title = "Play Song";
+            playBtn.innerHTML = (currentPlayingSongId === song.id && !audioElement.paused) ? '⏸' : '▶';
+            playBtn.onclick = (e) => {
+                e.stopPropagation();
+                togglePlay(song);
+            };
+
+            const gotoBtn = document.createElement("button");
+            gotoBtn.className = "song-action-btn goto-btn";
+            gotoBtn.title = "Go to Song";
+            /* eye icon using SVG for better consistency across platforms */
+            gotoBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 5c-7.633 0-12 7-12 7s4.367 7 12 7 12-7 12-7-4.367-7-12-7zm0 12a5 5 0 1 1 .001-10.001A5 5 0 0 1 12 17zm0-8a3 3 0 1 0 .001 6.001A3 3 0 0 0 12 9z"/></svg>`;
+            gotoBtn.onclick = (e) => {
+                e.stopPropagation();
+                window.open(`https://suno.com/song/${song.id}`, '_blank');
+            };
+
+            actionsDiv.appendChild(playBtn);
+            actionsDiv.appendChild(gotoBtn);
+
             item.appendChild(checkbox);
             item.appendChild(songInfo);
+            item.appendChild(actionsDiv);
             songList.appendChild(item);
         });
 

@@ -68,7 +68,7 @@
 
             <span id="selectControls">
               <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="selectAll" checked /> Select All
+                <input type="checkbox" id="selectAll" /> Select All
               </label>
               <span id="songCount">0 songs</span>
             </span>
@@ -78,6 +78,20 @@
             <div class="btn-row">
               <button id="downloadBtn" class="btn-primary" style="flex: 2">Download Selected</button>
               <button id="stopDownloadBtn" class="btn-stop hidden">Stop</button>
+            </div>
+          </div>
+
+          <div id="bettersuno-mini-player" class="mini-player" style="display: none;">
+            <div class="player-controls">
+              <button id="player-play-pause" class="player-btn">▶</button>
+              <div class="player-info">
+                <div id="player-song-title" class="player-title">No song selected</div>
+                <div class="player-progress-container">
+                  <div id="player-progress-bar" class="player-progress"></div>
+                </div>
+              </div>
+              <div id="player-time" class="player-time">0:00</div>
+              <audio id="bettersuno-audio-element"></audio>
             </div>
           </div>
 
@@ -147,7 +161,11 @@
 
   // Close panel on outside click
   document.addEventListener('click', (e) => {
-    if (panelOpen && !root.contains(e.target)) {
+    // Don't close if a song is currently playing - keep the mini-player visible
+    const audio = document.getElementById('bettersuno-audio-element');
+    const isPlaying = audio && !audio.paused;
+    
+    if (panelOpen && !root.contains(e.target) && !isPlaying) {
       panelOpen = false;
       panel.classList.remove('open');
     }
