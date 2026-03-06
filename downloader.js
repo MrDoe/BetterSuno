@@ -584,13 +584,16 @@
         }
         if (message.action === "fetch_error") {
             setFetchUiState(false);
-        }
-        if (message.action === "fetch_error") {
             statusDiv.innerText = message.error;
         }
 
         if (message.action === "download_complete") {
             setDownloadUiState(false);
+            if (message.stopped) {
+                statusDiv.innerText = "⏹️ Download stopped by user.";
+            } else {
+                statusDiv.innerText = "✅ Download complete!";
+            }
         }
     });
 

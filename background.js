@@ -38,6 +38,7 @@ let stopDownloadRequested = false;
 let isDownloading = false;
 let currentDownloadJobId = 0;
 let activeDownloadIds = new Set();
+let downloadRequestorTabId = null;
 const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
 
 // Gate: resolves once loadState() has completed, so alarm handlers
@@ -925,6 +926,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     isDownloading = true;
     currentDownloadJobId += 1;
     activeDownloadIds = new Set();
+    downloadRequestorTabId = sender.tab?.id || null;
     persistDownloadState({ startedAt: Date.now() });
     broadcastDownloadState();
     downloadSelectedSongs(
@@ -941,7 +943,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     isDownloading = false;
     persistDownloadState({ stoppedAt: Date.now() });
     broadcastDownloadState();
-    try { chrome.runtime.sendMessage({ action: "download_stopped" }); } catch (e) {}
+    const stopDestTab = sender.tab?.id || downloadRequestorTabId;
+    if (stopDestTab) {
+      chrome.tabs.sendMessage(stopDestTab, { action: "download_stopped" }).catch(() => {});
+    }
   }
 
   if (msg.action === "get_download_state") {
@@ -1065,15 +1070,16 @@ async function readPersistedDownloadState() {
 }
 
 function broadcastDownloadState() {
-  try {
-    chrome.runtime.sendMessage({
-      action: 'download_state',
-      isDownloading,
-      stopRequested: stopDownloadRequested,
-      jobId: currentDownloadJobId
-    });
-  } catch (e) {
-    // ignore
+  const msg = {
+    action: 'download_state',
+    isDownloading,
+    stopRequested: stopDownloadRequested,
+    jobId: currentDownloadJobId
+  };
+  if (downloadRequestorTabId) {
+    chrome.tabs.sendMessage(downloadRequestorTabId, msg).catch(() => {});
+  } else {
+    try { chrome.runtime.sendMessage(msg); } catch (e) { /* ignore */ }
   }
 }
 
@@ -1227,10 +1233,30 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
       filename,
       conflictAction: "uniquify"
     });
-    if (typeof downloadId === 'number') {
-      activeDownloadIds.add(downloadId);
-      persistDownloadState();
-    }
+    if (typeof downloadId !== 'number') return false;
+
+    activeDownloadIds.add(downloadId);
+    persistDownloadState();
+
+    // Wait until the browser actually finishes writing the file
+    await new Promise((resolve) => {
+      const timeoutId = setTimeout(() => {
+        chrome.downloads.onChanged.removeListener(listener);
+        resolve(); // give up waiting after 5 min, don't block forever
+      }, 5 * 60 * 1000);
+
+      function listener(delta) {
+        if (delta.id !== downloadId) return;
+        const state = delta.state?.current;
+        if (state === 'complete' || state === 'interrupted') {
+          clearTimeout(timeoutId);
+          chrome.downloads.onChanged.removeListener(listener);
+          resolve();
+        }
+      }
+      chrome.downloads.onChanged.addListener(listener);
+    });
+
     return true;
   }
 
@@ -1243,13 +1269,18 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
   if (shouldDownloadImage) selectedTypes.push('images');
 
   if (selectedTypes.length === 0) {
-    chrome.runtime.sendMessage({ action: "log", text: '⚠️ Nothing selected to download.' });
+    const notifyNoTypes = (msg) => {
+      if (downloadRequestorTabId) {
+        chrome.tabs.sendMessage(downloadRequestorTabId, msg).catch(() => {});
+      }
+    };
+    notifyNoTypes({ action: "log", text: '⚠️ Nothing selected to download.' });
     stopDownloadRequested = false;
     isDownloading = false;
     activeDownloadIds = new Set();
     persistDownloadState({ finishedAt: Date.now() });
     broadcastDownloadState();
-    chrome.runtime.sendMessage({ action: "download_complete", stopped: false });
+    notifyNoTypes({ action: "download_complete", stopped: false });
     return;
   }
 
@@ -1318,11 +1349,13 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
   persistDownloadState({ finishedAt: Date.now() });
   broadcastDownloadState();
 
-  chrome.runtime.sendMessage({
-    action: "log",
-    text: `✅ Download complete! ${downloadedCount} succeeded, ${failedCount} failed.`
-  });
-  chrome.runtime.sendMessage({ action: "download_complete", stopped: false });
+  if (downloadRequestorTabId) {
+    chrome.tabs.sendMessage(downloadRequestorTabId, {
+      action: "log",
+      text: `✅ Download complete! ${downloadedCount} succeeded, ${failedCount} failed.`
+    }).catch(() => {});
+    chrome.tabs.sendMessage(downloadRequestorTabId, { action: "download_complete", stopped: false }).catch(() => {});
+  }
 }
 
 // Keep active download IDs in sync
