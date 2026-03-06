@@ -50,6 +50,14 @@ const stateReadyPromise = new Promise(r => { stateReady = r; });
 let offscreenCreating = false;
 let offscreenExists = false;
 
+// Initialize state
+(async function init() {
+  log("Initializing background...");
+  await loadState();
+  stateReady();
+  log("Background initialization complete.");
+})();
+
 // ============================================================================
 // Persistence via IndexedDB (persistent across browser sessions)
 // ============================================================================
