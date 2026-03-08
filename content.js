@@ -16,6 +16,8 @@
       <div id="bettersuno-header">
         <h3 id="bettersuno-title">BetterSuno</h3>
         <span class="bettersuno-status" id="bettersuno-status">inactive</span>
+        <!-- refresh button allows manual fetch of latest notifications -->
+        <button id="bettersuno-refresh" title="Refresh notifications" style="margin-left:8px;">⟳</button>
       </div>
       <div id="bettersuno-tabs">
         <button class="bettersuno-tab active" data-tab="notifications">Notifications</button>
@@ -153,12 +155,22 @@
     panelOpen = !panelOpen;
     panel.classList.toggle('open', panelOpen);
     if (panelOpen) {
-      // Mark all current notifications as seen
+      // refresh state immediately when the panel opens
+      refresh();
+      // Mark all current notifications as seen after fetching
       lastSeenCount = currentNotifCount;
       badge.style.display = 'none';
       badge.textContent = '0';
     }
   });
+
+  // ---- Manual refresh button ----
+  const refreshBtn = root.querySelector('#bettersuno-refresh');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', () => {
+      refresh();
+    });
+  }
 
   // Close panel on outside click
   document.addEventListener('click', (e) => {
@@ -481,25 +493,35 @@
   let refreshInterval;
 
   function refresh() {
-    try {
-      if (!isContextValid()) {
-        clearInterval(refreshInterval);
-        root.remove();
-        return;
-      }
+    // provide immediate UI feedback
+    status.textContent = 'refreshing';
+    status.classList.remove('active');
+    const refreshBtn = root.querySelector('#bettersuno-refresh');
+    if (refreshBtn) {
+      refreshBtn.disabled = true;
+    }
+
+    if (!isContextValid()) {
+      clearInterval(refreshInterval);
+      root.remove();
+      return;
+    }
+
+    // ask the background to fetch current notifications from Suno
+    chrome.runtime.sendMessage({ type: 'contentFetchExisting' }, () => {
+      // after fetch attempt (success or failure), update our view
       try {
         chrome.runtime.sendMessage({ type: 'contentGetState' }, (response) => {
-          if (chrome.runtime.lastError || !response) return;
-          renderNotifications(response.notifications, response.enabled);
+          if (!chrome.runtime.lastError && response) {
+            renderNotifications(response.notifications, response.enabled);
+          }
+          if (refreshBtn) refreshBtn.disabled = false;
         });
       } catch (e) {
         console.debug('[BetterSuno] Could not refresh state');
+        if (refreshBtn) refreshBtn.disabled = false;
       }
-    } catch (e) {
-      // Extension context invalidated (likely extension reloaded)
-      clearInterval(refreshInterval);
-      root.remove();
-    }
+    });
   }
 
   // ---- Listen for live updates ----

@@ -145,6 +145,23 @@
   color: #22c55e !important;
 }
 
+/* refresh button inside header */
+#bettersuno-refresh {
+  background: none !important;
+  border: none !important;
+  color: var(--bettersuno-text) !important;
+  font-size: 16px !important;
+  cursor: pointer !important;
+  padding: 4px !important;
+}
+#bettersuno-refresh:hover {
+  color: var(--bettersuno-accent) !important;
+}
+#bettersuno-refresh:disabled {
+  opacity: 0.4 !important;
+  cursor: default !important;
+}
+
 /* List */
 #bettersuno-list {
   overflow-y: auto !important;
