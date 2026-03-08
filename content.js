@@ -504,7 +504,11 @@
 
   // ---- Listen for live updates ----
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === 'stateUpdate' && msg.tabId === 'global') {
+    if (msg.type === 'stateUpdate') {
+      // previous versions filtered for "global" only; after the
+      // background started sending both tab-specific and global
+      // updates this restriction was unnecessary and in fact meant the
+      // UI would never refresh on Chrome.  Just render whatever we get.
       renderNotifications(msg.state.notifications, msg.state.enabled);
     }
   });

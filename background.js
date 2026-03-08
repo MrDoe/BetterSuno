@@ -751,17 +751,47 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "offscreenStateUpdate") {
+    // Merge the incoming tab-specific state into memory
     const st = ensureTabState(msg.tabId);
     Object.assign(st, msg.state);
 
+    // desktop notifications use the per‑tab state
     showDesktopNotifications(msg.tabId, st);
     saveState();
 
-    chrome.runtime.sendMessage({
-      type: "stateUpdate",
-      tabId: msg.tabId,
-      state: { ...st }
-    });
+    // Broadcast update to any listeners.  the content script currently
+    // only listens for "global" messages, so make sure we send both the
+    // tab-specific update and a mirror on the global slot.  the global
+    // state is simply kept in sync with the most recently updated tab –
+    // the UI doesn't care which tab performed the fetch.
+    try {
+      chrome.runtime.sendMessage({
+        type: "stateUpdate",
+        tabId: msg.tabId,
+        state: { ...st }
+      });
+    } catch (e) {
+      // ignore if no listeners
+    }
+
+    // also update global state to keep content.js happy
+    const globalSt = ensureTabState("global");
+    // copy notifications and timing so that the panel reflects the latest
+    globalSt.notifications = st.notifications;
+    globalSt.lastNotificationTime = st.lastNotificationTime;
+    globalSt.enabled = st.enabled;
+    globalSt.intervalMs = st.intervalMs;
+    globalSt.desktopNotificationsEnabled = st.desktopNotificationsEnabled;
+
+    try {
+      chrome.runtime.sendMessage({
+        type: "stateUpdate",
+        tabId: "global",
+        state: { ...globalSt }
+      });
+    } catch (e) {
+      // ignore
+    }
 
     sendResponse({ ok: true });
     return true;

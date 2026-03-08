@@ -28,17 +28,63 @@ const STATES = {};  // tabId → last known state
 const LAST_REQUEST_AT = {}; // tabId → timestamp (ms)
 let LAST_REQUEST_AT_ALL = 0; // global timestamp (ms)
 
-// Notify background that offscreen document is running
-try {
-  const port = chrome.runtime.connect({ name: "offscreen-document" });
-  log("Connected to background");
-  
-  port.onDisconnect.addListener(() => {
-    log("Disconnected from background");
-  });
-} catch (e) {
-  log("Failed to connect to background:", e.message);
+// ------------------------------------------------------------------
+// Messaging helper – keep a long‑lived port and resend the last known
+// state when the service worker restarts.  Chrome MV3 service workers
+// can be killed at any time; when that happens the port is closed and
+// subsequent sendMessage calls will fail with "Receiving end does not
+// exist".  We detect those failures, reconnect the port and replay the
+// most recent state so nothing is lost.
+// ------------------------------------------------------------------
+
+let port = null;
+let lastSentState = null; // { tabId, state }
+
+function setupPort() {
+  try {
+    port = chrome.runtime.connect({ name: "offscreen-document" });
+    log("Connected to background via port");
+
+    port.onDisconnect.addListener(() => {
+      log("Port disconnected – scheduling reconnect");
+      port = null;
+      // attempt to reconnect after a short delay
+      setTimeout(setupPort, 1000);
+    });
+  } catch (e) {
+    log("Port connection failed:", e.message);
+    setTimeout(setupPort, 1000);
+  }
 }
+
+// initialise the port when the script loads
+setupPort();
+
+// when the port reconnects we replay the last state in case any
+// updates were lost while the service worker was dead
+function replayLastState() {
+  if (lastSentState && port) {
+    log("Replaying cached state after reconnect for tab", lastSentState.tabId);
+    chrome.runtime.sendMessage({
+      type: "offscreenStateUpdate",
+      tabId: lastSentState.tabId,
+      state: { ...lastSentState.state }
+    });
+  }
+}
+
+// wrap the original setupPort to fire replay after successful connect
+const realSetupPort = setupPort;
+setupPort = function() {
+  realSetupPort();
+  // the port.onDisconnect handler above already re-invokes setupPort,
+  // so the simplest way to trigger a replay is to call it after the
+  // next tick if a port exists.
+  setTimeout(() => {
+    if (port) replayLastState();
+  }, 0);
+};
+
 
 // Send keepalive ping to background every 30 seconds
 setInterval(() => {
@@ -156,11 +202,26 @@ async function pollOnce(tabId) {
     st.lastError = String(e);
   }
 
-  chrome.runtime.sendMessage({
-    type: "offscreenStateUpdate",
-    tabId,
-    state: { ...st }
-  });
+  // remember the last state so we can replay if the background dies
+  lastSentState = { tabId, state: { ...st } };
+
+  function dispatchState() {
+    chrome.runtime.sendMessage({
+      type: "offscreenStateUpdate",
+      tabId,
+      state: { ...st }
+    }, resp => {
+      if (chrome.runtime.lastError) {
+        log("offscreenStateUpdate failed:", chrome.runtime.lastError.message);
+        // ensure port exists; this will schedule a reconnect if needed
+        if (!port) setupPort();
+        // we will retry automatically when the port is re-established
+      }
+    });
+  }
+
+  dispatchState();
+
 }
 
 // -------------------------------------------------------------
