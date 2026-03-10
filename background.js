@@ -1185,10 +1185,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === "log") {
-    // Forward log messages to content script
-    const destTab = sender.tab?.id || fetchRequestorTabId;
+    // Forward log messages to whichever UI started the active workflow.
+    const destTab = sender.tab?.id || downloadRequestorTabId || fetchRequestorTabId;
     if (destTab) {
       chrome.tabs.sendMessage(destTab, { action: "log", text: msg.text }).catch(() => {});
+    } else {
+      try {
+        chrome.runtime.sendMessage({ action: "log", text: msg.text });
+      } catch (e) {
+        // ignore
+      }
     }
   }
 });
@@ -1392,6 +1398,18 @@ function findUuidLikeId(obj) {
 async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 0, downloadOptions = { music: true, lyrics: true, image: true }) {
   const cleanFolder = folderName.replace(/[^a-zA-Z0-9_-]/g, "");
 
+  function notifyDownloadUi(message) {
+    if (downloadRequestorTabId) {
+      chrome.tabs.sendMessage(downloadRequestorTabId, message).catch(() => {});
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage(message);
+    } catch (e) {
+      // ignore
+    }
+  }
+
   function sanitizeFilename(name) {
     return name.replace(/[<>:"/\\|?*]/g, "").trim().substring(0, 100);
   }
@@ -1414,11 +1432,29 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
   }
 
   async function downloadOneFile(url, filename) {
-    const downloadId = await chrome.downloads.download({
-      url,
-      filename,
-      conflictAction: "uniquify"
-    });
+    if (!chrome.downloads?.download) {
+      throw new Error('Downloads API is unavailable in this browser.');
+    }
+
+    let downloadId;
+    try {
+      downloadId = await chrome.downloads.download({
+        url,
+        filename,
+        conflictAction: "uniquify"
+      });
+    } catch (err) {
+      // Some Firefox Android builds reject custom filenames. Retry without filename.
+      if (isAndroid || isFirefox) {
+        downloadId = await chrome.downloads.download({
+          url,
+          conflictAction: "uniquify"
+        });
+      } else {
+        throw err;
+      }
+    }
+
     if (typeof downloadId !== 'number') return false;
 
     activeDownloadIds.add(downloadId);
@@ -1470,10 +1506,10 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
     return;
   }
 
-  chrome.runtime.sendMessage({ action: "log", text: `🚀 Starting download of ${songs.length} song(s): ${selectedTypes.join(', ')}...` });
+  notifyDownloadUi({ action: "log", text: `🚀 Starting download of ${songs.length} song(s): ${selectedTypes.join(', ')}...` });
 
   if (isAndroid) {
-    chrome.runtime.sendMessage({ action: "log", text: '📱 Android detected: saving files without subfolders.' });
+    notifyDownloadUi({ action: "log", text: '📱 Android detected: using compatibility mode for file saving.' });
   }
 
   let downloadedCount = 0;
@@ -1481,7 +1517,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
 
   for (const song of songs) {
     if (stopDownloadRequested || !isDownloading || jobId !== currentDownloadJobId) {
-      chrome.runtime.sendMessage({ action: "log", text: "⏹️ Download stopped by user." });
+      notifyDownloadUi({ action: "log", text: "⏹️ Download stopped by user." });
       break;
     }
 
@@ -1527,29 +1563,28 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
       }
 
       downloadedCount++;
-      chrome.runtime.sendMessage({ action: "log", text: `✅ Downloaded: ${title} (${downloadedCount}/${songs.length})` });
+      notifyDownloadUi({ action: "log", text: `✅ Downloaded: ${title} (${downloadedCount}/${songs.length})` });
     } catch (err) {
       failedCount++;
-      chrome.runtime.sendMessage({ action: "log", text: `❌ Failed: ${title} - ${err.message}` });
+      notifyDownloadUi({ action: "log", text: `❌ Failed: ${title} - ${err.message}` });
     }
 
     // Small delay between songs
     await new Promise(r => setTimeout(r, 200));
   }
 
+  const wasStopped = stopDownloadRequested;
   stopDownloadRequested = false;
   isDownloading = false;
   activeDownloadIds = new Set();
   persistDownloadState({ finishedAt: Date.now() });
   broadcastDownloadState();
 
-  if (downloadRequestorTabId) {
-    chrome.tabs.sendMessage(downloadRequestorTabId, {
-      action: "log",
-      text: `✅ Download complete! ${downloadedCount} succeeded, ${failedCount} failed.`
-    }).catch(() => {});
-    chrome.tabs.sendMessage(downloadRequestorTabId, { action: "download_complete", stopped: false }).catch(() => {});
-  }
+  notifyDownloadUi({
+    action: "log",
+    text: `✅ Download complete! ${downloadedCount} succeeded, ${failedCount} failed.`
+  });
+  notifyDownloadUi({ action: "download_complete", stopped: wasStopped });
 }
 
 // Keep active download IDs in sync
