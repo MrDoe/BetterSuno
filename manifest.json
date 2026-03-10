@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BetterSuno",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Enhanced Suno.com experience with notifications and song downloads",
 
   "browser_specific_settings": {
@@ -13,11 +13,14 @@
         "is_data_collected": false,
         "required": ["none"]
       }
+    },
+    "gecko_android": {
+      "strict_min_version": "113.0"
     }
   },
 
   "permissions": [
-    "cookies",           
+    "cookies",
     "alarms",            
     "scripting",         
     "tabs",              
