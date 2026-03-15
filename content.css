@@ -103,9 +103,9 @@
   position: absolute !important;
   bottom: 60px !important;
   right: 0 !important;
-  width: 380px !important;
-  height: 640px !important;
-  max-height: 640px !important;
+  width: min(520px, calc(100vw - 40px)) !important;
+  height: min(820px, calc(100vh - 96px)) !important;
+  max-height: calc(100vh - 96px) !important;
   background: var(--bettersuno-bg) !important;
   border: 1px solid var(--bettersuno-border) !important;
   border-radius: 12px !important;
@@ -184,6 +184,17 @@
   text-align: center !important;
   color: var(--bettersuno-text-muted) !important;
   font-size: 13px !important;
+}
+
+.bettersuno-list-sentinel {
+  padding: 10px 16px !important;
+  text-align: center !important;
+  font-size: 11px !important;
+  color: var(--bettersuno-text-muted) !important;
+}
+
+.bettersuno-list-sentinel.is-complete {
+  opacity: 0.7 !important;
 }
 
 /* Individual notification row */
@@ -316,7 +327,7 @@
 
 /* Duplicate-tab warning notice */
 .bettersuno-duplicate-notice {
-  display: flex !important;
+  display: none !important;
   align-items: center !important;
   padding: 6px 16px !important;
   background: rgba(245, 158, 11, 0.12) !important;
@@ -325,6 +336,10 @@
   font-size: 11px !important;
   gap: 6px !important;
   flex-shrink: 0 !important;
+}
+
+.bettersuno-duplicate-notice.is-visible {
+  display: flex !important;
 }
 
 /* ---- Settings Content ---- */
@@ -512,6 +527,15 @@
   background: #e53935 !important;
 }
 
+#bettersuno-panel .btn-danger {
+  background: #7f1d1d !important;
+  color: white !important;
+}
+
+#bettersuno-panel .btn-danger:hover:not(:disabled) {
+  background: #991b1b !important;
+}
+
 #bettersuno-panel .btn-success {
   background: linear-gradient(135deg, #26c281 0%, #2ecc71 100%) !important;
   color: white !important;
@@ -658,6 +682,22 @@
   flex: 1 !important;
 }
 
+#bettersuno-panel .btn-row-actions {
+  align-items: center !important;
+  flex-wrap: nowrap !important;
+}
+
+#bettersuno-panel .btn-row-actions #downloadBtn {
+  flex: 1 1 0 !important;
+}
+
+#bettersuno-panel .btn-row-actions .btn-stop {
+  flex: 0 0 auto !important;
+  min-width: 58px !important;
+  padding-left: 10px !important;
+  padding-right: 10px !important;
+}
+
 #bettersuno-panel .db-download-progress {
   margin-top: 8px !important;
 }
@@ -771,7 +811,8 @@
 #bettersuno-panel .song-item {
   display: flex !important;
   align-items: center !important;
-  padding: 9px 10px !important;
+  gap: 10px !important;
+  padding: 10px 12px !important;
   border-bottom: 1px solid #27272a !important;
   font-size: 12px !important;
   transition: background 0.15s !important;
@@ -787,13 +828,40 @@
 }
 
 #bettersuno-panel .song-item input[type="checkbox"] {
-  margin-right: 8px !important;
   flex-shrink: 0 !important;
+  margin: 0 !important;
+}
+
+#bettersuno-panel .song-thumbnail {
+  width: 44px !important;
+  height: 44px !important;
+  border-radius: 8px !important;
+  overflow: hidden !important;
+  flex-shrink: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.35) 0%, rgba(118, 75, 162, 0.45) 100%) !important;
+  color: #f4f4f5 !important;
+  font-size: 20px !important;
+  font-weight: 700 !important;
+}
+
+#bettersuno-panel .song-thumbnail-image {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  display: block !important;
+}
+
+#bettersuno-panel .song-thumbnail.is-fallback {
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
 }
 
 #bettersuno-panel .song-info {
   flex: 1 !important;
   overflow: hidden !important;
+  min-width: 0 !important;
 }
 
 #bettersuno-panel .song-title {
@@ -811,6 +879,7 @@
   display: flex !important;
   gap: 8px !important;
   align-items: center !important;
+  flex-wrap: wrap !important;
 }
 
 #bettersuno-panel .song-meta .public {
@@ -830,6 +899,48 @@
   padding: 4px 10px !important;
   flex-wrap: wrap !important;
   color: #f4f4f5 !important;
+}
+
+#bettersuno-panel #selectControls #selectAll {
+  flex: 0 0 auto !important;
+  padding: 5px 8px !important;
+  font-size: 11px !important;
+  letter-spacing: 0 !important;
+  min-height: 28px !important;
+  line-height: 1 !important;
+}
+
+#bettersuno-panel #selectControls #selectAll[aria-pressed="true"] {
+  background: #667eea !important;
+  color: white !important;
+  border-color: #667eea !important;
+}
+
+#bettersuno-panel #selectControls #cacheAllBtn {
+  flex: 0 0 auto !important;
+  padding: 5px 8px !important;
+  font-size: 11px !important;
+  letter-spacing: 0 !important;
+  min-height: 28px !important;
+  line-height: 1 !important;
+}
+
+#bettersuno-panel #selectControls #stopCacheBtn {
+  flex: 0 0 auto !important;
+  min-width: 52px !important;
+  min-height: 28px !important;
+  padding: 5px 8px !important;
+  font-size: 11px !important;
+  line-height: 1 !important;
+}
+
+#bettersuno-panel #selectControls #deleteCachedBtn {
+  flex: 0 0 auto !important;
+  padding: 5px 8px !important;
+  font-size: 11px !important;
+  letter-spacing: 0 !important;
+  min-height: 28px !important;
+  line-height: 1 !important;
 }
 
 #bettersuno-panel #filterControls {
@@ -896,5 +1007,99 @@
 
 #bettersuno-panel #songListContainer input[type="text"]:focus {
   border-color: #667eea !important;
+}
+
+@media (max-width: 768px) {
+  #bettersuno-root {
+    bottom: 16px !important;
+    right: 16px !important;
+  }
+
+  #bettersuno-panel {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+
+  #bettersuno-header,
+  #bettersuno-settings-content,
+  #bettersuno-panel #songListContainer {
+    padding-left: max(16px, env(safe-area-inset-left)) !important;
+    padding-right: max(16px, env(safe-area-inset-right)) !important;
+  }
+
+  #bettersuno-header {
+    padding-top: max(12px, env(safe-area-inset-top)) !important;
+  }
+
+  #bettersuno-download-content {
+    height: 100% !important;
+    overflow: hidden !important;
+  }
+
+  #bettersuno-downloader-wrapper {
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100% !important;
+    min-height: 0 !important;
+  }
+
+  #bettersuno-panel #songListContainer {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+  }
+
+  #bettersuno-panel #downloadTypeControls,
+  #bettersuno-panel #filterControls {
+    padding: 6px 8px !important;
+    margin-bottom: 4px !important;
+  }
+
+  #bettersuno-panel #filterInput,
+  #bettersuno-panel #selectControls,
+  #bettersuno-panel .btn-row,
+  #bettersuno-panel .db-download-progress {
+    margin-bottom: 6px !important;
+  }
+
+  #bettersuno-panel #songList {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin-bottom: 6px !important;
+  }
+
+  #bettersuno-panel #status {
+    height: 52px !important;
+    margin-top: 6px !important;
+    margin-bottom: 0 !important;
+  }
+
+  #bettersuno-panel .version-footer {
+    display: none !important;
+  }
+
+  #bettersuno-mini-player {
+    padding-bottom: max(10px, env(safe-area-inset-bottom)) !important;
+  }
+
+  #bettersuno-panel .song-item {
+    gap: 12px !important;
+    padding: 12px 0 !important;
+  }
+
+  #bettersuno-panel .song-thumbnail {
+    width: 52px !important;
+    height: 52px !important;
+  }
 }
 

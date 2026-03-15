@@ -6,6 +6,11 @@
   let lastSeenCount = 0;
   let panelOpen = false;
   let currentTab = 'notifications';
+  const NOTIFICATION_RENDER_BATCH_SIZE = 25;
+  let currentNotifications = [];
+  let renderedNotificationCount = 0;
+  let notificationsSentinel = null;
+  let notificationsObserver = null;
 
   // ---- Build DOM ----
   const root = document.createElement('div');
@@ -73,21 +78,18 @@
             <input type="text" id="filterInput" placeholder="🔍 Search songs by title..." />
 
             <span id="selectControls">
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="selectAll" /> Select All
-              </label>
+              <button id="selectAll" class="btn-secondary" type="button" aria-pressed="false">Select All</button>
+              <button id="cacheAllBtn" class="btn-secondary" title="Download selected songs as MP3 into the browser database for offline playback">Download to DB</button>
+              <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
+              <button id="deleteCachedBtn" class="btn-danger" title="Delete the selected songs from the browser database">Delete from DB</button>
               <span id="songCount">0 songs</span>
             </span>
 
             <div id="songList"></div>
 
-            <div class="btn-row">
-              <button id="downloadBtn" class="btn-primary" style="flex: 2">Download Selected</button>
+            <div class="btn-row btn-row-actions">
+              <button id="downloadBtn" class="btn-primary">Download</button>
               <button id="stopDownloadBtn" class="btn-stop hidden">Stop</button>
-            </div>
-            <div class="btn-row" style="margin-top: 4px;">
-              <button id="cacheAllBtn" class="btn-secondary" style="flex: 2" title="Download selected songs as MP3 into the browser database for offline playback">💾 Download to DB</button>
-              <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
             </div>
             <div id="dbDownloadProgress" class="db-download-progress hidden" aria-live="polite">
               <div class="db-download-progress-label">
@@ -409,6 +411,130 @@
   // ---- Render notification list ----
   let currentNotifCount = 0;
 
+  function ensureNotificationObserver() {
+    if (notificationsObserver || !list) {
+      return;
+    }
+
+    notificationsObserver = new IntersectionObserver((entries) => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        renderNotificationChunk();
+      }
+    }, {
+      root: list,
+      rootMargin: '0px 0px 160px 0px'
+    });
+  }
+
+  function updateNotificationSentinelState() {
+    if (!notificationsSentinel) {
+      return;
+    }
+
+    const remaining = Math.max(currentNotifications.length - renderedNotificationCount, 0);
+    notificationsSentinel.classList.toggle('is-complete', remaining === 0);
+    notificationsSentinel.textContent = remaining > 0
+      ? `Scroll to load ${Math.min(remaining, NOTIFICATION_RENDER_BATCH_SIZE)} more notifications`
+      : (currentNotifications.length > 0 ? 'All notifications loaded' : '');
+  }
+
+  function ensureNotificationSentinel() {
+    ensureNotificationObserver();
+
+    if (!notificationsSentinel) {
+      notificationsSentinel = document.createElement('div');
+      notificationsSentinel.className = 'bettersuno-list-sentinel';
+    }
+
+    if (!notificationsSentinel.isConnected) {
+      list.appendChild(notificationsSentinel);
+    }
+
+    if (notificationsObserver) {
+      notificationsObserver.disconnect();
+      notificationsObserver.observe(notificationsSentinel);
+    }
+
+    updateNotificationSentinelState();
+  }
+
+  function createNotificationItem(n) {
+    const d = describeNotif(n);
+
+    const itemDiv = document.createElement('div');
+    itemDiv.className = 'bettersuno-item';
+
+    if (d.avatar) {
+      const avatarLink = document.createElement('a');
+      avatarLink.href = `https://suno.com/@${d.firstHandle}`;
+      avatarLink.target = '_blank';
+      const avatarImg = document.createElement('img');
+      avatarImg.className = 'bettersuno-avatar';
+      avatarImg.src = d.avatar;
+      avatarLink.appendChild(avatarImg);
+      itemDiv.appendChild(avatarLink);
+    }
+
+    const bodyDiv = document.createElement('div');
+    bodyDiv.className = 'bettersuno-body';
+
+    const textDiv = document.createElement('div');
+    textDiv.className = 'bettersuno-text';
+
+    const whoLink = document.createElement('a');
+    whoLink.href = `https://suno.com/@${d.firstHandle}`;
+    whoLink.target = '_blank';
+    whoLink.textContent = d.who;
+    textDiv.appendChild(whoLink);
+
+    textDiv.appendChild(document.createTextNode(' ' + d.text));
+
+    const timeDiv = document.createElement('div');
+    timeDiv.className = 'bettersuno-time';
+    timeDiv.textContent = formatAgo(d.ts);
+
+    bodyDiv.appendChild(textDiv);
+    bodyDiv.appendChild(timeDiv);
+    itemDiv.appendChild(bodyDiv);
+
+    if (d.contentImg) {
+      const imgLink = document.createElement('a');
+      imgLink.href = d.url;
+      imgLink.target = '_blank';
+      const contentImg = document.createElement('img');
+      contentImg.className = 'bettersuno-content-img';
+      contentImg.src = d.contentImg;
+      imgLink.appendChild(contentImg);
+      itemDiv.appendChild(imgLink);
+    }
+
+    return itemDiv;
+  }
+
+  function renderNotificationChunk(count = NOTIFICATION_RENDER_BATCH_SIZE) {
+    if (!currentNotifications.length) {
+      return;
+    }
+
+    ensureNotificationSentinel();
+
+    const start = renderedNotificationCount;
+    const end = Math.min(start + count, currentNotifications.length);
+    if (start >= end) {
+      updateNotificationSentinelState();
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (let index = start; index < end; index++) {
+      fragment.appendChild(createNotificationItem(currentNotifications[index]));
+    }
+
+    list.insertBefore(fragment, notificationsSentinel);
+    renderedNotificationCount = end;
+    updateNotificationSentinelState();
+  }
+
   function renderNotifications(notifications, enabled) {
     // Status indicator
     if (enabled) {
@@ -439,63 +565,12 @@
       return;
     }
 
-    // Clear and rebuild notification list using DOM methods
     list.textContent = '';
-    notifications.slice(0, 50).forEach(n => {
-      const d = describeNotif(n);
-      
-      const itemDiv = document.createElement('div');
-      itemDiv.className = 'bettersuno-item';
-      
-      // Avatar
-      if (d.avatar) {
-        const avatarLink = document.createElement('a');
-        avatarLink.href = `https://suno.com/@${d.firstHandle}`;
-        avatarLink.target = '_blank';
-        const avatarImg = document.createElement('img');
-        avatarImg.className = 'bettersuno-avatar';
-        avatarImg.src = d.avatar;
-        avatarLink.appendChild(avatarImg);
-        itemDiv.appendChild(avatarLink);
-      }
-      
-      // Body
-      const bodyDiv = document.createElement('div');
-      bodyDiv.className = 'bettersuno-body';
-      
-      const textDiv = document.createElement('div');
-      textDiv.className = 'bettersuno-text';
-      
-      const whoLink = document.createElement('a');
-      whoLink.href = `https://suno.com/@${d.firstHandle}`;
-      whoLink.target = '_blank';
-      whoLink.textContent = d.who;
-      textDiv.appendChild(whoLink);
-      
-      textDiv.appendChild(document.createTextNode(' ' + d.text));
-      
-      const timeDiv = document.createElement('div');
-      timeDiv.className = 'bettersuno-time';
-      timeDiv.textContent = formatAgo(d.ts);
-      
-      bodyDiv.appendChild(textDiv);
-      bodyDiv.appendChild(timeDiv);
-      itemDiv.appendChild(bodyDiv);
-      
-      // Content image
-      if (d.contentImg) {
-        const imgLink = document.createElement('a');
-        imgLink.href = d.url;
-        imgLink.target = '_blank';
-        const contentImg = document.createElement('img');
-        contentImg.className = 'bettersuno-content-img';
-        contentImg.src = d.contentImg;
-        imgLink.appendChild(contentImg);
-        itemDiv.appendChild(imgLink);
-      }
-      
-      list.appendChild(itemDiv);
-    });
+    currentNotifications = notifications;
+    renderedNotificationCount = 0;
+    list.scrollTop = 0;
+    ensureNotificationSentinel();
+    renderNotificationChunk();
   }
 
   // ---- Guard: detect invalidated extension context ----
@@ -541,7 +616,12 @@
   }
 
   // ---- Listen for live updates ----
-  chrome.runtime.onMessage.addListener((msg) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === 'bettersunoProbeTab') {
+      sendResponse({ ok: true });
+      return;
+    }
+
     if (msg.type === 'stateUpdate') {
       // previous versions filtered for "global" only; after the
       // background started sending both tab-specific and global
@@ -632,7 +712,7 @@
         if (chrome.runtime.lastError || !response) return;
         const notice = document.getElementById('bettersuno-duplicate-tab-notice');
         if (notice) {
-          notice.style.display = response.otherTabsCount > 0 ? 'flex' : 'none';
+          notice.classList.toggle('is-visible', response.otherTabsCount > 0);
         }
       });
     } catch (e) {

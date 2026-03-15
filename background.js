@@ -143,6 +143,19 @@ function ensureTabState(tabId) {
   return tabState[tabId];
 }
 
+async function hasLiveBetterSunoContentScript(tabId) {
+  if (typeof tabId !== 'number' || Number.isNaN(tabId)) {
+    return false;
+  }
+
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'bettersunoProbeTab' });
+    return response?.ok === true;
+  } catch (err) {
+    return false;
+  }
+}
+
 // ============================================================================
 // Clerk Session Token aus Cookies + eigener Refresh
 // ============================================================================
@@ -826,9 +839,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Content script checks whether another suno.com tab already has the extension running.
   if (msg.type === "checkActiveTab") {
     const senderTabId = sender.tab?.id;
-    chrome.tabs.query({ url: "https://suno.com/*" }).then(tabs => {
-      const otherTabs = tabs.filter(t => t.id !== senderTabId);
-      sendResponse({ otherTabsCount: otherTabs.length });
+    if (typeof senderTabId !== 'number' || Number.isNaN(senderTabId)) {
+      sendResponse({ otherTabsCount: 0 });
+      return true;
+    }
+
+    chrome.tabs.query({ url: "https://suno.com/*" }).then(async tabs => {
+      const candidateTabs = tabs.filter(t => t.id !== senderTabId && typeof t.id === 'number');
+      const probeResults = await Promise.all(
+        candidateTabs.map(t => hasLiveBetterSunoContentScript(t.id))
+      );
+      const otherTabsCount = probeResults.filter(Boolean).length;
+      sendResponse({ otherTabsCount });
     }).catch(() => {
       sendResponse({ otherTabsCount: 0 });
     });
