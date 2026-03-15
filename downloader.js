@@ -282,7 +282,7 @@
             stopDownloadBtn.classList.remove("hidden");
         } else {
             downloadBtn.disabled = false;
-            downloadBtn.textContent = "Download Selected";
+            downloadBtn.textContent = "Download locally";
             stopDownloadBtn.classList.add("hidden");
         }
     }

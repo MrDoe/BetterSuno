@@ -79,7 +79,7 @@
             <div id="songList"></div>
 
             <div class="btn-row">
-              <button id="downloadBtn" class="btn-primary" style="flex: 2">Download Selected</button>
+              <button id="downloadBtn" class="btn-primary" style="flex: 2">Download locally</button>
               <button id="stopDownloadBtn" class="btn-stop hidden">Stop</button>
             </div>
           </div>
