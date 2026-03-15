@@ -8,6 +8,10 @@
     let allSongs = [];
     let filteredSongs = [];
     let currentPlayingSongId = null;
+    let cachedSongIds = new Set();
+    let currentBlobUrl = null;
+    let isCachingAll = false;
+    let stopCachingRequested = false;
 
     // ========================================================================
     // Audio Player
@@ -19,7 +23,7 @@
     const progressBar = document.getElementById('player-progress-bar');
     const playerTime = document.getElementById('player-time');
 
-    function togglePlay(song) {
+    async function togglePlay(song) {
         if (!song || !song.audio_url) return;
 
         if (currentPlayingSongId === song.id) {
@@ -31,9 +35,26 @@
                 playPauseBtn.textContent = '▶';
             }
         } else {
-            // New song
+            // Remember the previous blob URL so we can revoke it after switching sources
+            const prevBlobUrl = currentBlobUrl;
+            currentBlobUrl = null;
+
             currentPlayingSongId = song.id;
-            audioElement.src = song.audio_url;
+
+            // Use cached audio if available, otherwise stream online
+            const cachedBlob = await getAudioBlobFromIDB(song.id);
+            if (cachedBlob) {
+                currentBlobUrl = URL.createObjectURL(cachedBlob);
+                audioElement.src = currentBlobUrl;
+            } else {
+                audioElement.src = song.audio_url;
+            }
+
+            // Revoke the previous blob URL now that the audio element has moved to the new source
+            if (prevBlobUrl) {
+                URL.revokeObjectURL(prevBlobUrl);
+            }
+
             audioElement.play();
             miniPlayer.style.display = 'block';
             playerTitle.textContent = song.title || 'Untitled';
@@ -86,7 +107,7 @@
     // ========================================================================
     
     const IDB_NAME = 'BetterSunoicationsDB';
-    const IDB_VERSION = 1;
+    const IDB_VERSION = 2;
     let dbInstance = null;
 
     async function getDB() {
@@ -108,6 +129,9 @@
                 }
                 if (!db.objectStoreNames.contains('userPreferences')) {
                     db.createObjectStore('userPreferences', { keyPath: 'key' });
+                }
+                if (!db.objectStoreNames.contains('audioCache')) {
+                    db.createObjectStore('audioCache', { keyPath: 'songId' });
                 }
             };
         });
@@ -203,6 +227,56 @@
         }
     }
 
+    async function saveAudioBlobToIDB(songId, blob) {
+        try {
+            const db = await getDB();
+            const tx = db.transaction('audioCache', 'readwrite');
+            const store = tx.objectStore('audioCache');
+            store.put({ songId, blob, timestamp: Date.now() });
+            
+            return new Promise((resolve, reject) => {
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        } catch (e) {
+            console.error('[IDB] Failed to save audio blob:', e);
+        }
+    }
+
+    async function getAudioBlobFromIDB(songId) {
+        try {
+            const db = await getDB();
+            const tx = db.transaction('audioCache', 'readonly');
+            const store = tx.objectStore('audioCache');
+            const request = store.get(songId);
+            
+            return new Promise((resolve, reject) => {
+                request.onsuccess = () => resolve(request.result?.blob || null);
+                request.onerror = () => reject(request.error);
+            });
+        } catch (e) {
+            console.error('[IDB] Failed to get audio blob:', e);
+            return null;
+        }
+    }
+
+    async function getAllCachedSongIdsFromIDB() {
+        try {
+            const db = await getDB();
+            const tx = db.transaction('audioCache', 'readonly');
+            const store = tx.objectStore('audioCache');
+            const request = store.getAllKeys();
+            
+            return new Promise((resolve, reject) => {
+                request.onsuccess = () => resolve(request.result || []);
+                request.onerror = () => reject(request.error);
+            });
+        } catch (e) {
+            console.error('[IDB] Failed to get cached song IDs:', e);
+            return [];
+        }
+    }
+
     // ========================================================================
     // DOM Elements
     // ========================================================================
@@ -221,6 +295,8 @@
     const downloadBtn = document.getElementById("downloadBtn");
     const stopDownloadBtn = document.getElementById("stopDownloadBtn");
     const stopFetchBtn = document.getElementById("bettersuno-stop-fetch-btn");
+    const cacheAllBtn = document.getElementById("cacheAllBtn");
+    const stopCacheBtn = document.getElementById("stopCacheBtn");
     const filterInput = document.getElementById("filterInput");
     const filterLiked = document.getElementById("filterLiked");
     const filterStems = document.getElementById("filterStems");
@@ -242,6 +318,16 @@
     function setFetchUiState(active) {
         if (stopFetchBtn) {
             stopFetchBtn.style.display = active ? 'inline-block' : 'none';
+        }
+    }
+
+    function setCachingUiState(active) {
+        if (cacheAllBtn) {
+            cacheAllBtn.disabled = active;
+            cacheAllBtn.textContent = active ? 'Caching...' : '💾 Cache All Songs';
+        }
+        if (stopCacheBtn) {
+            stopCacheBtn.classList.toggle('hidden', !active);
         }
     }
 
@@ -346,12 +432,16 @@
     async function loadFromStorage() {
         try {
             console.log('[Downloader] Loading songs from IndexedDB...');
-            // Load songs from IndexedDB
-            const savedSongs = await loadSongsFromIDB();
-            const savedFormat = await loadPreferenceFromIDB('sunoFormat');
-            const savedSongsMeta = await loadPreferenceFromIDB('sunoSongsList');
+            // Load songs and cached audio IDs from IndexedDB in parallel
+            const [savedSongs, savedFormat, savedSongsMeta, cachedIds] = await Promise.all([
+                loadSongsFromIDB(),
+                loadPreferenceFromIDB('sunoFormat'),
+                loadPreferenceFromIDB('sunoSongsList'),
+                getAllCachedSongIdsFromIDB()
+            ]);
 
-            console.log('[Downloader] Loaded', savedSongs?.length || 0, 'songs from IndexedDB');
+            cachedSongIds = new Set(cachedIds);
+            console.log('[Downloader] Loaded', savedSongs?.length || 0, 'songs,', cachedSongIds.size, 'cached audio blobs from IndexedDB');
 
             // Load saved format preference first
             if (savedFormat) {
@@ -485,6 +575,58 @@
         } catch (e) {}
     }
 
+    async function cacheAllSongs() {
+        if (allSongs.length === 0) {
+            statusDiv.innerText = "No songs to cache. Fetch your song list first.";
+            return;
+        }
+
+        const songsToCache = allSongs.filter(s => s.audio_url && !cachedSongIds.has(s.id));
+        if (songsToCache.length === 0) {
+            statusDiv.innerText = `All ${allSongs.length} songs are already cached in the browser.`;
+            return;
+        }
+
+        stopCachingRequested = false;
+        isCachingAll = true;
+        setCachingUiState(true);
+
+        let cached = 0;
+        let failed = 0;
+        const total = songsToCache.length;
+
+        for (const song of songsToCache) {
+            if (stopCachingRequested) {
+                statusDiv.innerText = `⏹️ Caching stopped. ${cached} song(s) cached.`;
+                break;
+            }
+
+            statusDiv.innerText = `💾 Caching ${cached + failed + 1}/${total}: ${song.title || 'Untitled'}...`;
+
+            try {
+                const response = await fetch(song.audio_url);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const blob = await response.blob();
+                await saveAudioBlobToIDB(song.id, blob);
+                cachedSongIds.add(song.id);
+                cached++;
+            } catch (e) {
+                failed++;
+                console.error(`[Downloader] Failed to cache "${song.title}":`, e);
+            }
+        }
+
+        isCachingAll = false;
+        setCachingUiState(false);
+
+        if (!stopCachingRequested) {
+            const totalCached = cachedSongIds.size;
+            statusDiv.innerText = `✅ Caching complete! ${cached} new, ${totalCached} total in browser. ${failed > 0 ? `${failed} failed.` : ''}`.trim();
+        }
+
+        renderSongList();
+    }
+
     // Filter input
     filterInput.addEventListener("input", () => {
         applyFilter();
@@ -562,6 +704,21 @@
         statusDiv.innerText = "Stopping download...\n" + statusDiv.innerText;
         // Keep UI in running state until background confirms stop/complete
     });
+
+    // Cache all songs to browser database
+    if (cacheAllBtn) {
+        cacheAllBtn.addEventListener("click", () => {
+            cacheAllSongs();
+        });
+    }
+
+    // Stop caching
+    if (stopCacheBtn) {
+        stopCacheBtn.addEventListener("click", () => {
+            stopCachingRequested = true;
+            stopCacheBtn.disabled = true;
+        });
+    }
 
     // Listen for messages from background
     api.runtime.onMessage.addListener((message) => {
@@ -760,6 +917,14 @@
 
             if (song.created_at) {
                 metaDiv.appendChild(document.createTextNode(' • ' + formatDate(song.created_at)));
+            }
+
+            if (cachedSongIds.has(song.id)) {
+                const cachedSpan = document.createElement("span");
+                cachedSpan.textContent = ' • 💾 Cached';
+                cachedSpan.title = 'Audio stored in browser database';
+                cachedSpan.style.color = '#4caf50';
+                metaDiv.appendChild(cachedSpan);
             }
 
             songInfo.appendChild(titleDiv);

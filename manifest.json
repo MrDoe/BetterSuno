@@ -21,11 +21,11 @@
 
   "permissions": [
     "cookies",
-    "alarms",            
-    "scripting",         
-    "tabs",              
-    "offscreen",         
-    "storage",           
+    "alarms",
+    "scripting",
+    "tabs",
+    "offscreen",
+    "storage", 
     "notifications",
     "downloads"
   ],

@@ -82,6 +82,10 @@
               <button id="downloadBtn" class="btn-primary" style="flex: 2">Download Selected</button>
               <button id="stopDownloadBtn" class="btn-stop hidden">Stop</button>
             </div>
+            <div class="btn-row" style="margin-top: 4px;">
+              <button id="cacheAllBtn" class="btn-secondary" style="flex: 2" title="Download all songs as MP3 into the browser database for offline playback">💾 Cache All Songs</button>
+              <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
+            </div>
           </div>
 
           <div id="bettersuno-mini-player" class="mini-player" style="display: none;">

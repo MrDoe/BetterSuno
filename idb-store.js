@@ -1,7 +1,7 @@
 // idb-store.js — IndexedDB wrapper for persistent storage across browser sessions
 
 const DB_NAME = 'BetterSunoicationsDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbInstance = null;
 
@@ -48,6 +48,11 @@ async function initDB() {
       if (!db.objectStoreNames.contains('userPreferences')) {
         const prefsStore = db.createObjectStore('userPreferences', { keyPath: 'key' });
         console.log('[IDB] Created userPreferences store');
+      }
+
+      if (!db.objectStoreNames.contains('audioCache')) {
+        db.createObjectStore('audioCache', { keyPath: 'songId' });
+        console.log('[IDB] Created audioCache store');
       }
     };
   });
@@ -365,6 +370,114 @@ async function clearAllPreferences() {
   });
 }
 
+/**
+ * Save an audio blob for a song
+ */
+async function saveAudioBlob(songId, blob) {
+  const db = await initDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('audioCache', 'readwrite');
+    const store = transaction.objectStore('audioCache');
+
+    const request = store.put({ songId, blob, timestamp: Date.now() });
+
+    request.onsuccess = () => {
+      console.log('[IDB] Audio blob saved for songId:', songId);
+      resolve();
+    };
+
+    request.onerror = () => {
+      console.error('[IDB] Error saving audio blob:', request.error);
+      reject(request.error);
+    };
+  });
+}
+
+/**
+ * Get a cached audio blob for a song
+ */
+async function getAudioBlob(songId) {
+  const db = await initDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('audioCache', 'readonly');
+    const store = transaction.objectStore('audioCache');
+    const request = store.get(songId);
+
+    request.onsuccess = () => {
+      resolve(request.result?.blob || null);
+    };
+
+    request.onerror = () => {
+      console.error('[IDB] Error getting audio blob:', request.error);
+      reject(request.error);
+    };
+  });
+}
+
+/**
+ * Get all cached song IDs
+ */
+async function getAllCachedSongIds() {
+  const db = await initDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('audioCache', 'readonly');
+    const store = transaction.objectStore('audioCache');
+    const request = store.getAllKeys();
+
+    request.onsuccess = () => {
+      resolve(request.result || []);
+    };
+
+    request.onerror = () => {
+      console.error('[IDB] Error getting cached song IDs:', request.error);
+      reject(request.error);
+    };
+  });
+}
+
+/**
+ * Delete a cached audio blob
+ */
+async function deleteAudioBlob(songId) {
+  const db = await initDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('audioCache', 'readwrite');
+    const store = transaction.objectStore('audioCache');
+    const request = store.delete(songId);
+
+    request.onsuccess = () => {
+      resolve();
+    };
+
+    request.onerror = () => {
+      console.error('[IDB] Error deleting audio blob:', request.error);
+      reject(request.error);
+    };
+  });
+}
+
+/**
+ * Clear all cached audio blobs
+ */
+async function clearAllAudioBlobs() {
+  const db = await initDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction('audioCache', 'readwrite');
+    const store = transaction.objectStore('audioCache');
+    const request = store.clear();
+
+    request.onsuccess = () => {
+      console.log('[IDB] All audio blobs cleared');
+      resolve();
+    };
+
+    request.onerror = () => {
+      console.error('[IDB] Error clearing audio blobs:', request.error);
+      reject(request.error);
+    };
+  });
+}
+
 // ES6 exports for use in background.js and other modules
 export {
   initDB,
@@ -380,5 +493,10 @@ export {
   getPreference,
   getAllPreferences,
   deletePreference,
-  clearAllPreferences
+  clearAllPreferences,
+  saveAudioBlob,
+  getAudioBlob,
+  getAllCachedSongIds,
+  deleteAudioBlob,
+  clearAllAudioBlobs
 };
