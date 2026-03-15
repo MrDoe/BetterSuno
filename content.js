@@ -24,6 +24,9 @@
         <button class="bettersuno-tab"  data-tab="library">Download Songs</button>
         <button class="bettersuno-tab" data-tab="settings">Settings</button>
       </div>
+      <div id="bettersuno-duplicate-tab-notice" class="bettersuno-duplicate-notice" style="display:none;">
+        ⚠️ BetterSuno is already running in another tab
+      </div>
       <div id="bettersuno-list" class="bettersuno-content">
         <div class="bettersuno-empty">No notifications yet</div>
       </div>
@@ -563,12 +566,21 @@
     bell.style.setProperty('pointer-events', 'auto', 'important');
   }
 
-  // Run visibility check frequently to ensure bell always stays visible.
-  let visibilityCheckInterval = setInterval(ensureVisibility, 100);
+  // Run periodic visibility check as a fallback for cases the MutationObserver misses.
+  // 2000ms is sufficient because the MutationObserver handles immediate corrections.
+  let visibilityCheckInterval = setInterval(ensureVisibility, 2000);
   ensureVisibility();
 
-  // Watch for DOM mutations and immediately re-assert visibility after route/layout changes.
-  const visibilityObserver = new MutationObserver(() => ensureVisibility());
+  // Watch for DOM mutations and re-assert visibility after route/layout changes.
+  // Debounced to avoid hammering on the many rapid mutations Suno's SPA produces.
+  let _visibilityDebounce = null;
+  const visibilityObserver = new MutationObserver(() => {
+    clearTimeout(_visibilityDebounce);
+    _visibilityDebounce = setTimeout(() => {
+      _visibilityDebounce = null;
+      ensureVisibility();
+    }, 50);
+  });
   visibilityObserver.observe(document.documentElement, {
     childList: true,
     subtree: true
@@ -599,6 +611,29 @@
     console.debug('[BetterSuno] Extension context unavailable');
   }
 
-  // Periodic refresh as fallback (in case stateUpdate messages are missed)
-  refreshInterval = setInterval(refresh, 30000);
+  // Check if the extension is already running in another suno.com tab and update the notice.
+  // Called on load and on every periodic refresh so the notice stays in sync as tabs open/close.
+  function checkDuplicateTab() {
+    try {
+      chrome.runtime.sendMessage({ type: 'checkActiveTab' }, (response) => {
+        if (chrome.runtime.lastError || !response) return;
+        const notice = document.getElementById('bettersuno-duplicate-tab-notice');
+        if (notice) {
+          notice.style.display = response.otherTabsCount > 0 ? 'flex' : 'none';
+        }
+      });
+    } catch (e) {
+      console.debug('[BetterSuno] Could not check active tabs');
+    }
+  }
+
+  // Periodic refresh as fallback (in case stateUpdate messages are missed).
+  // Also re-checks duplicate tab status so the notice stays current.
+  refreshInterval = setInterval(() => {
+    refresh();
+    checkDuplicateTab();
+  }, 30000);
+
+  // Initial duplicate-tab check on load.
+  checkDuplicateTab();
 })();
