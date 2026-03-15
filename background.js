@@ -823,6 +823,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Content script checks whether another suno.com tab already has the extension running.
+  if (msg.type === "checkActiveTab") {
+    const senderTabId = sender.tab?.id;
+    chrome.tabs.query({ url: "https://suno.com/*" }).then(tabs => {
+      const otherTabs = tabs.filter(t => t.id !== senderTabId);
+      sendResponse({ otherTabsCount: otherTabs.length });
+    }).catch(() => {
+      sendResponse({ otherTabsCount: 0 });
+    });
+    return true;
+  }
+
   // Content script (or UI) requests loading existing notifications from Suno
   if (msg.type === "contentFetchExisting") {
     log("contentFetchExisting: message received, starting fetch");
