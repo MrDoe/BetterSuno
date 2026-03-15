@@ -701,12 +701,11 @@
 }
 
 #bettersuno-panel .btn-row-actions #downloadBtn {
-  flex: 1 1 0 !important;
+  flex: 0 0 auto !important;
 }
 
 #bettersuno-panel .btn-row-actions .btn-stop {
   flex: 0 0 auto !important;
-  min-width: 58px !important;
   padding-left: 10px !important;
   padding-right: 10px !important;
 }
