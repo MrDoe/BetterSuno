@@ -213,7 +213,8 @@
             is_public: clip.is_public !== false,
             created_at: clip.created_at || clip.createdAt || rawClip?.created_at || null,
             is_liked: clip.is_liked || false,
-            is_stem: isStemClip(clip)
+            is_stem: isStemClip(clip),
+            upvote_count: clip.upvote_count || 0
         };
     }
 
@@ -1191,6 +1192,18 @@
         const existingIds = new Set(allSongs.map(s => s.id));
         const addedSongs = newSongs.filter(s => !existingIds.has(s.id));
 
+        // Update upvote_count on existing songs from fresh API data
+        if (newSongs.length > 0) {
+            const newSongsById = new Map(newSongs.map(s => [s.id, s]));
+            allSongs = allSongs.map(s => {
+                const fresh = newSongsById.get(s.id);
+                if (fresh && fresh.upvote_count !== undefined) {
+                    return { ...s, upvote_count: fresh.upvote_count };
+                }
+                return s;
+            });
+        }
+
         if (addedSongs.length > 0) {
             // Add new songs at the beginning
             allSongs = [...addedSongs, ...allSongs];
@@ -1906,6 +1919,13 @@
             likedSpan.textContent = ' • ❤️ Liked';
             likedSpan.style.color = '#e91e63';
             metaDiv.appendChild(likedSpan);
+        }
+
+        if (song.upvote_count > 0) {
+            const likesSpan = document.createElement("span");
+            likesSpan.textContent = ` • 👍 ${song.upvote_count.toLocaleString()}`;
+            likesSpan.title = `${song.upvote_count.toLocaleString()} likes`;
+            metaDiv.appendChild(likesSpan);
         }
 
         if (song.is_stem) {

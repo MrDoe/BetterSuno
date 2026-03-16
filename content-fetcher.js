@@ -327,7 +327,8 @@
                     is_public: clip.is_public,
                     created_at: clip.created_at,
                     is_liked: clip.is_liked || false,
-                    is_stem: isStemClip(clip)
+                    is_stem: isStemClip(clip),
+                    upvote_count: clip.upvote_count || 0
                 });
             }
 
