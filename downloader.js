@@ -20,8 +20,11 @@
     let songListObserver = null;
     const songItemCache = new Map(); // songId → DOM element; reused on re-renders to prevent image reload
     const SYNC_META_KEY = 'sunoSyncMeta';
+    const PLAYLISTS_KEY = 'sunoPlaylists';
+    const SELECTED_PLAYLIST_KEY = 'sunoSelectedPlaylist';
     let currentFetchMode = 'idle';
     let syncMeta = createDefaultSyncMeta();
+    let playlistSongs = null; // Active playlist songs when a playlist is selected, else null
 
     function createDefaultSyncMeta() {
         return {
@@ -36,6 +39,207 @@
         };
     }
 
+    function getActiveSongs() {
+        return Array.isArray(playlistSongs) ? playlistSongs : allSongs;
+    }
+
+    function getPlaylistSongsCacheKey(playlistId) {
+        return `sunoPlaylistSongs:${playlistId}`;
+    }
+
+    function normalizePlaylistMetadata(playlist) {
+        return {
+            id: playlist?.id || '',
+            name: playlist?.name || 'Unnamed Playlist',
+            song_count: playlist?.song_count ?? playlist?.num_total_results ?? null,
+            num_total_results: playlist?.num_total_results ?? null,
+            is_public: playlist?.is_public,
+            is_owned: playlist?.is_owned,
+            image_url: playlist?.image_url || null,
+            description: playlist?.description || ''
+        };
+    }
+
+    async function clearPlaylistCache() {
+        try {
+            const preferenceRows = await getAllRecordsFromStore('userPreferences');
+            const keysToDelete = preferenceRows
+                .map(row => row?.key)
+                .filter(key => key === PLAYLISTS_KEY || key === SELECTED_PLAYLIST_KEY || (typeof key === 'string' && key.startsWith('sunoPlaylistSongs:')));
+
+            await Promise.all(keysToDelete.map(key => deletePreferenceFromIDB(key)));
+        } catch (e) {
+            console.error('[Downloader] Failed to clear playlist cache:', e);
+        }
+    }
+
+    function renderPlaylistOptions(playlists, preferredValue = '') {
+        if (!playlistFilter) return;
+
+        while (playlistFilter.options.length > 1) {
+            playlistFilter.remove(1);
+        }
+
+        playlists.forEach(pl => {
+            const option = document.createElement('option');
+            option.value = pl.id || '';
+            const count = pl.song_count ?? pl.num_total_results;
+            option.textContent = (pl.name || 'Unnamed Playlist') +
+                (count != null ? ` (${count})` : '');
+            playlistFilter.appendChild(option);
+        });
+
+        if (preferredValue && Array.from(playlistFilter.options).some(option => option.value === preferredValue)) {
+            playlistFilter.value = preferredValue;
+        }
+    }
+
+    function extractText(value) {
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            return trimmed.length > 0 ? trimmed : null;
+        }
+
+        if (Array.isArray(value)) {
+            const parts = value.map(extractText).filter(Boolean);
+            return parts.length > 0 ? parts.join('\n') : null;
+        }
+
+        if (value && typeof value === 'object') {
+            const nestedCandidates = [
+                value.lyrics,
+                value.display_lyrics,
+                value.full_lyrics,
+                value.raw_lyrics,
+                value.prompt,
+                value.text,
+                value.content,
+                value.value
+            ];
+            for (const candidate of nestedCandidates) {
+                const text = extractText(candidate);
+                if (text) return text;
+            }
+        }
+
+        return null;
+    }
+
+    function extractUrl(value) {
+        if (typeof value === 'string') {
+            const trimmed = value.trim();
+            return /^https?:\/\//i.test(trimmed) ? trimmed : null;
+        }
+
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                const url = extractUrl(item);
+                if (url) return url;
+            }
+        }
+
+        if (value && typeof value === 'object') {
+            const nestedCandidates = [
+                value.url,
+                value.src,
+                value.image_url,
+                value.image,
+                value.cover_url,
+                value.cover_image_url,
+                value.thumbnail_url,
+                value.artwork_url
+            ];
+            for (const candidate of nestedCandidates) {
+                const url = extractUrl(candidate);
+                if (url) return url;
+            }
+        }
+
+        return null;
+    }
+
+    function isStemClip(clip) {
+        if (!clip || typeof clip !== 'object') return false;
+        if (clip.is_stem === true || clip.stem_of || clip.stem_of_id) return true;
+
+        const directStrings = [
+            clip.type,
+            clip.clip_type,
+            clip.generation_type,
+            clip.generation_mode,
+            clip.source,
+            clip.variant
+        ];
+
+        for (const value of directStrings) {
+            if (typeof value === 'string' && value.toLowerCase().includes('stem')) return true;
+        }
+
+        if (Array.isArray(clip.tags) && clip.tags.some(tag => typeof tag === 'string' && tag.toLowerCase().includes('stem'))) {
+            return true;
+        }
+
+        return typeof clip.title === 'string' && /\bstem(s)?\b/i.test(clip.title);
+    }
+
+    function normalizeSongClip(rawClip) {
+        const clip = rawClip?.clip || rawClip || {};
+        return {
+            id: clip.id,
+            title: clip.title || `Untitled_${clip.id || 'song'}`,
+            audio_url: clip.audio_url || clip.stream_audio_url || clip.song_path || null,
+            image_url: extractUrl(
+                clip.image_url ||
+                clip.image ||
+                clip.image_large_url ||
+                clip.cover_url ||
+                clip.cover_image_url ||
+                clip.thumbnail_url ||
+                clip.artwork_url ||
+                clip.metadata?.image_url ||
+                clip.metadata?.cover_image_url ||
+                clip.meta?.image_url
+            ),
+            lyrics: extractText(
+                clip.lyrics ||
+                clip.display_lyrics ||
+                clip.full_lyrics ||
+                clip.raw_lyrics ||
+                clip.prompt ||
+                clip.metadata?.lyrics ||
+                clip.metadata?.prompt ||
+                clip.meta?.lyrics
+            ),
+            is_public: clip.is_public !== false,
+            created_at: clip.created_at || clip.createdAt || rawClip?.created_at || null,
+            is_liked: clip.is_liked || false,
+            is_stem: isStemClip(clip)
+        };
+    }
+
+    function extractPlaylistClipItems(data) {
+        if (!data || typeof data !== 'object') return [];
+
+        const collections = [
+            data.playlist_clips,
+            data.clips,
+            data.results,
+            data.items,
+            data.data?.playlist_clips,
+            data.data?.clips,
+            data.data?.results,
+            data.data?.items
+        ];
+
+        for (const collection of collections) {
+            if (Array.isArray(collection)) {
+                return collection;
+            }
+        }
+
+        return [];
+    }
+
     // ========================================================================
     // Audio Player
     // ========================================================================
@@ -44,7 +248,52 @@
     const playPauseBtn = document.getElementById('player-play-pause');
     const playerTitle = document.getElementById('player-song-title');
     const progressBar = document.getElementById('player-progress-bar');
+    const progressContainer = progressBar?.parentElement || null;
     const playerTime = document.getElementById('player-time');
+    let progressHandle = null;
+
+    if (progressContainer) {
+        progressHandle = progressContainer.querySelector('#player-progress-handle');
+        if (!progressHandle) {
+            progressHandle = document.createElement('div');
+            progressHandle.id = 'player-progress-handle';
+            progressContainer.appendChild(progressHandle);
+        }
+    }
+
+    function formatPlayerTime(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) {
+            return '0:00';
+        }
+
+        const total = Math.floor(seconds);
+        const mins = Math.floor(total / 60);
+        const secs = String(total % 60).padStart(2, '0');
+        return `${mins}:${secs}`;
+    }
+
+    function updatePlayerProgressUi() {
+        if (!audioElement || !progressBar || !playerTime) {
+            return;
+        }
+
+        const duration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
+            ? audioElement.duration
+            : 0;
+        const current = Number.isFinite(audioElement.currentTime) && audioElement.currentTime >= 0
+            ? audioElement.currentTime
+            : 0;
+
+        const percent = duration > 0
+            ? Math.max(0, Math.min(100, (current / duration) * 100))
+            : 0;
+
+        progressBar.style.width = `${percent}%`;
+        if (progressHandle) {
+            progressHandle.style.left = `${percent}%`;
+        }
+        playerTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
+    }
 
     async function togglePlay(song) {
         if (!song || !song.audio_url) return;
@@ -52,7 +301,7 @@
         if (currentPlayingSongId === song.id) {
             if (audioElement.paused) {
                 audioElement.play();
-                playPauseBtn.textContent = '▪';
+                playPauseBtn.textContent = '■';
             } else {
                 audioElement.pause();
                 playPauseBtn.textContent = '▶';
@@ -81,17 +330,43 @@
             audioElement.play();
             miniPlayer.style.display = 'block';
             playerTitle.textContent = song.title || 'Untitled';
-            playPauseBtn.textContent = '▪';
+            playPauseBtn.textContent = '■';
 
             refreshVisibleSongPlaybackState();
         }
+    }
+
+    function getNextSongForPlayback() {
+        if (!Array.isArray(sortedFilteredSongs) || sortedFilteredSongs.length === 0) {
+            return null;
+        }
+
+        const currentIndex = sortedFilteredSongs.findIndex(song => song.id === currentPlayingSongId);
+        if (currentIndex < 0) {
+            return sortedFilteredSongs[0] || null;
+        }
+
+        return sortedFilteredSongs[currentIndex + 1] || null;
+    }
+
+    async function playNextSongAutomatically() {
+        const nextSong = getNextSongForPlayback();
+        if (!nextSong) {
+            currentPlayingSongId = null;
+            playPauseBtn.textContent = '▶';
+            playerTitle.textContent = 'Queue finished';
+            refreshVisibleSongPlaybackState();
+            return;
+        }
+
+        await togglePlay(nextSong);
     }
 
     if (playPauseBtn) {
         playPauseBtn.addEventListener('click', () => {
             if (audioElement.paused) {
                 audioElement.play();
-                playPauseBtn.textContent = '▪';
+                playPauseBtn.textContent = '■';
             } else {
                 audioElement.pause();
                 playPauseBtn.textContent = '▶';
@@ -102,12 +377,15 @@
 
     if (audioElement) {
         audioElement.addEventListener('timeupdate', () => {
-            const percent = (audioElement.currentTime / audioElement.duration) * 100;
-            progressBar.style.width = `${percent}%`;
-            
-            const mins = Math.floor(audioElement.currentTime / 60);
-            const secs = Math.floor(audioElement.currentTime % 60).toString().padStart(2, '0');
-            playerTime.textContent = `${mins}:${secs}`;
+            updatePlayerProgressUi();
+        });
+
+        audioElement.addEventListener('loadedmetadata', () => {
+            updatePlayerProgressUi();
+        });
+
+        audioElement.addEventListener('seeked', () => {
+            updatePlayerProgressUi();
         });
 
         audioElement.addEventListener('play', () => {
@@ -119,8 +397,32 @@
         });
 
         audioElement.addEventListener('ended', () => {
-            playPauseBtn.textContent = '▶';
-            refreshVisibleSongPlaybackState();
+            void playNextSongAutomatically();
+        });
+    }
+
+    if (audioElement && progressContainer) {
+        progressContainer.addEventListener('click', (event) => {
+            if (!Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
+                return;
+            }
+
+            const rect = progressContainer.getBoundingClientRect();
+            if (rect.width <= 0) {
+                return;
+            }
+
+            const rawOffset = event.clientX - rect.left;
+            const clampedOffset = Math.max(0, Math.min(rect.width, rawOffset));
+            const seekRatio = clampedOffset / rect.width;
+            // Move the visual indicator immediately, even before media events fire.
+            const seekPercent = seekRatio * 100;
+            progressBar.style.width = `${seekPercent}%`;
+            if (progressHandle) {
+                progressHandle.style.left = `${seekPercent}%`;
+            }
+            audioElement.currentTime = seekRatio * audioElement.duration;
+            updatePlayerProgressUi();
         });
     }
 
@@ -492,6 +794,8 @@
     const filterStems = document.getElementById("filterStems");
     const filterPublic = document.getElementById("filterPublic");
     const filterOffline = document.getElementById("filterOffline");
+    const playlistFilter = document.getElementById("playlistFilter");
+    const refreshPlaylistsBtn = document.getElementById("refreshPlaylistsBtn");
     const selectAllButton = document.getElementById("selectAll");
     const syncNewBtn = document.getElementById("syncNewBtn");
     const downloadMusicCheckbox = document.getElementById("downloadMusic");
@@ -752,16 +1056,19 @@
     }
 
     async function loadFromStorage() {
+        let savedSelectedPlaylist = '';
         try {
             console.log('[Downloader] Loading songs from IndexedDB...');
             // Load songs and cached audio IDs from IndexedDB in parallel
-            const [savedSongs, savedFormat, savedSongsMeta, cachedIds, savedSyncMeta] = await Promise.all([
+            const [savedSongs, savedFormat, savedSongsMeta, cachedIds, savedSyncMeta, persistedSelectedPlaylist] = await Promise.all([
                 loadSongsFromIDB(),
                 loadPreferenceFromIDB('sunoFormat'),
                 loadPreferenceFromIDB('sunoSongsList'),
                 getAllCachedSongIdsFromIDB(),
-                loadPreferenceFromIDB(SYNC_META_KEY)
+                loadPreferenceFromIDB(SYNC_META_KEY),
+                loadPreferenceFromIDB(SELECTED_PLAYLIST_KEY)
             ]);
+            savedSelectedPlaylist = persistedSelectedPlaylist || '';
 
             cachedSongIds = new Set(cachedIds);
             syncMeta = {
@@ -797,6 +1104,12 @@
                 applyFilter();
                 statusDiv.innerText = `${allSongs.length} cached songs. Checking for new...`;
 
+                // Load playlists in background (non-blocking)
+                void loadPlaylists();
+                if (savedSelectedPlaylist) {
+                    void selectPlaylist(savedSelectedPlaylist);
+                }
+
                 console.log('[Downloader] Showing cached songs, checking for new songs...');
                 // Check for new songs
                 setTimeout(() => checkForNewSongs(), 100);
@@ -811,6 +1124,10 @@
         console.log('[Downloader] No cached songs found, will prompt before auto-fetch...');
         // No cached songs — ask user before starting a full fetch
         songListContainer.style.display = "block";
+        void loadPlaylists();
+        if (savedSelectedPlaylist) {
+            void selectPlaylist(savedSelectedPlaylist);
+        }
         startAutoFetch();
     }
 
@@ -888,11 +1205,13 @@
     async function clearStorage() {
         try {
             await deletePreferenceFromIDB('sunoSongsList');
+            await clearPlaylistCache();
         } catch (e) {}
     }
 
     async function cacheAllSongs() {
-        if (allSongs.length === 0) {
+        const activeSongs = getActiveSongs();
+        if (activeSongs.length === 0) {
             statusDiv.innerText = "No songs to cache. Fetch your song list first.";
             return;
         }
@@ -903,7 +1222,7 @@
             return;
         }
 
-        const selectedSongs = allSongs.filter(s => selectedIds.includes(s.id));
+        const selectedSongs = activeSongs.filter(s => selectedIds.includes(s.id));
         const songsToCache = selectedSongs.filter(s => s.audio_url && !cachedSongIds.has(s.id));
         if (songsToCache.length === 0) {
             statusDiv.innerText = `All ${selectedSongs.length} selected song(s) are already in the browser database.`;
@@ -1059,6 +1378,128 @@
         });
     }
 
+    // ========================================================================
+    // Playlist loading and selection
+    // ========================================================================
+
+    async function loadPlaylists() {
+        if (!playlistFilter) return;
+        try {
+            const currentValue = playlistFilter.value;
+            const savedSelection = await loadPreferenceFromIDB(SELECTED_PLAYLIST_KEY);
+            const preferredValue = currentValue || savedSelection || '';
+
+            const cachedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
+            if (Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0) {
+                renderPlaylistOptions(cachedPlaylists, preferredValue);
+            }
+
+            // Fetch all pages (1-based pagination)
+            const allPlaylists = [];
+            let page = 1;
+            while (true) {
+                const response = await api.runtime.sendMessage({ action: 'fetch_user_playlists', page });
+                if (!response?.ok || !response.data) {
+                    const reason = response?.error || `HTTP ${response?.status || 'unknown'}`;
+                    statusDiv.innerText = Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0
+                        ? `Loaded cached playlists. Refresh failed: ${reason}`
+                        : `Playlist load failed: ${reason}`;
+                    return;
+                }
+                const data = response.data;
+                const batch = data.playlists;
+                if (!Array.isArray(batch) || batch.length === 0) break;
+                allPlaylists.push(...batch);
+                // Stop if we have fetched all
+                const total = data.num_total_results || 0;
+                if (allPlaylists.length >= total) break;
+                page++;
+            }
+
+            if (allPlaylists.length === 0) {
+                statusDiv.innerText = Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0
+                    ? `Loaded ${cachedPlaylists.length} cached playlist(s).`
+                    : 'No playlists returned by Suno.';
+                return;
+            }
+
+            // Sort alphabetically by name
+            allPlaylists.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+            const normalizedPlaylists = allPlaylists.map(normalizePlaylistMetadata);
+            renderPlaylistOptions(normalizedPlaylists, preferredValue);
+            await savePreferenceToIDB(PLAYLISTS_KEY, normalizedPlaylists);
+            statusDiv.innerText = `Loaded ${allPlaylists.length} playlist(s).`;
+        } catch (e) {
+            statusDiv.innerText = `Playlist load failed: ${e?.message || String(e)}`;
+            console.debug('[Downloader] Failed to load playlists:', e);
+        }
+    }
+
+    async function selectPlaylist(playlistId) {
+        playlistSongs = null;
+        await savePreferenceToIDB(SELECTED_PLAYLIST_KEY, playlistId || '');
+
+        if (playlistId) {
+            statusDiv.innerText = 'Loading playlist songs...';
+            const cachedSongs = await loadPreferenceFromIDB(getPlaylistSongsCacheKey(playlistId));
+            if (Array.isArray(cachedSongs) && cachedSongs.length > 0) {
+                playlistSongs = cachedSongs;
+                applyFilter();
+                statusDiv.innerText = `Loaded ${cachedSongs.length} cached playlist song(s). Refreshing...`;
+            }
+
+            const playlistClipMap = new Map();
+            let page = 1;
+            while (true) {
+                try {
+                    const response = await api.runtime.sendMessage({
+                        action: 'fetch_playlist_songs',
+                        playlistId,
+                        page
+                    });
+                    if (!response?.ok || !response.data) {
+                        statusDiv.innerText = `Playlist load failed: ${response?.error || response?.status || 'unknown error'}`;
+                        break;
+                    }
+                    const data = response.data;
+                    const clips = extractPlaylistClipItems(data);
+                    for (const c of clips) {
+                        const song = normalizeSongClip(c);
+                        if (song.id) {
+                            playlistClipMap.set(song.id, song);
+                        }
+                    }
+                    const total = data.num_total_results ?? data.total ?? 0;
+                    if (!clips.length || playlistClipMap.size >= total) break;
+                    page++;
+                } catch (e) {
+                    console.debug('[Downloader] Failed to fetch playlist songs page', page, e);
+                    break;
+                }
+            }
+            playlistSongs = Array.from(playlistClipMap.values());
+            await savePreferenceToIDB(getPlaylistSongsCacheKey(playlistId), playlistSongs);
+            statusDiv.innerText = playlistSongs.length > 0
+                ? `Playlist: loaded ${playlistSongs.length} song(s).`
+                : 'Playlist returned no songs from the current API response.';
+        } else {
+            statusDiv.innerText = 'Showing all songs.';
+        }
+        applyFilter();
+    }
+
+    if (playlistFilter) {
+        playlistFilter.addEventListener('change', () => {
+            void selectPlaylist(playlistFilter.value);
+        });
+    }
+
+    if (refreshPlaylistsBtn) {
+        refreshPlaylistsBtn.addEventListener('click', () => {
+            void loadPlaylists();
+        });
+    }
+
     document.addEventListener('bettersuno:refresh-library', () => {
         startFullRefresh({ confirmUser: true });
     });
@@ -1082,9 +1523,16 @@
                 });
             } catch (e) { /* non-fatal */ }
             allSongs = [];
+            playlistSongs = null;
             selectedSongIds.clear();
             cachedSongIds.clear();
             songItemCache.clear();
+            if (playlistFilter) {
+                playlistFilter.value = '';
+                while (playlistFilter.options.length > 1) {
+                    playlistFilter.remove(1);
+                }
+            }
             renderSongList({ preserveScroll: false });
             statusDiv.innerText = "✅ Library deleted successfully.";
             void refreshDbUsageDisplay();
@@ -1110,6 +1558,7 @@
 
     // Download selected songs
     downloadBtn.addEventListener("click", () => {
+        const activeSongs = getActiveSongs();
         const selectedIds = getSelectedSongIds();
         if (selectedIds.length === 0) {
             statusDiv.innerText = "No songs selected!";
@@ -1124,7 +1573,7 @@
 
         const folder = folderInput.value;
         const format = getSelectedFormat();
-        const songsToDownload = allSongs.filter(s => selectedIds.includes(s.id));
+    const songsToDownload = activeSongs.filter(s => selectedIds.includes(s.id));
 
         setDownloadUiState(true);
 
@@ -1564,13 +2013,14 @@
 
     function applyFilter(options = {}) {
         const { preserveScroll = false, minimumRenderCount = SONG_RENDER_BATCH_SIZE } = options;
+        const activeSongs = getActiveSongs();
         const filter = filterInput.value.toLowerCase();
         const showLikedOnly = filterLiked.checked;
         const showStemsOnly = filterStems.checked;
         const showPublicOnly = filterPublic.checked;
         const showOfflineOnly = !!filterOffline?.checked;
 
-        filteredSongs = allSongs.filter(song => {
+        filteredSongs = activeSongs.filter(song => {
             // Text filter
             if (filter && !song.title.toLowerCase().includes(filter)) {
                 return false;
@@ -1616,6 +2066,7 @@
         renderedSongCount = 0;
 
         if (!sortedFilteredSongs.length) {
+            const activeSongs = getActiveSongs();
             const emptyDiv = document.createElement('div');
             emptyDiv.className = 'bettersuno-empty';
             if (filterOffline?.checked) {
@@ -1623,7 +2074,7 @@
                     ? 'No offline songs match the current filters'
                     : 'No offline songs cached yet. Select songs and use Download to DB.';
             } else {
-                emptyDiv.textContent = allSongs.length > 0 ? 'No songs match the current filters' : 'No songs loaded yet';
+                emptyDiv.textContent = activeSongs.length > 0 ? 'No songs match the current filters' : 'No songs loaded yet';
             }
             songList.appendChild(emptyDiv);
             updateSelectedCount();
@@ -1646,7 +2097,8 @@
     }
 
     function getSelectedSongIds() {
-        return Array.from(selectedSongIds).filter(id => allSongs.some(song => song.id === id));
+        const activeSongIds = new Set(getActiveSongs().map(song => song.id));
+        return Array.from(selectedSongIds).filter(id => activeSongIds.has(id));
     }
 
     function getDownloadOptions() {

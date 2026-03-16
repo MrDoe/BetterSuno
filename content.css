@@ -14,8 +14,8 @@
   line-height: 1.4 !important;
   color: var(--bettersuno-text) !important;
   position: fixed !important;
-  bottom: 70px !important;
-  right: 20px !important;
+  top: 20px !important;
+  left: 20px !important;
   z-index: 9999999999 !important;
   display: block !important;
   visibility: visible !important;
@@ -46,8 +46,8 @@
 
 /* ---- Bell button ---- */
 #bettersuno-bell {
-  width: 48px !important;
-  height: 48px !important;
+  width: 40px !important;
+  height: 40px !important;
   border-radius: 50% !important;
   background: var(--bettersuno-accent) !important;
   border: none !important;
@@ -58,6 +58,8 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
   transition: background 0.15s, transform 0.15s !important;
   position: relative !important;
+  top: -10px !important;
+  left: 100px !important;
   pointer-events: auto !important;
   visibility: visible !important;
   opacity: 1 !important;
@@ -618,16 +620,45 @@
 }
 
 .player-progress-container {
-  height: 4px !important;
+  height: 6px !important;
   background: var(--bettersuno-border) !important;
-  border-radius: 2px !important;
-  overflow: hidden !important;
+  border-radius: 999px !important;
+  overflow: visible !important;
+  cursor: pointer !important;
+  position: relative !important;
 }
 
 .player-progress {
   height: 100% !important;
   background: var(--bettersuno-accent) !important;
   width: 0% !important;
+  border-radius: 999px !important;
+  position: relative !important;
+}
+
+.player-progress::after {
+  content: none !important;
+}
+
+#player-progress-handle {
+  position: absolute !important;
+  top: 50% !important;
+  left: 0%;
+  width: 12px !important;
+  height: 12px !important;
+  border-radius: 50% !important;
+  background: #fff !important;
+  border: 1px solid rgba(0, 0, 0, 0.35) !important;
+  box-sizing: border-box !important;
+  transform: translate(-50%, -50%) !important;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) !important;
+  pointer-events: none !important;
+  z-index: 2 !important;
+}
+
+.player-progress-container:hover #player-progress-handle {
+  width: 13px !important;
+  height: 13px !important;
 }
 
 .player-time {
@@ -697,7 +728,19 @@
 
 #bettersuno-panel .btn-row-actions {
   align-items: center !important;
-  flex-wrap: nowrap !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  margin-top: 8px !important;
+}
+
+#bettersuno-panel .btn-row-actions #downloadTypeControls {
+  flex: 1 1 auto !important;
+  margin-bottom: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  gap: 6px !important;
+  flex-wrap: wrap !important;
 }
 
 #bettersuno-panel .btn-row-actions #downloadBtn {
@@ -984,12 +1027,8 @@
 
 #bettersuno-panel #downloadTypeControls {
   display: flex !important;
-  gap: 8px !important;
-  margin-bottom: 6px !important;
+  gap: 6px !important;
   align-items: center !important;
-  padding: 8px 10px !important;
-  background: #27272a !important;
-  border-radius: 6px !important;
   flex-wrap: wrap !important;
   color: #f4f4f5 !important;
   font-size: 12px !important;
@@ -1004,11 +1043,54 @@
 
 #bettersuno-panel #fileFormat {
   display: flex !important;
-  gap: 8px !important;
+  gap: 6px !important;
   align-items: center !important;
   padding-top: 0 !important;
   color: #f4f4f5 !important;
   font-size: 12px !important;
+  border-left: 1px solid #3f3f46 !important;
+  padding-left: 6px !important;
+}
+
+/* Playlist selector row */
+#bettersuno-panel #playlistControls {
+  display: flex !important;
+  gap: 8px !important;
+  margin-bottom: 6px !important;
+  align-items: center !important;
+  padding: 8px 10px !important;
+  background: #27272a !important;
+  border-radius: 6px !important;
+  color: #f4f4f5 !important;
+  font-size: 12px !important;
+  flex-wrap: nowrap !important;
+}
+
+#bettersuno-panel #playlistFilter {
+  flex: 1 1 0 !important;
+  min-width: 0 !important;
+  background: #18181b !important;
+  border: 1px solid #3f3f46 !important;
+  border-radius: 4px !important;
+  color: #f4f4f5 !important;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  font-family: inherit !important;
+  cursor: pointer !important;
+  outline: none !important;
+}
+
+#bettersuno-panel #playlistFilter:focus {
+  border-color: #667eea !important;
+}
+
+#bettersuno-panel #refreshPlaylistsBtn {
+  flex: 0 0 auto !important;
+  padding: 3px 8px !important;
+  font-size: 14px !important;
+  min-height: 26px !important;
+  line-height: 1 !important;
+  letter-spacing: 0 !important;
 }
 
 #bettersuno-panel #songListContainer input[type="text"] {
@@ -1023,8 +1105,8 @@
 
 @media (max-width: 768px) {
   #bettersuno-root {
-    bottom: 16px !important;
-    right: 16px !important;
+    top: 16px !important;
+    left: 16px !important;
   }
 
   #bettersuno-panel {
@@ -1071,7 +1153,8 @@
   }
 
   #bettersuno-panel #downloadTypeControls,
-  #bettersuno-panel #filterControls {
+  #bettersuno-panel #filterControls,
+  #bettersuno-panel #playlistControls {
     padding: 6px 8px !important;
     margin-bottom: 4px !important;
   }

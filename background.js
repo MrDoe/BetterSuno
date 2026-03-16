@@ -643,6 +643,38 @@ function ffHandleMessage(msg) {
 }
 
 // ============================================================================
+// Shared Suno API auth helper
+// ============================================================================
+
+async function getApiTokenWithFallback(logPrefix = 'api') {
+  let token = await ensureValidToken("global");
+
+  if (token) {
+    return token;
+  }
+
+  log(`${logPrefix}: global token failed, trying active Suno tab`);
+  try {
+    const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
+    for (const sunoTab of sunoTabs) {
+      if (typeof sunoTab.id !== 'number') {
+        continue;
+      }
+      log(`${logPrefix}: trying token from tab`, sunoTab.id);
+      token = await ensureValidToken(sunoTab.id);
+      if (token) {
+        return token;
+      }
+    }
+  } catch (err) {
+    log(`${logPrefix}: error finding Suno tabs:`, err.message);
+  }
+
+  log(`${logPrefix}: no token available from any source`);
+  return null;
+}
+
+// ============================================================================
 // Fetch existing notifications from Suno API (no after_datetime_utc)
 // ============================================================================
 
@@ -650,25 +682,9 @@ async function fetchExistingNotifications() {
   log("fetchExistingNotifications: loading existing notifications from Suno API");
   const st = ensureTabState("global");
 
-  let token = await ensureValidToken("global");
-  
-  // If global token fails, try to get token from any active Suno tab
-  if (!token) {
-    log("fetchExistingNotifications: global token failed, trying to find active Suno tab");
-    try {
-      const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
-      if (sunoTabs.length > 0) {
-        const sunoTab = sunoTabs[0];
-        log("fetchExistingNotifications: found active Suno tab, trying to get token from tab", sunoTab.id);
-        token = await ensureValidToken(sunoTab.id);
-      }
-    } catch (err) {
-      log("fetchExistingNotifications: error finding Suno tabs:", err.message);
-    }
-  }
+  const token = await getApiTokenWithFallback('fetchExistingNotifications');
 
   if (!token) {
-    log("fetchExistingNotifications: no token available from any source");
     return { ok: false, reason: "no-token" };
   }
 
@@ -1081,6 +1097,135 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
       } catch (e) {
         sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "fetch_user_playlists") {
+    (async () => {
+      try {
+        const token = await getApiTokenWithFallback('fetch_user_playlists');
+        if (!token) { sendResponse({ ok: false, error: "No auth token" }); return; }
+        // page is 1-based; default to 1
+        const page = msg.page || 1;
+        const response = await fetch(
+          `https://studio-api.prod.suno.com/api/playlist/me?page=${page}&show_trashed=false&show_sharelist=false`,
+          { headers: { 'Authorization': `Bearer ${token}` } }
+        );
+        const status = response.status;
+        let data = null;
+        try { data = await response.json(); } catch (e) {}
+        sendResponse({ ok: response.ok, status, data });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "fetch_playlist_songs") {
+    (async () => {
+      try {
+        const token = await getApiTokenWithFallback('fetch_playlist_songs');
+        if (!token) { sendResponse({ ok: false, error: "No auth token" }); return; }
+        const { playlistId, page = 1 } = msg;
+        if (!playlistId) { sendResponse({ ok: false, error: "No playlist ID" }); return; }
+
+        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+        const playlistIdEncoded = encodeURIComponent(playlistId);
+        const candidates = [
+          {
+            label: 'playlist-v2-detail',
+            method: 'GET',
+            url: `https://studio-api.prod.suno.com/api/playlist/v2/${playlistIdEncoded}?page=${page}&page_size=50`
+          },
+          {
+            label: 'playlist-detail',
+            method: 'GET',
+            url: `https://studio-api.prod.suno.com/api/playlist/${playlistIdEncoded}?page=${page}&page_size=50`
+          },
+          {
+            label: 'playlist-clips',
+            method: 'GET',
+            url: `https://studio-api.prod.suno.com/api/playlist/${playlistIdEncoded}/clips?page=${page}&page_size=50`
+          },
+          {
+            label: 'feed-v3-playlist-filter',
+            method: 'POST',
+            url: 'https://studio-api.prod.suno.com/api/feed/v3',
+            body: {
+              limit: 50,
+              cursor: null,
+              filters: {
+                disliked: 'False',
+                trashed: 'False',
+                fromStudioProject: { presence: 'False' },
+                playlist: {
+                  presence: 'True',
+                  playlistId
+                }
+              }
+            }
+          }
+        ];
+
+        const tryParse = async (response) => {
+          let data = null;
+          try { data = await response.json(); } catch (e) {}
+          return data;
+        };
+
+        const extractCount = (data) => {
+          if (!data || typeof data !== 'object') return 0;
+          const clipCollections = [
+            data.playlist_clips,
+            data.clips,
+            data.results,
+            data.items,
+            data.data?.playlist_clips,
+            data.data?.clips,
+            data.data?.results,
+            data.data?.items
+          ];
+          for (const collection of clipCollections) {
+            if (Array.isArray(collection)) {
+              return collection.length;
+            }
+          }
+          return 0;
+        };
+
+        let lastResult = { ok: false, status: 0, data: null, source: null };
+
+        for (const candidate of candidates) {
+          const response = await fetch(candidate.url, {
+            method: candidate.method,
+            headers,
+            body: candidate.body ? JSON.stringify(candidate.body) : undefined
+          });
+
+          const data = await tryParse(response);
+          lastResult = {
+            ok: response.ok,
+            status: response.status,
+            data,
+            source: candidate.label
+          };
+
+          if (!response.ok) {
+            continue;
+          }
+
+          if (extractCount(data) > 0 || page > 1) {
+            sendResponse(lastResult);
+            return;
+          }
+        }
+
+        sendResponse(lastResult);
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
       }
     })();
     return true;

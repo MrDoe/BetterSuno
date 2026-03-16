@@ -5,7 +5,7 @@
   // Track how many notifications we've seen so we know which are "new"
   let lastSeenCount = 0;
   let panelOpen = false;
-  let currentTab = 'notifications';
+  let currentTab = 'library';
   const NOTIFICATION_RENDER_BATCH_SIZE = 25;
   let currentNotifications = [];
   let renderedNotificationCount = 0;
@@ -25,41 +25,25 @@
         <button id="bettersuno-refresh" title="Refresh notifications" style="margin-left:8px;">⟳</button>
       </div>
       <div id="bettersuno-tabs">
-        <button class="bettersuno-tab active" data-tab="notifications">Notifications</button>
-        <button class="bettersuno-tab"  data-tab="library">Download Songs</button>
+        <button class="bettersuno-tab active" data-tab="library">Song Library</button>
+        <button class="bettersuno-tab" data-tab="notifications">Notifications</button>
         <button class="bettersuno-tab" data-tab="settings">Settings</button>
       </div>
       <div id="bettersuno-duplicate-tab-notice" class="bettersuno-duplicate-notice" style="display:none;">
         ⚠️ BetterSuno is already running in another tab
       </div>
-      <div id="bettersuno-list" class="bettersuno-content">
+      <div id="bettersuno-list" class="bettersuno-content" style="display: none;">
         <div class="bettersuno-empty">No notifications yet</div>
       </div>
-      <div id="bettersuno-download-content" class="bettersuno-content" style="display: none;">
+      <div id="bettersuno-download-content" class="bettersuno-content" style="display: flex;">
         <div id="bettersuno-downloader-wrapper">
           <div id="songListContainer">
-            <div id="downloadTypeControls">
-              <label>Download:</label>
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="downloadMusic" checked /> 🎵 Music
-              </label>
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="downloadLyrics" checked /> 📝 Lyrics
-              </label>
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="downloadImage" checked /> 🖼️ Image
-              </label>
-              <div id="fileFormat">
-                <label>File Format:</label>
-                <div id="formatControls" style="display: flex; gap: 10px; align-items: center">
-                  <label class="checkbox-label" style="margin: 0; padding: 0">
-                    <input type="radio" name="format" id="formatMp3" value="mp3" checked /> 🎵 MP3
-                  </label>
-                  <label class="checkbox-label" style="margin: 0; padding: 0">
-                    <input type="radio" name="format" id="formatWav" value="wav" /> 🔊 WAV
-                  </label>
-                </div>
-              </div>
+            <div id="playlistControls">
+              <label>📋 Playlist:</label>
+              <select id="playlistFilter">
+                <option value="">All Songs</option>
+              </select>
+              <button id="refreshPlaylistsBtn" class="btn-secondary" title="Refresh playlists from Suno" type="button">⟳</button>
             </div>
 
             <div id="filterControls">
@@ -92,6 +76,29 @@
             <div id="songList"></div>
 
             <div class="btn-row btn-row-actions">
+              <div id="downloadTypeControls">
+                <label>Download:</label>
+                <label class="checkbox-label" style="margin: 0; padding: 0">
+                  <input type="checkbox" id="downloadMusic" checked /> 🎵 Music
+                </label>
+                <label class="checkbox-label" style="margin: 0; padding: 0">
+                  <input type="checkbox" id="downloadLyrics" checked /> 📝 Lyrics
+                </label>
+                <label class="checkbox-label" style="margin: 0; padding: 0">
+                  <input type="checkbox" id="downloadImage" checked /> 🖼️ Image
+                </label>
+                <div id="fileFormat">
+                  <label>Format:</label>
+                  <div id="formatControls" style="display: flex; gap: 6px; align-items: center">
+                    <label class="checkbox-label" style="margin: 0; padding: 0">
+                      <input type="radio" name="format" id="formatMp3" value="mp3" checked /> MP3
+                    </label>
+                    <label class="checkbox-label" style="margin: 0; padding: 0">
+                      <input type="radio" name="format" id="formatWav" value="wav" /> WAV
+                    </label>
+                  </div>
+                </div>
+              </div>
               <button id="downloadBtn" class="btn-primary">Download</button>
               <button id="stopDownloadBtn" class="btn-stop hidden">Stop</button>
             </div>
@@ -637,10 +644,10 @@
     }
 
     root.style.setProperty('position', 'fixed', 'important');
-    root.style.setProperty('bottom', '20px', 'important');
-    root.style.setProperty('right', '20px', 'important');
-    root.style.setProperty('left', 'auto', 'important');
-    root.style.setProperty('top', 'auto', 'important');
+    root.style.setProperty('top', '20px', 'important');
+    root.style.setProperty('left', '20px', 'important');
+    root.style.setProperty('right', 'auto', 'important');
+    root.style.setProperty('bottom', 'auto', 'important');
     root.style.setProperty('display', 'block', 'important');
     root.style.setProperty('visibility', 'visible', 'important');
     root.style.setProperty('opacity', '1', 'important');
