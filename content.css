@@ -499,9 +499,9 @@
 #bettersuno-panel .checkbox-label {
   display: flex !important;
   align-items: center !important;
-  gap: 8px !important;
+  gap: 6px !important;
   cursor: pointer !important;
-  padding: 8px 0 !important;
+  padding: 4px 0 !important;
   font-size: 13px !important;
   color: #cfcfcf !important;
 }
@@ -1043,13 +1043,13 @@
 
 #bettersuno-panel #fileFormat {
   display: flex !important;
-  gap: 6px !important;
+  gap: 2px !important;
   align-items: center !important;
   padding-top: 0 !important;
   color: #f4f4f5 !important;
   font-size: 12px !important;
   border-left: 1px solid #3f3f46 !important;
-  padding-left: 6px !important;
+  padding-left: 2px !important;
 }
 
 /* Playlist selector row */

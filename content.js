@@ -58,7 +58,7 @@
                 <input type="checkbox" id="filterPublic" checked /> 🌐 Public
               </label>
               <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="filterOffline" /> 💾 Offline Only
+                <input type="checkbox" id="filterOffline" /> 💾 Offline
               </label>
             </div>
 
@@ -79,22 +79,21 @@
               <div id="downloadTypeControls">
                 <label>Download:</label>
                 <label class="checkbox-label" style="margin: 0; padding: 0">
-                  <input type="checkbox" id="downloadMusic" checked /> 🎵 Music
+                  <input type="checkbox" id="downloadMusic" checked />🎵 Music
                 </label>
                 <label class="checkbox-label" style="margin: 0; padding: 0">
-                  <input type="checkbox" id="downloadLyrics" checked /> 📝 Lyrics
+                  <input type="checkbox" id="downloadLyrics" checked />📝 Lyrics
                 </label>
                 <label class="checkbox-label" style="margin: 0; padding: 0">
-                  <input type="checkbox" id="downloadImage" checked /> 🖼️ Image
+                  <input type="checkbox" id="downloadImage" checked />🖼️ Image
                 </label>
                 <div id="fileFormat">
-                  <label>Format:</label>
                   <div id="formatControls" style="display: flex; gap: 6px; align-items: center">
                     <label class="checkbox-label" style="margin: 0; padding: 0">
-                      <input type="radio" name="format" id="formatMp3" value="mp3" checked /> MP3
+                      <input type="radio" name="format" id="formatMp3" value="mp3" checked />MP3
                     </label>
                     <label class="checkbox-label" style="margin: 0; padding: 0">
-                      <input type="radio" name="format" id="formatWav" value="wav" /> WAV
+                      <input type="radio" name="format" id="formatWav" value="wav" />WAV
                     </label>
                   </div>
                 </div>
