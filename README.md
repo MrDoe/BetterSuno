@@ -4,18 +4,40 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 
 ## Features
 
+### 🧭 Updated Panel UI
+- **Top-left bell launcher** - BetterSuno now opens from a fixed bell in the top-left corner
+- **Song Library first** - The Song Library tab is the default first tab, with Notifications as the second tab
+- **Download controls near action button** - MP3/WAV + music/lyrics/image options are grouped right next to the Download button
+
 ### 🔔 Notifications
 - **Live updates** - See your latest Suno notifications in real-time without grouping of similar events
 - **Desktop alerts** - Get notified when someone likes or comments on your songs
 
-### 🎵 Song Batch Download
+### 🎵 Song Library & Batch Download
 - **Browse your library** - View all your Suno creations in one place
 - **Bulk downloads** - Download multiple songs at once in MP3 or WAV format
 - **Complete packages** - Include lyrics and cover images with your downloads
-- **Smart filtering** - Filter by liked songs, public/private, or search by text
+- **Smart filtering** - Filter by liked songs, stems, public/private, offline-only, or search by title
+- **Playlist picker** - Load your Suno playlists into a dropdown and view playlist tracks directly
+- **Playlist persistence** - Playlists and playlist songs are cached in the browser database for faster reopen
+
+### 💾 Offline Database
+- **Local song cache** - Persist your library in IndexedDB
+- **Download to DB** - Cache selected songs for offline playback
+- **Offline-only filter** - Show only tracks that are stored locally
+- **Delete from DB** - Remove selected cached tracks from local storage
+- **Usage display** - See local DB usage in Settings
+
+### ▶️ Mini Player
+- **Inline playback** - Play songs directly from the Song Library
+- **Auto-next playback** - Automatically plays the next visible song when one ends
+- **Seek support** - Click the progress bar to jump to any position in a track
+- **Current/total time display** - Shows live playback position and full duration
 
 ### ⚙️ Settings
 - **Customizable polling** - Choose how often to check for new notifications
+- **Desktop notifications toggle** - Enable/disable desktop alerts
+- **Library actions** - Refresh library, stop fetch, or delete local library
 
 ## Installation
 
@@ -36,9 +58,12 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 ## How to Use
 
 1. **Open Suno.com** and log in to your account
-2. **Click the bell icon** in the bottom-right corner to open the panel
-3. **Switch tabs** to view Notifications, Download Songs, or Settings
-4. **Download songs** by clicking "Fetch Songs", selecting tracks, and clicking "Download Selected"
+2. **Click the bell icon** in the top-left corner to open the panel
+3. **Use Song Library** (default tab) to load, filter, play, cache, and download tracks
+4. **Select a playlist** from the Playlist dropdown (optional) to load playlist tracks
+5. **Choose download options** (MP3/WAV, music/lyrics/image) next to the Download button
+6. **Use the mini player** to play songs, seek by clicking the progress bar, and auto-advance through the list
+7. **Switch to Notifications** for live activity updates, or **Settings** for polling/storage controls
 
 ## Building from Source
 
