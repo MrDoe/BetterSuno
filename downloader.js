@@ -1088,6 +1088,7 @@
             if (savedSongs && savedSongs.length > 0) {
                 allSongs = savedSongs;
                 filteredSongs = [...allSongs];
+                const needsMetadataRefresh = libraryNeedsMetadataRefresh(savedSongs);
 
                 // Restore settings from metadata
                 if (savedSongsMeta) {
@@ -1112,8 +1113,13 @@
                 }
 
                 console.log('[Downloader] Showing cached songs, checking for new songs...');
-                // Check for new songs
-                setTimeout(() => checkForNewSongs(), 100);
+                if (needsMetadataRefresh && !savedSelectedPlaylist) {
+                    statusDiv.innerText = 'Refreshing all songs metadata...';
+                    setTimeout(() => startFullRefresh({ confirmUser: false }), 100);
+                } else {
+                    // Check for new songs
+                    setTimeout(() => checkForNewSongs(), 100);
+                }
                 return;
             }
         } catch (e) {
@@ -1134,6 +1140,10 @@
 
     function checkForNewSongs() {
         startIncrementalSync({ automatic: true });
+    }
+
+    function libraryNeedsMetadataRefresh(songs) {
+        return Array.isArray(songs) && songs.some(song => song.upvote_count === undefined);
     }
 
     async function saveToStorage() {
@@ -1497,6 +1507,10 @@
                 : 'Playlist returned no songs from the current API response.';
         } else {
             statusDiv.innerText = 'Showing all songs.';
+            if (libraryNeedsMetadataRefresh(allSongs)) {
+                statusDiv.innerText = 'Refreshing all songs metadata...';
+                setTimeout(() => startFullRefresh({ confirmUser: false }), 100);
+            }
         }
         applyFilter();
     }
