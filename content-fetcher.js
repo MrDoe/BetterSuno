@@ -198,6 +198,98 @@
         return null;
     }
 
+    function pickFirstNonEmptyString(values) {
+        for (const value of values) {
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (trimmed) return trimmed;
+            }
+        }
+
+        return null;
+    }
+
+    function normalizeHandle(value) {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim().replace(/^@+/, '').toLowerCase();
+        return trimmed || null;
+    }
+
+    function extractOwnershipMetadataFromClip(clip, currentUserId) {
+        if (!clip || typeof clip !== 'object') {
+            return {
+                owner_user_id: currentUserId || null,
+                owner_handle: null,
+                owner_display_name: null,
+                is_owned_by_current_user: !!currentUserId
+            };
+        }
+
+        const profiles = [
+            clip.user,
+            clip.owner,
+            clip.creator,
+            clip.author,
+            clip.profile,
+            clip.user_profile,
+            clip.owner_profile,
+            clip.creator_profile,
+            clip.author_profile,
+            ...(Array.isArray(clip.user_profiles) ? clip.user_profiles : []),
+            ...(Array.isArray(clip.users) ? clip.users : [])
+        ].filter(Boolean);
+
+        const ownerUserId = pickFirstNonEmptyString([
+            clip.user_id,
+            clip.owner_user_id,
+            clip.creator_user_id,
+            clip.author_user_id,
+            clip.owner_id,
+            clip.creator_id,
+            clip.author_id,
+            clip.profile_id,
+            ...profiles.map(profile => pickFirstNonEmptyString([
+                profile?.id,
+                profile?.user_id,
+                profile?.profile_id,
+                profile?.owner_id
+            ]))
+        ]) || currentUserId || null;
+
+        const ownerHandle = normalizeHandle(pickFirstNonEmptyString([
+            clip.handle,
+            clip.user_handle,
+            clip.owner_handle,
+            clip.creator_handle,
+            clip.author_handle,
+            clip.username,
+            ...profiles.map(profile => pickFirstNonEmptyString([
+                profile?.handle,
+                profile?.username,
+                profile?.user_handle
+            ]))
+        ]));
+
+        const ownerDisplayName = pickFirstNonEmptyString([
+            clip.display_name,
+            clip.user_display_name,
+            clip.owner_display_name,
+            clip.creator_display_name,
+            clip.author_display_name,
+            ...profiles.map(profile => pickFirstNonEmptyString([
+                profile?.display_name,
+                profile?.name
+            ]))
+        ]);
+
+        return {
+            owner_user_id: ownerUserId,
+            owner_handle: ownerHandle,
+            owner_display_name: ownerDisplayName,
+            is_owned_by_current_user: !!currentUserId && ownerUserId === currentUserId
+        };
+    }
+
     async function fetchPage(cursorValue) {
         const res = await Promise.race([
             api.runtime.sendMessage({
@@ -318,6 +410,8 @@
                     break;
                 }
 
+                const ownership = extractOwnershipMetadataFromClip(clip, userId);
+
                 allSongs.push({
                     id: clip.id,
                     title: clip.title || `Untitled_${clip.id}`,
@@ -328,7 +422,8 @@
                     created_at: clip.created_at,
                     is_liked: clip.is_liked || false,
                     is_stem: isStemClip(clip),
-                    upvote_count: clip.upvote_count || 0
+                    upvote_count: clip.upvote_count || 0,
+                    ...ownership
                 });
             }
 

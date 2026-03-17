@@ -1124,6 +1124,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "get_current_user_identity") {
+    (async () => {
+      try {
+        const token = await getApiTokenWithFallback('get_current_user_identity');
+        if (!token) {
+          sendResponse({ ok: false, error: 'No auth token' });
+          return;
+        }
+
+        const identity = await fetchCurrentUserIdentity(token);
+        if (!identity?.id && !identity?.handle && !identity?.displayName) {
+          sendResponse({ ok: false, error: 'Could not determine current user identity' });
+          return;
+        }
+
+        sendResponse({ ok: true, identity });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "fetch_playlist_songs") {
     (async () => {
       try {
@@ -1462,6 +1485,82 @@ function normalizeDownloadOptions(options) {
   };
 }
 
+function pickFirstNonEmptyString(values) {
+  for (const value of values) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+  }
+  return null;
+}
+
+function normalizeHandle(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim().replace(/^@+/, '').toLowerCase();
+  return trimmed || null;
+}
+
+function getNormalizedSongOwnerIds(song) {
+  const values = [
+    song?.owner_user_id,
+    song?.user_id,
+    song?.creator_user_id,
+    song?.author_user_id,
+    song?.owner_profile_id,
+    song?.profile_id
+  ];
+
+  return new Set(values.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()));
+}
+
+function getNormalizedSongOwnerHandles(song) {
+  const values = [
+    song?.owner_handle,
+    song?.handle,
+    song?.user_handle,
+    song?.creator_handle,
+    song?.author_handle,
+    song?.username
+  ];
+
+  return new Set(values.map(normalizeHandle).filter(Boolean));
+}
+
+function isSongOwnedByIdentity(song, identity) {
+  if (!song || !identity) {
+    return false;
+  }
+
+  const identityId = typeof identity.id === 'string' ? identity.id.trim() : null;
+  const identityHandle = normalizeHandle(identity.handle);
+  const identityDisplayName = pickFirstNonEmptyString([identity.displayName]);
+
+  const ownerIds = getNormalizedSongOwnerIds(song);
+  if (identityId && ownerIds.has(identityId)) {
+    return true;
+  }
+
+  const ownerHandles = getNormalizedSongOwnerHandles(song);
+  if (identityHandle && ownerHandles.has(identityHandle)) {
+    return true;
+  }
+
+  if (song.is_owned_by_current_user === true || song.is_own_song === true) {
+    return true;
+  }
+
+  if (identityDisplayName && typeof song?.owner_display_name === 'string') {
+    return song.owner_display_name.trim().toLowerCase() === identityDisplayName.trim().toLowerCase();
+  }
+
+  return false;
+}
+
 async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, knownIds = []) {
   const notifyTab = (message) => {
     if (fetchRequestorTabId) {
@@ -1520,7 +1619,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
   }
 }
 
-async function fetchCurrentUserId(token) {
+async function fetchCurrentUserIdentity(token) {
   try {
     const endpoints = [
       'https://studio-api.prod.suno.com/api/me/',
@@ -1534,13 +1633,32 @@ async function fetchCurrentUserId(token) {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (!res.ok) continue;
+
         const data = await res.json();
+        const directId = data?.id || data?.user_id || data?.user?.id || data?.profile?.id;
+        const identity = {
+          id: typeof directId === 'string' && directId.trim() ? directId.trim() : findUuidLikeId(data),
+          handle: normalizeHandle(pickFirstNonEmptyString([
+            data?.handle,
+            data?.username,
+            data?.user?.handle,
+            data?.user?.username,
+            data?.profile?.handle,
+            data?.profile?.username
+          ])),
+          displayName: pickFirstNonEmptyString([
+            data?.display_name,
+            data?.name,
+            data?.user?.display_name,
+            data?.user?.name,
+            data?.profile?.display_name,
+            data?.profile?.name
+          ])
+        };
 
-        const direct = data?.id || data?.user_id || data?.user?.id || data?.profile?.id;
-        if (typeof direct === 'string' && direct.length > 0) return direct;
-
-        const fromTree = findUuidLikeId(data);
-        if (fromTree) return fromTree;
+        if (identity.id || identity.handle || identity.displayName) {
+          return identity;
+        }
       } catch (e) {
         // try next endpoint
       }
@@ -1548,7 +1666,13 @@ async function fetchCurrentUserId(token) {
   } catch (e) {
     // ignore
   }
-  return null;
+
+  return { id: null, handle: null, displayName: null };
+}
+
+async function fetchCurrentUserId(token) {
+  const identity = await fetchCurrentUserIdentity(token);
+  return identity?.id || null;
 }
 
 function findUuidLikeId(obj) {
@@ -1709,6 +1833,27 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
   if (shouldDownloadLyrics) selectedTypes.push('lyrics');
   if (shouldDownloadImage) selectedTypes.push('images');
 
+  const token = await getApiTokenWithFallback('download_selected');
+  const currentUserIdentity = token ? await fetchCurrentUserIdentity(token) : null;
+  const canVerifyOwnership = !!(currentUserIdentity?.id || currentUserIdentity?.handle || currentUserIdentity?.displayName);
+
+  if (!canVerifyOwnership) {
+    notifyDownloadUi({
+      action: 'log',
+      text: '🚫 Could not verify your Suno account identity. File downloads are blocked until ownership can be confirmed.'
+    });
+    stopDownloadRequested = false;
+    isDownloading = false;
+    activeDownloadIds = new Set();
+    persistDownloadState({ finishedAt: Date.now() });
+    broadcastDownloadState();
+    notifyDownloadUi({ action: 'download_complete', stopped: false });
+    return;
+  }
+
+  const downloadableSongs = songs.filter(song => isSongOwnedByIdentity(song, currentUserIdentity));
+  const blockedSongs = songs.filter(song => !isSongOwnedByIdentity(song, currentUserIdentity));
+
   if (selectedTypes.length === 0) {
     const notifyNoTypes = (msg) => {
       if (downloadRequestorTabId) {
@@ -1725,7 +1870,28 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
     return;
   }
 
-  notifyDownloadUi({ action: "log", text: `🚀 Starting download of ${songs.length} song(s): ${selectedTypes.join(', ')}...` });
+  if (blockedSongs.length > 0) {
+    notifyDownloadUi({
+      action: 'log',
+      text: `🚫 Skipping ${blockedSongs.length} song(s) by other artists. Those tracks may only be saved to the local database.`
+    });
+  }
+
+  if (downloadableSongs.length === 0) {
+    notifyDownloadUi({
+      action: 'log',
+      text: '🚫 Only your own songs can be downloaded as files. Songs by other artists may only be saved to the local database.'
+    });
+    stopDownloadRequested = false;
+    isDownloading = false;
+    activeDownloadIds = new Set();
+    persistDownloadState({ finishedAt: Date.now() });
+    broadcastDownloadState();
+    notifyDownloadUi({ action: 'download_complete', stopped: false });
+    return;
+  }
+
+  notifyDownloadUi({ action: "log", text: `🚀 Starting download of ${downloadableSongs.length} song(s): ${selectedTypes.join(', ')}...` });
 
   if (isAndroid) {
     notifyDownloadUi({ action: "log", text: '📱 Android detected: using compatibility mode for file saving.' });
@@ -1734,7 +1900,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
   let downloadedCount = 0;
   let failedCount = 0;
 
-  for (const song of songs) {
+  for (const song of downloadableSongs) {
     if (stopDownloadRequested || !isDownloading || jobId !== currentDownloadJobId) {
       notifyDownloadUi({ action: "log", text: "⏹️ Download stopped by user." });
       break;
@@ -1782,7 +1948,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
       }
 
       downloadedCount++;
-      notifyDownloadUi({ action: "log", text: `✅ Downloaded: ${title} (${downloadedCount}/${songs.length})` });
+      notifyDownloadUi({ action: "log", text: `✅ Downloaded: ${title} (${downloadedCount}/${downloadableSongs.length})` });
     } catch (err) {
       failedCount++;
       notifyDownloadUi({ action: "log", text: `❌ Failed: ${title} - ${err.message}` });
@@ -1801,7 +1967,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
 
   notifyDownloadUi({
     action: "log",
-    text: `✅ Download complete! ${downloadedCount} succeeded, ${failedCount} failed.`
+    text: `✅ Download complete! ${downloadedCount} succeeded, ${failedCount} failed, ${blockedSongs.length} blocked.`
   });
   notifyDownloadUi({ action: "download_complete", stopped: wasStopped });
 }
