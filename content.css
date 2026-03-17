@@ -757,6 +757,15 @@
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5) !important;
 }
 
+.player-tab-cover-image {
+  width: 100% !important;
+  height: 100% !important;
+  max-height: 80vh !important;
+  object-fit: contain !important;
+  border-radius: 10px !important;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5) !important;
+}
+
 .player-tab-title {
   text-align: center !important;
   font-weight: 700 !important;
@@ -1370,6 +1379,15 @@
     height: 90% !important;
     max-height: 80vh !important;
     object-fit: cover !important;
+    border-radius: 10px !important;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5) !important;
+  }
+
+  .player-tab-cover-image {
+    width: 100% !important;
+    height: 90% !important;
+    max-height: 80vh !important;
+    object-fit: contain !important;
     border-radius: 10px !important;
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5) !important;
   }

@@ -171,6 +171,7 @@
               <div class="player-tab-title" id="player-tab-title"></div>
               <div class="player-tab-art-wrapper" id="player-tab-art-wrapper">
                 <video class="player-tab-video-media" id="player-tab-video" style="display: none;" autoplay loop muted playsinline></video>
+                <img class="player-tab-cover-image" id="player-tab-cover-image" style="display: none;" alt="Cover art" />
               </div>
             </div>
             <div class="player-tab-view" id="player-tab-view-lyrics" style="display: none;">

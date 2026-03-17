@@ -11,7 +11,6 @@
     let currentPlayingSongId = null;
     let cachedSongIds = new Set();
     let currentBlobUrl = null;
-    let isCachingAll = false;
     let stopCachingRequested = false;
     const SONG_RENDER_BATCH_SIZE = 40;
     let sortedFilteredSongs = [];
@@ -292,6 +291,7 @@
 
     // Player tab references
     const playerTabVideo = document.getElementById('player-tab-video');
+    const playerTabCoverImage = document.getElementById('player-tab-cover-image');
     const playerTabTitle = document.getElementById('player-tab-title');
     const playerTabLyrics = document.getElementById('player-tab-lyrics');
     const playerTabViewCover = document.getElementById('player-tab-view-cover');
@@ -546,11 +546,29 @@
             playerTabVideo.onloadeddata = null;
         };
 
+        const hideCoverImage = () => {
+            if (!playerTabCoverImage) return;
+            playerTabCoverImage.style.display = 'none';
+            playerTabCoverImage.removeAttribute('src');
+        };
+
+        const showCoverImage = (src) => {
+            if (!playerTabCoverImage) return;
+            if (src) {
+                playerTabCoverImage.src = src;
+                playerTabCoverImage.style.display = 'block';
+            } else {
+                hideCoverImage();
+            }
+        };
+
         const showNoMedia = () => {
             hideVideo();
+            showCoverImage(thumbnailUrl);
         };
 
         const showVideo = (src, posterUrl = null) => {
+            hideCoverImage();
             playerTabVideo.muted = true;
             playerTabVideo.loop = true;
             playerTabVideo.playsInline = true;
@@ -581,6 +599,7 @@
             playerTabNoSong.style.display = 'flex';
             playerTabSong.style.display = 'none';
             hideVideo();
+            if (playerTabCoverImage) playerTabCoverImage.style.display = 'none';
             return;
         }
 
@@ -1583,7 +1602,6 @@
         }
 
         stopCachingRequested = false;
-        isCachingAll = true;
         setCachingUiState(true);
 
         let cached = 0;
@@ -1629,7 +1647,6 @@
             }
         }
 
-        isCachingAll = false;
         setCachingUiState(false);
 
         if (!stopCachingRequested) {
@@ -2212,6 +2229,10 @@
 
         const thumbnail = document.createElement("div");
         thumbnail.className = "song-thumbnail";
+        thumbnail.style.cursor = 'pointer';
+        thumbnail.addEventListener('click', () => {
+            togglePlay(song);
+        });
 
         function attachThumbnailImage(src) {
             const thumbnailImage = document.createElement("img");
