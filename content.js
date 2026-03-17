@@ -26,6 +26,7 @@
       </div>
       <div id="bettersuno-tabs">
         <button class="bettersuno-tab active" data-tab="library">Song Library</button>
+        <button class="bettersuno-tab" data-tab="player">Player</button>
         <button class="bettersuno-tab" data-tab="notifications">Notifications</button>
         <button class="bettersuno-tab" data-tab="settings">Settings</button>
       </div>
@@ -156,6 +157,38 @@
         </div>
       </div>
     </div>
+    <div id="bettersuno-player-content" class="bettersuno-content" style="display: none;">
+      <div class="player-tab-inner">
+        <div class="player-tab-no-song" id="player-tab-no-song">
+          <div class="player-tab-no-song-icon">♪</div>
+          <div>No song playing</div>
+        </div>
+        <div class="player-tab-song" id="player-tab-song" style="display: none;">
+          <div class="player-tab-art-wrapper" id="player-tab-art-wrapper">
+            <img class="player-tab-art" id="player-tab-art" src="" alt="Cover art" style="display: none;" />
+            <video class="player-tab-art" id="player-tab-video" style="display: none;" autoplay loop muted playsinline></video>
+            <div class="player-tab-art-fallback" id="player-tab-art-fallback">♪</div>
+          </div>
+          <div class="player-tab-title" id="player-tab-title"></div>
+          <div class="player-tab-lyrics-wrapper">
+            <div class="player-tab-lyrics" id="player-tab-lyrics">No lyrics available.</div>
+          </div>
+        </div>
+        <div class="player-tab-controls">
+          <div class="player-tab-progress-row">
+            <div class="player-progress-container" id="player-tab-progress-container">
+              <div class="player-progress" id="player-tab-progress-bar"></div>
+            </div>
+            <div class="player-time" id="player-tab-time">0:00 / 0:00</div>
+          </div>
+          <div class="player-tab-buttons">
+            <button id="player-tab-prev" class="player-btn" title="Previous track">⏮︎</button>
+            <button id="player-tab-play-pause" class="player-btn player-btn-large" title="Play/Pause">▶</button>
+            <button id="player-tab-next" class="player-btn" title="Next track">⏭︎</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <button id="bettersuno-bell" title="BetterSuno">
       <svg viewBox="0 0 24 24"><path d="m12 17.27 6.18 3.73-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
       <span id="bettersuno-badge">0</span>
@@ -173,6 +206,7 @@
   const title = root.querySelector('#bettersuno-title');
   const settingsContent = root.querySelector('#bettersuno-settings-content');
   const libraryContent = root.querySelector('#bettersuno-download-content');
+  const playerContent = root.querySelector('#bettersuno-player-content');
   
   // ---- Toggle panel ----
   bell.addEventListener('click', () => {
@@ -225,14 +259,22 @@
         list.style.display = 'block';
         settingsContent.style.display = 'none';
         libraryContent.style.display = 'none';
+        playerContent.style.display = 'none';
       } else if (tab === 'library') {
         list.style.display = 'none';
         settingsContent.style.display = 'none';
         libraryContent.style.display = 'flex';
+        playerContent.style.display = 'none';
+      } else if (tab === 'player') {
+        list.style.display = 'none';
+        settingsContent.style.display = 'none';
+        libraryContent.style.display = 'none';
+        playerContent.style.display = 'flex';
       } else {
         list.style.display = 'none';
         settingsContent.style.display = 'block';
         libraryContent.style.display = 'none';
+        playerContent.style.display = 'none';
         loadSettings();
         document.dispatchEvent(new CustomEvent('bettersuno:settings-opened'));
       }

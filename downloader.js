@@ -421,6 +421,12 @@
             id: clip.id,
             title: clip.title || `Untitled_${clip.id || 'song'}`,
             audio_url: clip.audio_url || clip.stream_audio_url || clip.song_path || null,
+            video_url: extractUrl(
+                clip.video_url ||
+                clip.video_cdn_url ||
+                clip.mp4_url ||
+                clip.metadata?.video_url
+            ),
             image_url: extractUrl(
                 clip.image_url ||
                 clip.image ||
@@ -487,12 +493,39 @@
     const playerTime = document.getElementById('player-time');
     let progressHandle = null;
 
+    // Player tab references
+    const playerTabArt = document.getElementById('player-tab-art');
+    const playerTabVideo = document.getElementById('player-tab-video');
+    const playerTabArtFallback = document.getElementById('player-tab-art-fallback');
+    const playerTabTitle = document.getElementById('player-tab-title');
+    const playerTabLyrics = document.getElementById('player-tab-lyrics');
+    const playerTabNoSong = document.getElementById('player-tab-no-song');
+    const playerTabSong = document.getElementById('player-tab-song');
+    const playerTabPlayPause = document.getElementById('player-tab-play-pause');
+    const playerTabPrev = document.getElementById('player-tab-prev');
+    const playerTabNext = document.getElementById('player-tab-next');
+    const playerTabProgressBar = document.getElementById('player-tab-progress-bar');
+    const playerTabProgressContainer = document.getElementById('player-tab-progress-container');
+    const playerTabTime = document.getElementById('player-tab-time');
+    let playerTabProgressHandle = null;
+    let playerTabArtBlobUrl = null; // Track current art blob URL for revocation
+
     if (progressContainer) {
         progressHandle = progressContainer.querySelector('#player-progress-handle');
         if (!progressHandle) {
             progressHandle = document.createElement('div');
             progressHandle.id = 'player-progress-handle';
             progressContainer.appendChild(progressHandle);
+        }
+    }
+
+    if (playerTabProgressContainer) {
+        playerTabProgressHandle = playerTabProgressContainer.querySelector('#player-tab-progress-handle');
+        if (!playerTabProgressHandle) {
+            playerTabProgressHandle = document.createElement('div');
+            playerTabProgressHandle.id = 'player-tab-progress-handle';
+            playerTabProgressHandle.className = 'player-tab-progress-handle';
+            playerTabProgressContainer.appendChild(playerTabProgressHandle);
         }
     }
 
@@ -528,6 +561,17 @@
             progressHandle.style.left = `${percent}%`;
         }
         playerTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
+
+        // Sync player tab progress
+        if (playerTabProgressBar) {
+            playerTabProgressBar.style.width = `${percent}%`;
+        }
+        if (playerTabProgressHandle) {
+            playerTabProgressHandle.style.left = `${percent}%`;
+        }
+        if (playerTabTime) {
+            playerTabTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
+        }
     }
 
     async function togglePlay(song) {
@@ -567,8 +611,22 @@
             playerTitle.textContent = song.title || 'Untitled';
             playPauseBtn.textContent = '■';
 
+            updatePlayerTabUi(song);
             refreshVisibleSongPlaybackState();
         }
+    }
+
+    function getPreviousSong() {
+        if (!Array.isArray(sortedFilteredSongs) || sortedFilteredSongs.length === 0) {
+            return null;
+        }
+
+        const currentIndex = sortedFilteredSongs.findIndex(song => song.id === currentPlayingSongId);
+        if (currentIndex <= 0) {
+            return null;
+        }
+
+        return sortedFilteredSongs[currentIndex - 1] || null;
     }
 
     function getNextSongForPlayback() {
@@ -584,12 +642,94 @@
         return sortedFilteredSongs[currentIndex + 1] || null;
     }
 
+    function updatePlayerTabUi(song) {
+        if (!playerTabSong || !playerTabNoSong) return;
+
+        if (!song) {
+            playerTabNoSong.style.display = 'flex';
+            playerTabSong.style.display = 'none';
+            return;
+        }
+
+        playerTabNoSong.style.display = 'none';
+        playerTabSong.style.display = 'flex';
+
+        if (playerTabTitle) {
+            playerTabTitle.textContent = song.title || 'Untitled';
+        }
+
+        if (playerTabLyrics) {
+            const lyrics = song.lyrics || '';
+            playerTabLyrics.textContent = lyrics || 'No lyrics available.';
+        }
+
+        // Update cover art: prefer video, then image
+        const thumbnailUrl = song.image_url || song.thumbnail_url || song.cover_image_url || song.artwork_url || null;
+        const videoUrl = song.video_url || null;
+
+        if (playerTabVideo && playerTabArt && playerTabArtFallback) {
+            // Revoke any previously created blob URL for the art
+            if (playerTabArtBlobUrl) {
+                URL.revokeObjectURL(playerTabArtBlobUrl);
+                playerTabArtBlobUrl = null;
+            }
+
+            if (videoUrl) {
+                playerTabVideo.src = videoUrl;
+                playerTabVideo.style.display = 'block';
+                playerTabArt.style.display = 'none';
+                playerTabArtFallback.style.display = 'none';
+            } else if (cachedSongIds.has(song.id)) {
+                getImageBlobFromIDB(song.id).then(imgBlob => {
+                    if (imgBlob) {
+                        const objUrl = URL.createObjectURL(imgBlob);
+                        playerTabArtBlobUrl = objUrl;
+                        playerTabArt.src = objUrl;
+                        playerTabArt.style.display = 'block';
+                        playerTabVideo.style.display = 'none';
+                        playerTabArtFallback.style.display = 'none';
+                    } else if (thumbnailUrl) {
+                        playerTabArt.src = thumbnailUrl;
+                        playerTabArt.style.display = 'block';
+                        playerTabVideo.style.display = 'none';
+                        playerTabArtFallback.style.display = 'none';
+                    } else {
+                        playerTabArt.style.display = 'none';
+                        playerTabVideo.style.display = 'none';
+                        playerTabArtFallback.style.display = 'flex';
+                    }
+                }).catch(() => {
+                    if (thumbnailUrl) {
+                        playerTabArt.src = thumbnailUrl;
+                        playerTabArt.style.display = 'block';
+                        playerTabVideo.style.display = 'none';
+                        playerTabArtFallback.style.display = 'none';
+                    } else {
+                        playerTabArt.style.display = 'none';
+                        playerTabVideo.style.display = 'none';
+                        playerTabArtFallback.style.display = 'flex';
+                    }
+                });
+            } else if (thumbnailUrl) {
+                playerTabArt.src = thumbnailUrl;
+                playerTabArt.style.display = 'block';
+                playerTabVideo.style.display = 'none';
+                playerTabArtFallback.style.display = 'none';
+            } else {
+                playerTabArt.style.display = 'none';
+                playerTabVideo.style.display = 'none';
+                playerTabArtFallback.style.display = 'flex';
+            }
+        }
+    }
+
     async function playNextSongAutomatically() {
         const nextSong = getNextSongForPlayback();
         if (!nextSong) {
             currentPlayingSongId = null;
             playPauseBtn.textContent = '▶';
             playerTitle.textContent = 'Queue finished';
+            updatePlayerTabUi(null);
             refreshVisibleSongPlaybackState();
             return;
         }
@@ -607,6 +747,36 @@
                 playPauseBtn.textContent = '▶';
             }
             refreshVisibleSongPlaybackState();
+        });
+    }
+
+    if (playerTabPlayPause) {
+        playerTabPlayPause.addEventListener('click', () => {
+            if (!audioElement) return;
+            if (audioElement.paused) {
+                audioElement.play();
+            } else {
+                audioElement.pause();
+            }
+            refreshVisibleSongPlaybackState();
+        });
+    }
+
+    if (playerTabPrev) {
+        playerTabPrev.addEventListener('click', () => {
+            const prevSong = getPreviousSong();
+            if (prevSong) {
+                togglePlay(prevSong);
+            }
+        });
+    }
+
+    if (playerTabNext) {
+        playerTabNext.addEventListener('click', () => {
+            const nextSong = getNextSongForPlayback();
+            if (nextSong) {
+                togglePlay(nextSong);
+            }
         });
     }
 
@@ -655,6 +825,32 @@
             progressBar.style.width = `${seekPercent}%`;
             if (progressHandle) {
                 progressHandle.style.left = `${seekPercent}%`;
+            }
+            audioElement.currentTime = seekRatio * audioElement.duration;
+            updatePlayerProgressUi();
+        });
+    }
+
+    if (audioElement && playerTabProgressContainer) {
+        playerTabProgressContainer.addEventListener('click', (event) => {
+            if (!Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
+                return;
+            }
+
+            const rect = playerTabProgressContainer.getBoundingClientRect();
+            if (rect.width <= 0) {
+                return;
+            }
+
+            const rawOffset = event.clientX - rect.left;
+            const clampedOffset = Math.max(0, Math.min(rect.width, rawOffset));
+            const seekRatio = clampedOffset / rect.width;
+            const seekPercent = seekRatio * 100;
+            if (playerTabProgressBar) {
+                playerTabProgressBar.style.width = `${seekPercent}%`;
+            }
+            if (playerTabProgressHandle) {
+                playerTabProgressHandle.style.left = `${seekPercent}%`;
             }
             audioElement.currentTime = seekRatio * audioElement.duration;
             updatePlayerProgressUi();
@@ -2302,6 +2498,15 @@
                 playBtn.textContent = (isCurrent && !isPaused) ? '⏸' : '▶';
             }
         });
+
+        // Sync player tab play/pause button
+        if (playerTabPlayPause) {
+            playerTabPlayPause.textContent = (!isPaused && currentPlayingSongId) ? '⏸' : '▶';
+        }
+        // Sync mini-player play/pause button
+        if (playPauseBtn) {
+            playPauseBtn.textContent = (!isPaused && currentPlayingSongId) ? '■' : '▶';
+        }
     }
 
     function applyFilter(options = {}) {
