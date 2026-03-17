@@ -1810,15 +1810,32 @@ function canDownloadSongForIdentity(song, identity) {
     return true;
   }
 
-  // If the song has an owner ID and the identity has IDs, but none overlap,
-  // AND the stored flag says "not owned", treat as other artist's song.
+  if (isSongExplicitlyKnownToBeOtherArtist(song)) {
+    return false;
+  }
+
+  // If the song has an owner ID and the identity has IDs, but none overlap verify before blocking
   const identityIds = getIdentityIds(identity);
   const ownerIds = getNormalizedSongOwnerIds(song);
 
   if (identityIds.length > 0 && ownerIds.size > 0) {
-    // Both sides have IDs — a mismatch is meaningful
-    if (isSongExplicitlyKnownToBeOtherArtist(song)) {
-      return false;
+    const isMatch = identityIds.some(id => ownerIds.has(id));
+    if (!isMatch) {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const identityHasUuid = identityIds.some(id => uuidRegex.test(id));
+      const ownerHasUuid = Array.from(ownerIds).some(id => uuidRegex.test(id));
+      
+      if (identityHasUuid && ownerHasUuid) {
+        return false; // Confident mismatch on UUIDs
+      }
+
+      const clerkRegex = /^user_[a-zA-Z0-9]+$/i;
+      const identityHasClerk = identityIds.some(id => clerkRegex.test(id));
+      const ownerHasClerk = Array.from(ownerIds).some(id => clerkRegex.test(id));
+
+      if (identityHasClerk && ownerHasClerk) {
+        return false; // Confident mismatch on Clerk IDs
+      }
     }
   }
 
@@ -1964,9 +1981,9 @@ async function fetchCurrentUserIdentity(token) {
   log('[fetchCurrentUserIdentity] Has UUID in identity?', hasUuid);
   
   if (!hasUuid) {
-    log('[fetchCurrentUserIdentity] No UUID, fetching first library song to extract Suno profile UUID...');
+    log('[fetchCurrentUserIdentity] No UUID, fetching library to extract Suno profile UUID...');
     try {
-      const libRes = await fetch('https://studio-api.prod.suno.com/api/library?limit=1&page_size=1', {
+      const libRes = await fetch('https://studio-api.prod.suno.com/api/library?page=1', {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -1974,29 +1991,27 @@ async function fetchCurrentUserIdentity(token) {
       
       if (libRes.ok) {
         const libData = await libRes.json();
-        log('[fetchCurrentUserIdentity] Library response keys:', Object.keys(libData).slice(0, 10));
+        const items = libData?.clips || libData?.results || libData?.items || libData?.data || [];
         
-        let firstSong = null;
+        log('[fetchCurrentUserIdentity] Found items in library:', items.length);
         
-        // Find the first song in various possible response formats
-        if (libData?.clips && Array.isArray(libData.clips) && libData.clips.length > 0) {
-          log('[fetchCurrentUserIdentity] Found clips array');
-          firstSong = libData.clips[0];
-        } else if (libData?.results && Array.isArray(libData.results) && libData.results.length > 0) {
-          log('[fetchCurrentUserIdentity] Found results array');
-          firstSong = libData.results[0];
-        } else if (libData?.items && Array.isArray(libData.items) && libData.items.length > 0) {
-          log('[fetchCurrentUserIdentity] Found items array');
-          firstSong = libData.items[0];
-        } else if (libData?.data && Array.isArray(libData.data) && libData.data.length > 0) {
-          log('[fetchCurrentUserIdentity] Found data array');
-          firstSong = libData.data[0];
+        let ownSong = items.find(item => {
+          const c = item?.clip || item;
+          if (c?.is_owned_by_current_user === true || c?.is_own_song === true) return true;
+          const ownerHandle = c?.handle || c?.user_handle || c?.owner_handle;
+          if (ownerHandle && identity.handle && String(ownerHandle).toLowerCase() === String(identity.handle).toLowerCase()) return true;
+          return false;
+        });
+
+        // Don't arbitrarily pull the first song's UUID since it might belong to another artist in the library.
+        if (!ownSong) {
+          log('[fetchCurrentUserIdentity] Could not definitively verify any library song as owned. Skipping UUID extraction.');
+        } else {
+          log('[fetchCurrentUserIdentity] Found verified own song!');
         }
         
-        log('[fetchCurrentUserIdentity] First song found?', !!firstSong);
-        
-        if (firstSong) {
-          const songClip = firstSong?.clip || firstSong;
+        if (ownSong) {
+          const songClip = ownSong?.clip || ownSong;
           const ownerUuid = songClip?.owner_user_id || songClip?.user_id || songClip?.profile_id;
           log('[fetchCurrentUserIdentity] Extracted owner UUID:', ownerUuid);
           

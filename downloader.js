@@ -327,6 +327,10 @@
             return false;
         }
 
+        if (song.is_owned_by_current_user === false || song.is_own_song === false) {
+            return true;
+        }
+
         if (!canVerifyCurrentUserIdentity()) {
             return false;
         }
@@ -343,21 +347,32 @@
         if (identityIds.length > 0 && ownerIds.size > 0) {
             const isMatch = identityIds.some(id => ownerIds.has(id));
             if (!isMatch) {
-                console.debug('[isSongKnownToBeOtherArtist] ID mismatch for', song.id, song.title, {
+                // If there's no match, ensure they are comparable before aggressively blocking
+                const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+                const identityHasUuid = identityIds.some(id => uuidRegex.test(id));
+                const ownerHasUuid = Array.from(ownerIds).some(id => uuidRegex.test(id));
+                
+                if (identityHasUuid && ownerHasUuid) {
+                    console.debug('[isSongKnownToBeOtherArtist] Verified ID mismatch (both have UUIDs) for', song.id, song.title);
+                    return true; // We can confidently say this is another artist
+                }
+
+                const clerkRegex = /^user_[a-zA-Z0-9]+$/i;
+                const identityHasClerk = identityIds.some(id => clerkRegex.test(id));
+                const ownerHasClerk = Array.from(ownerIds).some(id => clerkRegex.test(id));
+
+                if (identityHasClerk && ownerHasClerk) {
+                    console.debug('[isSongKnownToBeOtherArtist] Verified ID mismatch (both have Clerk IDs) for', song.id, song.title);
+                    return true; // Confident mismatch on Clerk IDs
+                }
+
+                console.debug('[isSongKnownToBeOtherArtist] ID mismatch (incomparable IDs, allowing) for', song.id, song.title, {
                     identityIds: identityIds,
                     ownerIds: Array.from(ownerIds),
                     is_owned_by_current_user: song.is_owned_by_current_user,
-                    is_own_song: song.is_own_song,
-                    songOwnerFields: {
-                        owner_user_id: song.owner_user_id,
-                        user_id: song.user_id,
-                        creator_user_id: song.creator_user_id,
-                        author_user_id: song.author_user_id,
-                        owner_profile_id: song.owner_profile_id,
-                        profile_id: song.profile_id
-                    }
+                    is_own_song: song.is_own_song
                 });
-                return true;
+                return false; // Do not block if we might just be missing the correct ID format
             }
         } else if (identityIds.length > 0 || ownerIds.size > 0) {
             console.debug('[isSongKnownToBeOtherArtist] Inconclusive for', song.id, song.title, {
@@ -452,9 +467,7 @@
             owner_user_id: ownerUserId || null,
             owner_handle: ownerHandle,
             owner_display_name: ownerDisplayName,
-            is_owned_by_current_user: ownerUserId && getCurrentUserIdentityIds().length > 0
-                ? getCurrentUserIdentityIds().includes(ownerUserId)
-                : undefined
+            is_owned_by_current_user: ownerUserId && getCurrentUserIdentityIds().length > 0 && getCurrentUserIdentityIds().includes(ownerUserId) ? true : undefined
         };
 
         // Log for playlist songs that lack owner info
@@ -501,9 +514,13 @@
             return hydratedSong;
         }
 
+        const isOwned = isSongOwnedByCurrentUser(hydratedSong);
+        
+        // Don't forcefully set it to false if we just couldn't match IDs, as that causes false blocks.
+        // Only set it if it evaluates to true, otherwise leave the original value or undefined.
         return {
             ...hydratedSong,
-            is_owned_by_current_user: isSongOwnedByCurrentUser(hydratedSong)
+            is_owned_by_current_user: isOwned ? true : hydratedSong.is_owned_by_current_user
         };
     }
 

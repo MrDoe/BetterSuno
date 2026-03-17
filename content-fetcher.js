@@ -273,7 +273,7 @@
                 owner_user_id: currentUserId || null,
                 owner_handle: null,
                 owner_display_name: null,
-                is_owned_by_current_user: idSet.size > 0
+                is_owned_by_current_user: idSet.size > 0 ? true : undefined
             };
         }
 
@@ -338,7 +338,7 @@
             owner_user_id: ownerUserId,
             owner_handle: ownerHandle,
             owner_display_name: ownerDisplayName,
-            is_owned_by_current_user: idSet.size > 0 && !!ownerUserId ? idSet.has(ownerUserId) : (idSet.size > 0)
+            is_owned_by_current_user: idSet.size > 0 && !!ownerUserId && idSet.has(ownerUserId) ? true : undefined
         };
     }
 
