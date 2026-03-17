@@ -27,6 +27,7 @@
     let playlistSongs = null; // Active playlist songs when a playlist is selected, else null
     let currentUserIdentity = {
         id: null,
+        ids: [],
         handle: null,
         displayName: null
     };
@@ -209,6 +210,30 @@
         return trimmed || null;
     }
 
+    function collectNormalizedIds(values) {
+        const ids = [];
+
+        values.forEach(value => {
+            if (typeof value !== 'string') {
+                return;
+            }
+
+            const trimmed = value.trim();
+            if (trimmed) {
+                ids.push(trimmed);
+            }
+        });
+
+        return Array.from(new Set(ids));
+    }
+
+    function getCurrentUserIdentityIds() {
+        return collectNormalizedIds([
+            currentUserIdentity?.id,
+            ...(Array.isArray(currentUserIdentity?.ids) ? currentUserIdentity.ids : [])
+        ]);
+    }
+
     function getSongOwnerIds(song) {
         return new Set([
             song?.owner_user_id,
@@ -243,33 +268,115 @@
             typeof song.owner_display_name === 'string';
     }
 
+    function canVerifyCurrentUserIdentity() {
+        return !!(
+            getCurrentUserIdentityIds().length > 0 ||
+            normalizeHandle(currentUserIdentity?.handle) ||
+            pickFirstNonEmptyString([currentUserIdentity?.displayName])
+        );
+    }
+
     function isSongOwnedByCurrentUser(song) {
         if (!song || typeof song !== 'object') {
             return false;
         }
 
-        const identityId = typeof currentUserIdentity?.id === 'string' ? currentUserIdentity.id.trim() : null;
+        const identityIds = getCurrentUserIdentityIds();
         const identityHandle = normalizeHandle(currentUserIdentity?.handle);
         const identityDisplayName = pickFirstNonEmptyString([currentUserIdentity?.displayName]);
 
         const ownerIds = getSongOwnerIds(song);
-        if (identityId && ownerIds.has(identityId)) {
+        if (identityIds.some(id => ownerIds.has(id))) {
+            console.debug('[isSongOwnedByCurrentUser] ID MATCH for', song.id, song.title, {
+                matchedId: identityIds.find(id => ownerIds.has(id))
+            });
             return true;
         }
 
         const ownerHandles = getSongOwnerHandles(song);
         if (identityHandle && ownerHandles.has(identityHandle)) {
+            console.debug('[isSongOwnedByCurrentUser] HANDLE MATCH for', song.id, song.title, {
+                identityHandle,
+                ownerHandles: Array.from(ownerHandles)
+            });
             return true;
         }
 
         if (song.is_owned_by_current_user === true || song.is_own_song === true) {
+            console.debug('[isSongOwnedByCurrentUser] FLAG MATCH for', song.id, song.title, {
+                is_owned_by_current_user: song.is_owned_by_current_user,
+                is_own_song: song.is_own_song
+            });
             return true;
         }
 
         if (identityDisplayName && typeof song.owner_display_name === 'string') {
-            return song.owner_display_name.trim().toLowerCase() === identityDisplayName.trim().toLowerCase();
+            if (song.owner_display_name.trim().toLowerCase() === identityDisplayName.trim().toLowerCase()) {
+                console.debug('[isSongOwnedByCurrentUser] DISPLAY NAME MATCH for', song.id, song.title, {
+                    displayName: identityDisplayName
+                });
+                return true;
+            }
         }
 
+        return false;
+    }
+
+    function isSongKnownToBeOtherArtist(song) {
+        if (!song || typeof song !== 'object') {
+            return false;
+        }
+
+        if (!canVerifyCurrentUserIdentity()) {
+            return false;
+        }
+
+        // Positive ownership match — not other artist
+        if (isSongOwnedByCurrentUser(song)) {
+            return false;
+        }
+
+        // Only trust the stored flag when both sides have IDs to compare
+        const identityIds = getCurrentUserIdentityIds();
+        const ownerIds = getSongOwnerIds(song);
+
+        if (identityIds.length > 0 && ownerIds.size > 0) {
+            const isMatch = identityIds.some(id => ownerIds.has(id));
+            if (!isMatch) {
+                console.debug('[isSongKnownToBeOtherArtist] ID mismatch for', song.id, song.title, {
+                    identityIds: identityIds,
+                    ownerIds: Array.from(ownerIds),
+                    is_owned_by_current_user: song.is_owned_by_current_user,
+                    is_own_song: song.is_own_song,
+                    songOwnerFields: {
+                        owner_user_id: song.owner_user_id,
+                        user_id: song.user_id,
+                        creator_user_id: song.creator_user_id,
+                        author_user_id: song.author_user_id,
+                        owner_profile_id: song.owner_profile_id,
+                        profile_id: song.profile_id
+                    }
+                });
+                return true;
+            }
+        } else if (identityIds.length > 0 || ownerIds.size > 0) {
+            console.debug('[isSongKnownToBeOtherArtist] Inconclusive for', song.id, song.title, {
+                hasIdentityIds: identityIds.length > 0,
+                hasOwnerIds: ownerIds.size > 0,
+                identityIds: identityIds,
+                ownerIds: Array.from(ownerIds),
+                songOwnerFields: {
+                    owner_user_id: song.owner_user_id,
+                    user_id: song.user_id,
+                    creator_user_id: song.creator_user_id,
+                    author_user_id: song.author_user_id,
+                    owner_profile_id: song.owner_profile_id,
+                    profile_id: song.profile_id
+                }
+            });
+        }
+
+        // Inconclusive (no IDs to compare, or IDs matched but reconciliation didn't confirm) — allow
         return false;
     }
 
@@ -341,14 +448,29 @@
             ]))
         ]);
 
-        return {
+        const result = {
             owner_user_id: ownerUserId || null,
             owner_handle: ownerHandle,
             owner_display_name: ownerDisplayName,
-            is_owned_by_current_user: ownerUserId && currentUserIdentity?.id
-                ? ownerUserId === currentUserIdentity.id
+            is_owned_by_current_user: ownerUserId && getCurrentUserIdentityIds().length > 0
+                ? getCurrentUserIdentityIds().includes(ownerUserId)
                 : undefined
         };
+
+        // Log for playlist songs that lack owner info
+        if (!ownerUserId && !ownerHandle && !ownerDisplayName) {
+            console.debug('[extractOwnershipMetadata] No owner metadata found in clip', {
+                clipId: clip.id,
+                hasUser: !!clip.user,
+                hasOwner: !!clip.owner,
+                hasCreator: !!clip.creator,
+                hasProfile: !!clip.profile,
+                clipKeys: Object.keys(clip).slice(0, 15),
+                rawClipKeys: Object.keys(rawClip).slice(0, 15)
+            });
+        }
+
+        return result;
     }
 
     function hydrateLibrarySong(song) {
@@ -369,40 +491,85 @@
         };
     }
 
+    function reconcileSongOwnership(song) {
+        const hydratedSong = hydrateLibrarySong(song);
+        if (!hydratedSong || typeof hydratedSong !== 'object') {
+            return hydratedSong;
+        }
+
+        if (!canVerifyCurrentUserIdentity()) {
+            return hydratedSong;
+        }
+
+        return {
+            ...hydratedSong,
+            is_owned_by_current_user: isSongOwnedByCurrentUser(hydratedSong)
+        };
+    }
+
     function splitSongsByDownloadEligibility(songs) {
+        const canVerify = canVerifyCurrentUserIdentity();
+        console.debug('[splitSongsByDownloadEligibility] canVerify:', canVerify);
+        
+        if (!canVerify) {
+            console.debug('[splitSongsByDownloadEligibility] Cannot verify identity - all songs downloadable');
+            return {
+                downloadable: [...songs],
+                blocked: []
+            };
+        }
+
         const downloadable = [];
         const blocked = [];
 
         songs.forEach(song => {
-            if (isSongOwnedByCurrentUser(song)) {
-                downloadable.push(song);
-            } else {
+            const isOther = isSongKnownToBeOtherArtist(song);
+            console.debug('[splitSongsByDownloadEligibility]', song.id, song.title, '→ isOtherArtist:', isOther);
+            if (isOther) {
                 blocked.push(song);
+            } else {
+                downloadable.push(song);
             }
         });
 
+        console.debug('[splitSongsByDownloadEligibility] Result: downloadable=' + downloadable.length + ', blocked=' + blocked.length);
         return { downloadable, blocked };
+    }
+
+    function shouldShowOtherArtistBadge(song) {
+        if (!playlistFilter || !playlistFilter.value) {
+            return false;
+        }
+
+        return isSongKnownToBeOtherArtist(song);
     }
 
     async function loadCurrentUserIdentity() {
         try {
             const response = await api.runtime.sendMessage({ action: 'get_current_user_identity' });
             if (!response?.ok || !response.identity) {
+                console.debug('[loadCurrentUserIdentity] Failed to get identity:', response?.error);
                 return;
             }
 
             currentUserIdentity = {
                 id: typeof response.identity.id === 'string' ? response.identity.id.trim() : null,
+                ids: collectNormalizedIds(response.identity.ids || []),
                 handle: normalizeHandle(response.identity.handle),
                 displayName: pickFirstNonEmptyString([response.identity.displayName])
             };
 
-            allSongs = allSongs.map(hydrateLibrarySong);
+            console.debug('[loadCurrentUserIdentity] User identity loaded:', {
+                id: currentUserIdentity.id,
+                ids: currentUserIdentity.ids,
+                handle: currentUserIdentity.handle,
+                displayName: currentUserIdentity.displayName
+            });
+
+            allSongs = allSongs.map(reconcileSongOwnership);
             if (playlistSongs) {
-                playlistSongs = playlistSongs.map(song => ({
-                    ...song,
-                    is_owned_by_current_user: isSongOwnedByCurrentUser(song)
-                }));
+                console.debug('[loadCurrentUserIdentity] Reconciling', playlistSongs.length, 'playlist songs with new identity');
+                playlistSongs = playlistSongs.map(reconcileSongOwnership);
             }
 
             applyFilter({
@@ -494,11 +661,13 @@
     let progressHandle = null;
 
     // Player tab references
-    const playerTabArt = document.getElementById('player-tab-art');
     const playerTabVideo = document.getElementById('player-tab-video');
-    const playerTabArtFallback = document.getElementById('player-tab-art-fallback');
     const playerTabTitle = document.getElementById('player-tab-title');
     const playerTabLyrics = document.getElementById('player-tab-lyrics');
+    const playerTabViewCover = document.getElementById('player-tab-view-cover');
+    const playerTabViewLyrics = document.getElementById('player-tab-view-lyrics');
+    const playerTabSubtabCover = document.getElementById('player-tab-subtab-cover');
+    const playerTabSubtabLyrics = document.getElementById('player-tab-subtab-lyrics');
     const playerTabNoSong = document.getElementById('player-tab-no-song');
     const playerTabSong = document.getElementById('player-tab-song');
     const playerTabPlayPause = document.getElementById('player-tab-play-pause');
@@ -508,7 +677,35 @@
     const playerTabProgressContainer = document.getElementById('player-tab-progress-container');
     const playerTabTime = document.getElementById('player-tab-time');
     let playerTabProgressHandle = null;
-    let playerTabArtBlobUrl = null; // Track current art blob URL for revocation
+    let playerTabMediaRequestId = 0;
+    let playerTabCurrentView = 'cover';
+
+    function setPlayerTabView(view) {
+        const nextView = view === 'lyrics' ? 'lyrics' : 'cover';
+        playerTabCurrentView = nextView;
+
+        if (playerTabViewCover) {
+            playerTabViewCover.style.display = nextView === 'cover' ? 'flex' : 'none';
+        }
+        if (playerTabViewLyrics) {
+            playerTabViewLyrics.style.display = nextView === 'lyrics' ? 'flex' : 'none';
+        }
+
+        if (playerTabSubtabCover) {
+            playerTabSubtabCover.classList.toggle('active', nextView === 'cover');
+        }
+        if (playerTabSubtabLyrics) {
+            playerTabSubtabLyrics.classList.toggle('active', nextView === 'lyrics');
+        }
+    }
+
+    if (playerTabSubtabCover) {
+        playerTabSubtabCover.addEventListener('click', () => setPlayerTabView('cover'));
+    }
+    if (playerTabSubtabLyrics) {
+        playerTabSubtabLyrics.addEventListener('click', () => setPlayerTabView('lyrics'));
+    }
+    setPlayerTabView(playerTabCurrentView);
 
     if (progressContainer) {
         progressHandle = progressContainer.querySelector('#player-progress-handle');
@@ -541,7 +738,7 @@
     }
 
     function updatePlayerProgressUi() {
-        if (!audioElement || !progressBar || !playerTime) {
+        if (!audioElement) {
             return;
         }
 
@@ -556,11 +753,15 @@
             ? Math.max(0, Math.min(100, (current / duration) * 100))
             : 0;
 
-        progressBar.style.width = `${percent}%`;
+        if (progressBar) {
+            progressBar.style.width = `${percent}%`;
+        }
         if (progressHandle) {
             progressHandle.style.left = `${percent}%`;
         }
-        playerTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
+        if (playerTime) {
+            playerTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
+        }
 
         // Sync player tab progress
         if (playerTabProgressBar) {
@@ -572,6 +773,36 @@
         if (playerTabTime) {
             playerTabTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
         }
+    }
+
+    function seekAudioFromProgressContainer(container, bar, handle, event) {
+        if (!audioElement || !container) {
+            return;
+        }
+
+        if (!Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
+            return;
+        }
+
+        const rect = container.getBoundingClientRect();
+        if (rect.width <= 0) {
+            return;
+        }
+
+        const rawOffset = event.clientX - rect.left;
+        const clampedOffset = Math.max(0, Math.min(rect.width, rawOffset));
+        const seekRatio = clampedOffset / rect.width;
+        const seekPercent = seekRatio * 100;
+
+        if (bar) {
+            bar.style.width = `${seekPercent}%`;
+        }
+        if (handle) {
+            handle.style.left = `${seekPercent}%`;
+        }
+
+        audioElement.currentTime = seekRatio * audioElement.duration;
+        updatePlayerProgressUi();
     }
 
     async function togglePlay(song) {
@@ -592,6 +823,15 @@
 
             currentPlayingSongId = song.id;
 
+            // Reset progress immediately so next/previous track changes are reflected
+            // before metadata/timeupdate events arrive for the new source.
+            if (audioElement) {
+                audioElement.pause();
+                audioElement.removeAttribute('src');
+                audioElement.load();
+                updatePlayerProgressUi();
+            }
+
             // Use cached audio if available, otherwise stream online
             const cachedBlob = await getAudioBlobFromIDB(song.id);
             if (cachedBlob) {
@@ -601,11 +841,15 @@
                 audioElement.src = song.audio_url;
             }
 
+            audioElement.currentTime = 0;
+            updatePlayerProgressUi();
+
             // Revoke the previous blob URL now that the audio element has moved to the new source
             if (prevBlobUrl) {
                 URL.revokeObjectURL(prevBlobUrl);
             }
 
+            audioElement.load();
             audioElement.play();
             miniPlayer.style.display = 'block';
             playerTitle.textContent = song.title || 'Untitled';
@@ -645,14 +889,77 @@
     function updatePlayerTabUi(song) {
         if (!playerTabSong || !playerTabNoSong) return;
 
+        const isLikelyVideoUrl = (url) => {
+            if (typeof url !== 'string') return false;
+            const cleaned = url.split('?')[0].toLowerCase();
+            return cleaned.endsWith('.mp4') || cleaned.endsWith('.webm') || cleaned.endsWith('.mov') || cleaned.endsWith('.m4v');
+        };
+
+        const deriveProcessedVideoUrl = (...values) => {
+            for (const value of values) {
+                if (typeof value !== 'string' || !value) continue;
+                const match = value.match(/video_gen_([0-9a-f-]{36})/i);
+                if (match?.[1]) {
+                    return `https://cdn1.suno.ai/video_gen_${match[1]}_processed_video.mp4`;
+                }
+            }
+            return null;
+        };
+
+        const hideVideo = () => {
+            if (!playerTabVideo) return;
+            playerTabVideo.pause();
+            playerTabVideo.removeAttribute('src');
+            playerTabVideo.load();
+            playerTabVideo.style.display = 'none';
+            playerTabVideo.onerror = null;
+            playerTabVideo.onloadeddata = null;
+        };
+
+        const showNoMedia = () => {
+            hideVideo();
+        };
+
+        const showVideo = (src, posterUrl = null) => {
+            playerTabVideo.muted = true;
+            playerTabVideo.loop = true;
+            playerTabVideo.playsInline = true;
+            playerTabVideo.poster = posterUrl || '';
+            playerTabVideo.src = src;
+            playerTabVideo.style.display = 'block';
+            playerTabVideo.onerror = () => {
+                showNoMedia();
+            };
+            playerTabVideo.onloadeddata = () => {
+                const playPromise = playerTabVideo.play();
+                if (playPromise && typeof playPromise.catch === 'function') {
+                    playPromise.catch(() => {
+                        // Keep video visible even if autoplay is blocked.
+                    });
+                }
+            };
+            const initialPlayPromise = playerTabVideo.play();
+            if (initialPlayPromise && typeof initialPlayPromise.catch === 'function') {
+                initialPlayPromise.catch(() => {
+                    // loadeddata may still trigger playback.
+                });
+            }
+        };
+
         if (!song) {
+            playerTabMediaRequestId += 1;
             playerTabNoSong.style.display = 'flex';
             playerTabSong.style.display = 'none';
+            hideVideo();
             return;
         }
 
+        const requestId = ++playerTabMediaRequestId;
+        const isStillCurrentSong = () => requestId === playerTabMediaRequestId && currentPlayingSongId === song.id;
+
         playerTabNoSong.style.display = 'none';
         playerTabSong.style.display = 'flex';
+        setPlayerTabView(playerTabCurrentView);
 
         if (playerTabTitle) {
             playerTabTitle.textContent = song.title || 'Untitled';
@@ -663,62 +970,58 @@
             playerTabLyrics.textContent = lyrics || 'No lyrics available.';
         }
 
-        // Update cover art: prefer video, then image
+        // Update cover media: video only
         const thumbnailUrl = song.image_url || song.thumbnail_url || song.cover_image_url || song.artwork_url || null;
-        const videoUrl = song.video_url || null;
+        const derivedProcessedVideoUrl = deriveProcessedVideoUrl(
+            song.video_url,
+            song.image_url,
+            song.thumbnail_url,
+            song.cover_image_url,
+            song.artwork_url
+        );
+        const videoUrl =
+            derivedProcessedVideoUrl ||
+            song.video_url ||
+            song.video_cdn_url ||
+            song.mp4_url ||
+            song.cover_video_url ||
+            (isLikelyVideoUrl(song.image_url) ? song.image_url : null) ||
+            (isLikelyVideoUrl(song.thumbnail_url) ? song.thumbnail_url : null) ||
+            (isLikelyVideoUrl(song.cover_image_url) ? song.cover_image_url : null) ||
+            null;
 
-        if (playerTabVideo && playerTabArt && playerTabArtFallback) {
-            // Revoke any previously created blob URL for the art
-            if (playerTabArtBlobUrl) {
-                URL.revokeObjectURL(playerTabArtBlobUrl);
-                playerTabArtBlobUrl = null;
+        if (playerTabVideo) {
+            if (videoUrl) {
+                showVideo(videoUrl, thumbnailUrl);
+            } else {
+                showNoMedia();
             }
 
-            if (videoUrl) {
-                playerTabVideo.src = videoUrl;
-                playerTabVideo.style.display = 'block';
-                playerTabArt.style.display = 'none';
-                playerTabArtFallback.style.display = 'none';
-            } else if (cachedSongIds.has(song.id)) {
-                getImageBlobFromIDB(song.id).then(imgBlob => {
-                    if (imgBlob) {
-                        const objUrl = URL.createObjectURL(imgBlob);
-                        playerTabArtBlobUrl = objUrl;
-                        playerTabArt.src = objUrl;
-                        playerTabArt.style.display = 'block';
-                        playerTabVideo.style.display = 'none';
-                        playerTabArtFallback.style.display = 'none';
-                    } else if (thumbnailUrl) {
-                        playerTabArt.src = thumbnailUrl;
-                        playerTabArt.style.display = 'block';
-                        playerTabVideo.style.display = 'none';
-                        playerTabArtFallback.style.display = 'none';
-                    } else {
-                        playerTabArt.style.display = 'none';
-                        playerTabVideo.style.display = 'none';
-                        playerTabArtFallback.style.display = 'flex';
+            // Resolve preferred cover video from the Suno song page.
+            // This can replace metadata URLs that point to the wrong clip.
+            if (song.id) {
+                void (async () => {
+                    try {
+                        const response = await api.runtime.sendMessage({
+                            action: 'resolve_song_cover_video',
+                            songId: song.id
+                        });
+
+                        if (!isStillCurrentSong()) {
+                            return;
+                        }
+
+                        const resolvedUrl = (response?.ok && typeof response.videoUrl === 'string')
+                            ? response.videoUrl
+                            : null;
+
+                        if (resolvedUrl && (!videoUrl || resolvedUrl !== videoUrl)) {
+                            showVideo(resolvedUrl, thumbnailUrl);
+                        }
+                    } catch (e) {
+                        // Keep existing image/fallback display if resolving cover video fails.
                     }
-                }).catch(() => {
-                    if (thumbnailUrl) {
-                        playerTabArt.src = thumbnailUrl;
-                        playerTabArt.style.display = 'block';
-                        playerTabVideo.style.display = 'none';
-                        playerTabArtFallback.style.display = 'none';
-                    } else {
-                        playerTabArt.style.display = 'none';
-                        playerTabVideo.style.display = 'none';
-                        playerTabArtFallback.style.display = 'flex';
-                    }
-                });
-            } else if (thumbnailUrl) {
-                playerTabArt.src = thumbnailUrl;
-                playerTabArt.style.display = 'block';
-                playerTabVideo.style.display = 'none';
-                playerTabArtFallback.style.display = 'none';
-            } else {
-                playerTabArt.style.display = 'none';
-                playerTabVideo.style.display = 'none';
-                playerTabArtFallback.style.display = 'flex';
+                })();
             }
         }
     }
@@ -789,6 +1092,14 @@
             updatePlayerProgressUi();
         });
 
+        audioElement.addEventListener('durationchange', () => {
+            updatePlayerProgressUi();
+        });
+
+        audioElement.addEventListener('canplay', () => {
+            updatePlayerProgressUi();
+        });
+
         audioElement.addEventListener('seeked', () => {
             updatePlayerProgressUi();
         });
@@ -808,52 +1119,13 @@
 
     if (audioElement && progressContainer) {
         progressContainer.addEventListener('click', (event) => {
-            if (!Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
-                return;
-            }
-
-            const rect = progressContainer.getBoundingClientRect();
-            if (rect.width <= 0) {
-                return;
-            }
-
-            const rawOffset = event.clientX - rect.left;
-            const clampedOffset = Math.max(0, Math.min(rect.width, rawOffset));
-            const seekRatio = clampedOffset / rect.width;
-            // Move the visual indicator immediately, even before media events fire.
-            const seekPercent = seekRatio * 100;
-            progressBar.style.width = `${seekPercent}%`;
-            if (progressHandle) {
-                progressHandle.style.left = `${seekPercent}%`;
-            }
-            audioElement.currentTime = seekRatio * audioElement.duration;
-            updatePlayerProgressUi();
+            seekAudioFromProgressContainer(progressContainer, progressBar, progressHandle, event);
         });
     }
 
     if (audioElement && playerTabProgressContainer) {
         playerTabProgressContainer.addEventListener('click', (event) => {
-            if (!Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
-                return;
-            }
-
-            const rect = playerTabProgressContainer.getBoundingClientRect();
-            if (rect.width <= 0) {
-                return;
-            }
-
-            const rawOffset = event.clientX - rect.left;
-            const clampedOffset = Math.max(0, Math.min(rect.width, rawOffset));
-            const seekRatio = clampedOffset / rect.width;
-            const seekPercent = seekRatio * 100;
-            if (playerTabProgressBar) {
-                playerTabProgressBar.style.width = `${seekPercent}%`;
-            }
-            if (playerTabProgressHandle) {
-                playerTabProgressHandle.style.left = `${seekPercent}%`;
-            }
-            audioElement.currentTime = seekRatio * audioElement.duration;
-            updatePlayerProgressUi();
+            seekAudioFromProgressContainer(playerTabProgressContainer, playerTabProgressBar, playerTabProgressHandle, event);
         });
     }
 
@@ -1518,7 +1790,7 @@
             }
             
             if (savedSongs && savedSongs.length > 0) {
-                allSongs = savedSongs.map(hydrateLibrarySong);
+                allSongs = savedSongs.map(reconcileSongOwnership);
                 filteredSongs = [...allSongs];
                 const needsMetadataRefresh = libraryNeedsMetadataRefresh(savedSongs);
 
@@ -1632,22 +1904,24 @@
 
     function mergeSongs(newSongs) {
         const existingIds = new Set(allSongs.map(s => s.id));
-        const addedSongs = newSongs.filter(s => !existingIds.has(s.id));
+        const addedSongs = newSongs
+            .filter(s => !existingIds.has(s.id))
+            .map(reconcileSongOwnership);
 
-        // Update upvote_count on existing songs from fresh API data
+        // Refresh existing songs from fresh API data, including ownership metadata.
         if (newSongs.length > 0) {
             const newSongsById = new Map(newSongs.map(s => [s.id, s]));
             allSongs = allSongs.map(s => {
                 const fresh = newSongsById.get(s.id);
-                if (fresh && fresh.upvote_count !== undefined) {
-                    return {
+                if (fresh) {
+                    return reconcileSongOwnership({
                         ...s,
-                        upvote_count: fresh.upvote_count,
+                        upvote_count: fresh.upvote_count ?? s.upvote_count,
                         owner_user_id: fresh.owner_user_id ?? s.owner_user_id,
                         owner_handle: fresh.owner_handle ?? s.owner_handle,
                         owner_display_name: fresh.owner_display_name ?? s.owner_display_name,
                         is_owned_by_current_user: fresh.is_owned_by_current_user ?? s.is_owned_by_current_user
-                    };
+                    });
                 }
                 return s;
             });
@@ -1926,7 +2200,7 @@
                     const data = response.data;
                     const clips = extractPlaylistClipItems(data);
                     for (const c of clips) {
-                        const song = normalizeSongClip(c);
+                        const song = reconcileSongOwnership(normalizeSongClip(c));
                         if (song.id) {
                             playlistClipMap.set(song.id, song);
                         }
@@ -2040,10 +2314,33 @@
         const folder = folderInput.value;
         const format = getSelectedFormat();
         const songsToDownload = activeSongs.filter(s => selectedIds.includes(s.id));
+        
+        console.debug('[Download Button] Current user identity:', {
+            id: currentUserIdentity?.id,
+            ids: currentUserIdentity?.ids,
+            handle: currentUserIdentity?.handle,
+            displayName: currentUserIdentity?.displayName,
+            canVerify: canVerifyCurrentUserIdentity()
+        });
+        console.debug('[Download Button] Songs to check:', songsToDownload.map(s => ({
+            id: s.id,
+            title: s.title,
+            owner_user_id: s.owner_user_id,
+            isOwned: isSongOwnedByCurrentUser(s),
+            isOtherArtist: isSongKnownToBeOtherArtist(s)
+        })));
+        
         const { downloadable, blocked } = splitSongsByDownloadEligibility(songsToDownload);
+
+        console.debug('[Download Button] Download eligibility split:', {
+            total: songsToDownload.length,
+            downloadable: downloadable.length,
+            blocked: blocked.length
+        });
 
         if (downloadable.length === 0) {
             statusDiv.innerText = "Only your own songs can be downloaded as files. Songs by other artists may only be saved to the local database.";
+            console.debug('[Download Button] No downloadable songs - blocked:', blocked.map(s => ({ id: s.id, title: s.title })));
             return;
         }
 
@@ -2065,8 +2362,11 @@
         if (downloadOptions.music) selectedTypes.push(format.toUpperCase());
         if (downloadOptions.lyrics) selectedTypes.push("lyrics");
         if (downloadOptions.image) selectedTypes.push("images");
+        const identityVerified = canVerifyCurrentUserIdentity();
         statusDiv.innerText = blocked.length > 0
             ? `Downloading ${downloadable.length} own song(s): ${selectedTypes.join(", ")}. Skipped ${blocked.length} song(s) by other artists.`
+            : !identityVerified
+                ? `Preparing ${downloadable.length} song(s): ${selectedTypes.join(", ")}. Ownership will be verified before file download starts.`
             : `Downloading ${downloadable.length} song(s): ${selectedTypes.join(", ")}...`;
     });
 
@@ -2127,7 +2427,7 @@
                 statusDiv.innerText = `Page ${message.pageNum}: ${message.totalSongs} new songs found...`;
             } else {
                 // Fresh fetch - replace all
-                allSongs = newSongs.map(hydrateLibrarySong);
+                allSongs = newSongs.map(reconcileSongOwnership);
                 filteredSongs = [...allSongs];
 
                 // Show song list immediately after first page
@@ -2182,7 +2482,7 @@
                 }
             } else {
                 // Fresh fetch complete
-                allSongs = newSongs.map(hydrateLibrarySong);
+                allSongs = newSongs.map(reconcileSongOwnership);
                 filteredSongs = [...allSongs];
 
                 // Only show song list if not already visible (page updates already showed it)
@@ -2235,8 +2535,12 @@
 
         if (message.action === "download_complete") {
             setDownloadUiState(false);
-            if (message.stopped) {
+            if (typeof message.text === 'string' && message.text.trim()) {
+                statusDiv.innerText = message.text;
+            } else if (message.stopped) {
                 statusDiv.innerText = "⏹️ Download stopped by user.";
+            } else if (message.ok === false) {
+                statusDiv.innerText = "❌ Download failed.";
             } else {
                 statusDiv.innerText = "✅ Download complete!";
             }
@@ -2267,7 +2571,7 @@
         songListSentinel.classList.toggle('is-complete', remaining === 0);
         songListSentinel.textContent = remaining > 0
             ? `Scroll to load ${Math.min(remaining, SONG_RENDER_BATCH_SIZE)} more songs`
-            : (sortedFilteredSongs.length > 0 ? 'All songs loaded' : '');
+            : (sortedFilteredSongs.length > 0 ? 'All my songs loaded' : '');
     }
 
     function ensureSongListSentinel() {
@@ -2400,7 +2704,7 @@
             metaDiv.appendChild(document.createTextNode(' • ' + formatDate(song.created_at)));
         }
 
-        if (hasSongOwnershipMetadata(song) && !isSongOwnedByCurrentUser(song)) {
+        if (shouldShowOtherArtistBadge(song)) {
             const ownershipSpan = document.createElement('span');
             ownershipSpan.textContent = ' • 👤 Other artist';
             ownershipSpan.title = 'Only your own songs can be downloaded as files';

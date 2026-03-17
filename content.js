@@ -42,7 +42,7 @@
             <div id="playlistControls">
               <label>📋 Playlist:</label>
               <select id="playlistFilter">
-                <option value="">All Songs</option>
+                <option value="">All My Songs</option>
               </select>
               <button id="refreshPlaylistsBtn" class="btn-secondary" title="Refresh playlists from Suno" type="button">⟳</button>
             </div>
@@ -156,35 +156,41 @@
           </div>
         </div>
       </div>
-    </div>
-    <div id="bettersuno-player-content" class="bettersuno-content" style="display: none;">
-      <div class="player-tab-inner">
-        <div class="player-tab-no-song" id="player-tab-no-song">
-          <div class="player-tab-no-song-icon">♪</div>
-          <div>No song playing</div>
-        </div>
-        <div class="player-tab-song" id="player-tab-song" style="display: none;">
-          <div class="player-tab-art-wrapper" id="player-tab-art-wrapper">
-            <img class="player-tab-art" id="player-tab-art" src="" alt="Cover art" style="display: none;" />
-            <video class="player-tab-art" id="player-tab-video" style="display: none;" autoplay loop muted playsinline></video>
-            <div class="player-tab-art-fallback" id="player-tab-art-fallback">♪</div>
+      <div id="bettersuno-player-content" class="bettersuno-content" style="display: none;">
+        <div class="player-tab-inner">
+          <div class="player-tab-no-song" id="player-tab-no-song">
+            <div class="player-tab-no-song-icon">♪</div>
+            <div>No song playing</div>
           </div>
-          <div class="player-tab-title" id="player-tab-title"></div>
-          <div class="player-tab-lyrics-wrapper">
-            <div class="player-tab-lyrics" id="player-tab-lyrics">No lyrics available.</div>
-          </div>
-        </div>
-        <div class="player-tab-controls">
-          <div class="player-tab-progress-row">
-            <div class="player-progress-container" id="player-tab-progress-container">
-              <div class="player-progress" id="player-tab-progress-bar"></div>
+          <div class="player-tab-song" id="player-tab-song" style="display: none;">
+            <div class="player-tab-subtabs" id="player-tab-subtabs">
+              <button type="button" class="player-tab-subtab active" id="player-tab-subtab-cover" data-view="cover">Cover</button>
+              <button type="button" class="player-tab-subtab" id="player-tab-subtab-lyrics" data-view="lyrics">Lyrics</button>
             </div>
-            <div class="player-time" id="player-tab-time">0:00 / 0:00</div>
+            <div class="player-tab-view" id="player-tab-view-cover">
+              <div class="player-tab-title" id="player-tab-title"></div>
+              <div class="player-tab-art-wrapper" id="player-tab-art-wrapper">
+                <video class="player-tab-video-media" id="player-tab-video" style="display: none;" autoplay loop muted playsinline></video>
+              </div>
+            </div>
+            <div class="player-tab-view" id="player-tab-view-lyrics" style="display: none;">
+              <div class="player-tab-lyrics-wrapper">
+                <div class="player-tab-lyrics" id="player-tab-lyrics">No lyrics available.</div>
+              </div>
+            </div>
           </div>
-          <div class="player-tab-buttons">
-            <button id="player-tab-prev" class="player-btn" title="Previous track">⏮︎</button>
-            <button id="player-tab-play-pause" class="player-btn player-btn-large" title="Play/Pause">▶</button>
-            <button id="player-tab-next" class="player-btn" title="Next track">⏭︎</button>
+          <div class="player-tab-controls">
+            <div class="player-tab-progress-row">
+              <div class="player-progress-container" id="player-tab-progress-container">
+                <div class="player-progress" id="player-tab-progress-bar"></div>
+              </div>
+              <div class="player-time" id="player-tab-time">0:00 / 0:00</div>
+            </div>
+            <div class="player-tab-buttons">
+              <button id="player-tab-prev" class="player-btn" title="Previous track">⏮︎</button>
+              <button id="player-tab-play-pause" class="player-btn player-btn-large" title="Play/Pause">▶</button>
+              <button id="player-tab-next" class="player-btn" title="Next track">⏭︎</button>
+            </div>
           </div>
         </div>
       </div>
