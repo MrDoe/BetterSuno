@@ -25,12 +25,7 @@
     let currentFetchMode = 'idle';
     let syncMeta = createDefaultSyncMeta();
     let playlistSongs = null; // Active playlist songs when a playlist is selected, else null
-    let currentUserIdentity = {
-        id: null,
-        ids: [],
-        handle: null,
-        displayName: null
-    };
+    let sunoUserId = null; // Set from the first own song when My Songs are loaded
 
     function createDefaultSyncMeta() {
         return {
@@ -188,419 +183,36 @@
         return typeof clip.title === 'string' && /\bstem(s)?\b/i.test(clip.title);
     }
 
-    function pickFirstNonEmptyString(values) {
-        for (const value of values) {
-            if (typeof value === 'string') {
-                const trimmed = value.trim();
-                if (trimmed) {
-                    return trimmed;
-                }
-            }
-        }
 
-        return null;
-    }
-
-    function normalizeHandle(value) {
-        if (typeof value !== 'string') {
-            return null;
-        }
-
-        const trimmed = value.trim().replace(/^@+/, '').toLowerCase();
-        return trimmed || null;
-    }
-
-    function collectNormalizedIds(values) {
-        const ids = [];
-
-        values.forEach(value => {
-            if (typeof value !== 'string') {
-                return;
-            }
-
-            const trimmed = value.trim();
-            if (trimmed) {
-                ids.push(trimmed);
-            }
-        });
-
-        return Array.from(new Set(ids));
-    }
-
-    function getCurrentUserIdentityIds() {
-        return collectNormalizedIds([
-            currentUserIdentity?.id,
-            ...(Array.isArray(currentUserIdentity?.ids) ? currentUserIdentity.ids : [])
-        ]);
-    }
-
-    function getSongOwnerIds(song) {
-        return new Set([
-            song?.owner_user_id,
-            song?.user_id,
-            song?.creator_user_id,
-            song?.author_user_id,
-            song?.owner_profile_id,
-            song?.profile_id
-        ].filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()));
-    }
-
-    function getSongOwnerHandles(song) {
-        return new Set([
-            song?.owner_handle,
-            song?.handle,
-            song?.user_handle,
-            song?.creator_handle,
-            song?.author_handle,
-            song?.username
-        ].map(normalizeHandle).filter(Boolean));
-    }
-
-    function hasSongOwnershipMetadata(song) {
-        if (!song || typeof song !== 'object') return false;
-
-        return song.is_owned_by_current_user === true ||
-            song.is_owned_by_current_user === false ||
-            song.is_own_song === true ||
-            song.is_own_song === false ||
-            getSongOwnerIds(song).size > 0 ||
-            getSongOwnerHandles(song).size > 0 ||
-            typeof song.owner_display_name === 'string';
-    }
-
-    function canVerifyCurrentUserIdentity() {
-        return !!(
-            getCurrentUserIdentityIds().length > 0 ||
-            normalizeHandle(currentUserIdentity?.handle) ||
-            pickFirstNonEmptyString([currentUserIdentity?.displayName])
-        );
-    }
-
-    function isSongOwnedByCurrentUser(song) {
-        if (!song || typeof song !== 'object') {
-            return false;
-        }
-
-        const identityIds = getCurrentUserIdentityIds();
-        const identityHandle = normalizeHandle(currentUserIdentity?.handle);
-        const identityDisplayName = pickFirstNonEmptyString([currentUserIdentity?.displayName]);
-
-        const ownerIds = getSongOwnerIds(song);
-        if (identityIds.some(id => ownerIds.has(id))) {
-            console.debug('[isSongOwnedByCurrentUser] ID MATCH for', song.id, song.title, {
-                matchedId: identityIds.find(id => ownerIds.has(id))
-            });
-            return true;
-        }
-
-        const ownerHandles = getSongOwnerHandles(song);
-        if (identityHandle && ownerHandles.has(identityHandle)) {
-            console.debug('[isSongOwnedByCurrentUser] HANDLE MATCH for', song.id, song.title, {
-                identityHandle,
-                ownerHandles: Array.from(ownerHandles)
-            });
-            return true;
-        }
-
-        if (song.is_owned_by_current_user === true || song.is_own_song === true) {
-            console.debug('[isSongOwnedByCurrentUser] FLAG MATCH for', song.id, song.title, {
-                is_owned_by_current_user: song.is_owned_by_current_user,
-                is_own_song: song.is_own_song
-            });
-            return true;
-        }
-
-        if (identityDisplayName && typeof song.owner_display_name === 'string') {
-            if (song.owner_display_name.trim().toLowerCase() === identityDisplayName.trim().toLowerCase()) {
-                console.debug('[isSongOwnedByCurrentUser] DISPLAY NAME MATCH for', song.id, song.title, {
-                    displayName: identityDisplayName
-                });
-                return true;
-            }
-        }
-
+    function isSongFromOtherArtist(song) {
+        if (song?.is_owned_by_current_user === false) return true;
+        if (sunoUserId && song?.owner_user_id && song.owner_user_id !== sunoUserId) return true;
         return false;
     }
 
-    function isSongKnownToBeOtherArtist(song) {
-        if (!song || typeof song !== 'object') {
-            return false;
+    function initSunoUserId() {
+        if (!sunoUserId && allSongs.length > 0) {
+            sunoUserId = allSongs[0].owner_user_id || null;
         }
-
-        if (song.is_owned_by_current_user === false || song.is_own_song === false) {
-            return true;
-        }
-
-        if (!canVerifyCurrentUserIdentity()) {
-            return false;
-        }
-
-        // Positive ownership match — not other artist
-        if (isSongOwnedByCurrentUser(song)) {
-            return false;
-        }
-
-        // Only trust the stored flag when both sides have IDs to compare
-        const identityIds = getCurrentUserIdentityIds();
-        const ownerIds = getSongOwnerIds(song);
-
-        if (identityIds.length > 0 && ownerIds.size > 0) {
-            const isMatch = identityIds.some(id => ownerIds.has(id));
-            if (!isMatch) {
-                // If there's no match, ensure they are comparable before aggressively blocking
-                const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-                const identityHasUuid = identityIds.some(id => uuidRegex.test(id));
-                const ownerHasUuid = Array.from(ownerIds).some(id => uuidRegex.test(id));
-                
-                if (identityHasUuid && ownerHasUuid) {
-                    console.debug('[isSongKnownToBeOtherArtist] Verified ID mismatch (both have UUIDs) for', song.id, song.title);
-                    return true; // We can confidently say this is another artist
-                }
-
-                const clerkRegex = /^user_[a-zA-Z0-9]+$/i;
-                const identityHasClerk = identityIds.some(id => clerkRegex.test(id));
-                const ownerHasClerk = Array.from(ownerIds).some(id => clerkRegex.test(id));
-
-                if (identityHasClerk && ownerHasClerk) {
-                    console.debug('[isSongKnownToBeOtherArtist] Verified ID mismatch (both have Clerk IDs) for', song.id, song.title);
-                    return true; // Confident mismatch on Clerk IDs
-                }
-
-                console.debug('[isSongKnownToBeOtherArtist] ID mismatch (incomparable IDs, allowing) for', song.id, song.title, {
-                    identityIds: identityIds,
-                    ownerIds: Array.from(ownerIds),
-                    is_owned_by_current_user: song.is_owned_by_current_user,
-                    is_own_song: song.is_own_song
-                });
-                return false; // Do not block if we might just be missing the correct ID format
-            }
-        } else if (identityIds.length > 0 || ownerIds.size > 0) {
-            console.debug('[isSongKnownToBeOtherArtist] Inconclusive for', song.id, song.title, {
-                hasIdentityIds: identityIds.length > 0,
-                hasOwnerIds: ownerIds.size > 0,
-                identityIds: identityIds,
-                ownerIds: Array.from(ownerIds),
-                songOwnerFields: {
-                    owner_user_id: song.owner_user_id,
-                    user_id: song.user_id,
-                    creator_user_id: song.creator_user_id,
-                    author_user_id: song.author_user_id,
-                    owner_profile_id: song.owner_profile_id,
-                    profile_id: song.profile_id
-                }
-            });
-        }
-
-        // Inconclusive (no IDs to compare, or IDs matched but reconciliation didn't confirm) — allow
-        return false;
-    }
-
-    function extractOwnershipMetadata(rawClip) {
-        const clip = rawClip?.clip || rawClip || {};
-        const profiles = [
-            clip.user,
-            clip.owner,
-            clip.creator,
-            clip.author,
-            clip.profile,
-            clip.user_profile,
-            clip.owner_profile,
-            clip.creator_profile,
-            clip.author_profile,
-            ...(Array.isArray(clip.user_profiles) ? clip.user_profiles : []),
-            ...(Array.isArray(rawClip?.user_profiles) ? rawClip.user_profiles : []),
-            ...(Array.isArray(clip.users) ? clip.users : []),
-            ...(Array.isArray(rawClip?.users) ? rawClip.users : [])
-        ].filter(Boolean);
-
-        const ownerUserId = pickFirstNonEmptyString([
-            clip.user_id,
-            clip.owner_user_id,
-            clip.creator_user_id,
-            clip.author_user_id,
-            clip.owner_id,
-            clip.creator_id,
-            clip.author_id,
-            clip.profile_id,
-            rawClip?.user_id,
-            rawClip?.owner_user_id,
-            rawClip?.creator_user_id,
-            rawClip?.author_user_id,
-            ...profiles.map(profile => pickFirstNonEmptyString([
-                profile?.id,
-                profile?.user_id,
-                profile?.profile_id,
-                profile?.owner_id
-            ]))
-        ]);
-
-        const ownerHandle = normalizeHandle(pickFirstNonEmptyString([
-            clip.handle,
-            clip.user_handle,
-            clip.owner_handle,
-            clip.creator_handle,
-            clip.author_handle,
-            clip.username,
-            rawClip?.handle,
-            rawClip?.user_handle,
-            ...profiles.map(profile => pickFirstNonEmptyString([
-                profile?.handle,
-                profile?.username,
-                profile?.user_handle
-            ]))
-        ]));
-
-        const ownerDisplayName = pickFirstNonEmptyString([
-            clip.display_name,
-            clip.user_display_name,
-            clip.owner_display_name,
-            clip.creator_display_name,
-            clip.author_display_name,
-            rawClip?.display_name,
-            ...profiles.map(profile => pickFirstNonEmptyString([
-                profile?.display_name,
-                profile?.name
-            ]))
-        ]);
-
-        const result = {
-            owner_user_id: ownerUserId || null,
-            owner_handle: ownerHandle,
-            owner_display_name: ownerDisplayName,
-            is_owned_by_current_user: ownerUserId && getCurrentUserIdentityIds().length > 0 && getCurrentUserIdentityIds().includes(ownerUserId) ? true : undefined
-        };
-
-        // Log for playlist songs that lack owner info
-        if (!ownerUserId && !ownerHandle && !ownerDisplayName) {
-            console.debug('[extractOwnershipMetadata] No owner metadata found in clip', {
-                clipId: clip.id,
-                hasUser: !!clip.user,
-                hasOwner: !!clip.owner,
-                hasCreator: !!clip.creator,
-                hasProfile: !!clip.profile,
-                clipKeys: Object.keys(clip).slice(0, 15),
-                rawClipKeys: Object.keys(rawClip).slice(0, 15)
-            });
-        }
-
-        return result;
-    }
-
-    function hydrateLibrarySong(song) {
-        if (!song || typeof song !== 'object') {
-            return song;
-        }
-
-        if (hasSongOwnershipMetadata(song)) {
-            return song;
-        }
-
-        return {
-            ...song,
-            is_owned_by_current_user: true,
-            owner_user_id: currentUserIdentity?.id || null,
-            owner_handle: normalizeHandle(currentUserIdentity?.handle),
-            owner_display_name: pickFirstNonEmptyString([currentUserIdentity?.displayName])
-        };
-    }
-
-    function reconcileSongOwnership(song) {
-        const hydratedSong = hydrateLibrarySong(song);
-        if (!hydratedSong || typeof hydratedSong !== 'object') {
-            return hydratedSong;
-        }
-
-        if (!canVerifyCurrentUserIdentity()) {
-            return hydratedSong;
-        }
-
-        const isOwned = isSongOwnedByCurrentUser(hydratedSong);
-        
-        // Don't forcefully set it to false if we just couldn't match IDs, as that causes false blocks.
-        // Only set it if it evaluates to true, otherwise leave the original value or undefined.
-        return {
-            ...hydratedSong,
-            is_owned_by_current_user: isOwned ? true : hydratedSong.is_owned_by_current_user
-        };
     }
 
     function splitSongsByDownloadEligibility(songs) {
-        const canVerify = canVerifyCurrentUserIdentity();
-        console.debug('[splitSongsByDownloadEligibility] canVerify:', canVerify);
-        
-        if (!canVerify) {
-            console.debug('[splitSongsByDownloadEligibility] Cannot verify identity - all songs downloadable');
-            return {
-                downloadable: [...songs],
-                blocked: []
-            };
-        }
-
         const downloadable = [];
         const blocked = [];
-
         songs.forEach(song => {
-            const isOther = isSongKnownToBeOtherArtist(song);
-            console.debug('[splitSongsByDownloadEligibility]', song.id, song.title, '→ isOtherArtist:', isOther);
-            if (isOther) {
-                blocked.push(song);
-            } else {
-                downloadable.push(song);
-            }
+            if (isSongFromOtherArtist(song)) blocked.push(song);
+            else downloadable.push(song);
         });
-
-        console.debug('[splitSongsByDownloadEligibility] Result: downloadable=' + downloadable.length + ', blocked=' + blocked.length);
         return { downloadable, blocked };
     }
 
     function shouldShowOtherArtistBadge(song) {
-        if (!playlistFilter || !playlistFilter.value) {
-            return false;
-        }
-
-        return isSongKnownToBeOtherArtist(song);
-    }
-
-    async function loadCurrentUserIdentity() {
-        try {
-            const response = await api.runtime.sendMessage({ action: 'get_current_user_identity' });
-            if (!response?.ok || !response.identity) {
-                console.debug('[loadCurrentUserIdentity] Failed to get identity:', response?.error);
-                return;
-            }
-
-            currentUserIdentity = {
-                id: typeof response.identity.id === 'string' ? response.identity.id.trim() : null,
-                ids: collectNormalizedIds(response.identity.ids || []),
-                handle: normalizeHandle(response.identity.handle),
-                displayName: pickFirstNonEmptyString([response.identity.displayName])
-            };
-
-            console.debug('[loadCurrentUserIdentity] User identity loaded:', {
-                id: currentUserIdentity.id,
-                ids: currentUserIdentity.ids,
-                handle: currentUserIdentity.handle,
-                displayName: currentUserIdentity.displayName
-            });
-
-            allSongs = allSongs.map(reconcileSongOwnership);
-            if (playlistSongs) {
-                console.debug('[loadCurrentUserIdentity] Reconciling', playlistSongs.length, 'playlist songs with new identity');
-                playlistSongs = playlistSongs.map(reconcileSongOwnership);
-            }
-
-            applyFilter({
-                preserveScroll: true,
-                minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
-            });
-        } catch (e) {
-            console.debug('[Downloader] Could not load current user identity:', e?.message || e);
-        }
+        if (!playlistFilter || !playlistFilter.value) return false;
+        return isSongFromOtherArtist(song);
     }
 
     function normalizeSongClip(rawClip) {
         const clip = rawClip?.clip || rawClip || {};
-        const ownership = extractOwnershipMetadata(rawClip);
         return {
             id: clip.id,
             title: clip.title || `Untitled_${clip.id || 'song'}`,
@@ -638,7 +250,8 @@
             is_liked: clip.is_liked || false,
             is_stem: isStemClip(clip),
             upvote_count: clip.upvote_count || 0,
-            ...ownership
+            owner_user_id: clip.user_id || clip.owner_user_id || clip.user?.id || clip.user?.user_id || null,
+            is_owned_by_current_user: clip.is_owned_by_current_user
         };
     }
 
@@ -1622,8 +1235,6 @@
         }
     }
 
-    void loadCurrentUserIdentity();
-
     // Load from storage on startup
     loadFromStorage();
 
@@ -1807,7 +1418,8 @@
             }
             
             if (savedSongs && savedSongs.length > 0) {
-                allSongs = savedSongs.map(reconcileSongOwnership);
+                allSongs = savedSongs;
+                initSunoUserId();
                 filteredSongs = [...allSongs];
                 const needsMetadataRefresh = libraryNeedsMetadataRefresh(savedSongs);
 
@@ -1921,26 +1533,14 @@
 
     function mergeSongs(newSongs) {
         const existingIds = new Set(allSongs.map(s => s.id));
-        const addedSongs = newSongs
-            .filter(s => !existingIds.has(s.id))
-            .map(reconcileSongOwnership);
+        const addedSongs = newSongs.filter(s => !existingIds.has(s.id));
 
-        // Refresh existing songs from fresh API data, including ownership metadata.
+        // Refresh upvote counts from fresh API data.
         if (newSongs.length > 0) {
             const newSongsById = new Map(newSongs.map(s => [s.id, s]));
             allSongs = allSongs.map(s => {
                 const fresh = newSongsById.get(s.id);
-                if (fresh) {
-                    return reconcileSongOwnership({
-                        ...s,
-                        upvote_count: fresh.upvote_count ?? s.upvote_count,
-                        owner_user_id: fresh.owner_user_id ?? s.owner_user_id,
-                        owner_handle: fresh.owner_handle ?? s.owner_handle,
-                        owner_display_name: fresh.owner_display_name ?? s.owner_display_name,
-                        is_owned_by_current_user: fresh.is_owned_by_current_user ?? s.is_owned_by_current_user
-                    });
-                }
-                return s;
+                return fresh ? { ...s, upvote_count: fresh.upvote_count ?? s.upvote_count } : s;
             });
         }
 
@@ -2217,7 +1817,7 @@
                     const data = response.data;
                     const clips = extractPlaylistClipItems(data);
                     for (const c of clips) {
-                        const song = reconcileSongOwnership(normalizeSongClip(c));
+                        const song = normalizeSongClip(c);
                         if (song.id) {
                             playlistClipMap.set(song.id, song);
                         }
@@ -2331,33 +1931,10 @@
         const folder = folderInput.value;
         const format = getSelectedFormat();
         const songsToDownload = activeSongs.filter(s => selectedIds.includes(s.id));
-        
-        console.debug('[Download Button] Current user identity:', {
-            id: currentUserIdentity?.id,
-            ids: currentUserIdentity?.ids,
-            handle: currentUserIdentity?.handle,
-            displayName: currentUserIdentity?.displayName,
-            canVerify: canVerifyCurrentUserIdentity()
-        });
-        console.debug('[Download Button] Songs to check:', songsToDownload.map(s => ({
-            id: s.id,
-            title: s.title,
-            owner_user_id: s.owner_user_id,
-            isOwned: isSongOwnedByCurrentUser(s),
-            isOtherArtist: isSongKnownToBeOtherArtist(s)
-        })));
-        
         const { downloadable, blocked } = splitSongsByDownloadEligibility(songsToDownload);
-
-        console.debug('[Download Button] Download eligibility split:', {
-            total: songsToDownload.length,
-            downloadable: downloadable.length,
-            blocked: blocked.length
-        });
 
         if (downloadable.length === 0) {
             statusDiv.innerText = "Only your own songs can be downloaded as files. Songs by other artists may only be saved to the local database.";
-            console.debug('[Download Button] No downloadable songs - blocked:', blocked.map(s => ({ id: s.id, title: s.title })));
             return;
         }
 
@@ -2379,11 +1956,8 @@
         if (downloadOptions.music) selectedTypes.push(format.toUpperCase());
         if (downloadOptions.lyrics) selectedTypes.push("lyrics");
         if (downloadOptions.image) selectedTypes.push("images");
-        const identityVerified = canVerifyCurrentUserIdentity();
         statusDiv.innerText = blocked.length > 0
             ? `Downloading ${downloadable.length} own song(s): ${selectedTypes.join(", ")}. Skipped ${blocked.length} song(s) by other artists.`
-            : !identityVerified
-                ? `Preparing ${downloadable.length} song(s): ${selectedTypes.join(", ")}. Ownership will be verified before file download starts.`
             : `Downloading ${downloadable.length} song(s): ${selectedTypes.join(", ")}...`;
     });
 
@@ -2444,7 +2018,8 @@
                 statusDiv.innerText = `Page ${message.pageNum}: ${message.totalSongs} new songs found...`;
             } else {
                 // Fresh fetch - replace all
-                allSongs = newSongs.map(reconcileSongOwnership);
+                allSongs = newSongs;
+                initSunoUserId();
                 filteredSongs = [...allSongs];
 
                 // Show song list immediately after first page
@@ -2499,7 +2074,8 @@
                 }
             } else {
                 // Fresh fetch complete
-                allSongs = newSongs.map(reconcileSongOwnership);
+                allSongs = newSongs;
+                initSunoUserId();
                 filteredSongs = [...allSongs];
 
                 // Only show song list if not already visible (page updates already showed it)
@@ -2938,6 +2514,19 @@
         const isPressed = allChecked && total > 0;
         selectAllButton.setAttribute('aria-pressed', String(isPressed));
         selectAllButton.textContent = isPressed ? 'Clear All' : 'Select All';
+
+        // Disable Download button if any selected song is from "Other artist"
+        const activeSongs = getActiveSongs();
+        const selectedSongs = activeSongs.filter(song => selectedSongIds.has(song.id));
+        const fromOtherArtist = selectedSongs.some(song => isSongFromOtherArtist(song));
+        if (downloadBtn) {
+            downloadBtn.disabled = fromOtherArtist;
+            if (fromOtherArtist) {
+                downloadBtn.title = "Cannot download as files - Songs of other artists can only be saved to local database";
+            } else {
+                downloadBtn.title = "";
+            }
+        }
     }
 
     function formatDate(dateStr) {
