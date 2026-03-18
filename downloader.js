@@ -229,13 +229,40 @@
         return song?.image_url || song?.thumbnail_url || song?.cover_image_url || song?.artwork_url || null;
     }
 
+    function areSongDetailsEqual(leftSong, rightSong) {
+        return (
+            (leftSong?.title || '') === (rightSong?.title || '') &&
+            (leftSong?.lyrics || '') === (rightSong?.lyrics || '') &&
+            (leftSong?.audio_url || '') === (rightSong?.audio_url || '') &&
+            (leftSong?.video_url || '') === (rightSong?.video_url || '') &&
+            (leftSong?.image_url || '') === (rightSong?.image_url || '') &&
+            (leftSong?.owner_user_id || '') === (rightSong?.owner_user_id || '') &&
+            (leftSong?.owner_handle || '') === (rightSong?.owner_handle || '') &&
+            (leftSong?.owner_display_name || '') === (rightSong?.owner_display_name || '') &&
+            leftSong?.is_public === rightSong?.is_public &&
+            leftSong?.is_liked === rightSong?.is_liked &&
+            leftSong?.is_stem === rightSong?.is_stem &&
+            (leftSong?.upvote_count ?? null) === (rightSong?.upvote_count ?? null) &&
+            (leftSong?.is_owned_by_current_user ?? null) === (rightSong?.is_owned_by_current_user ?? null)
+        );
+    }
+
     function mergeSongMetadata(existingSong, freshSong) {
         return {
             ...existingSong,
             title: freshSong.title || existingSong.title,
+            audio_url: freshSong.audio_url || existingSong.audio_url,
+            video_url: freshSong.video_url || existingSong.video_url,
+            image_url: freshSong.image_url || existingSong.image_url,
+            lyrics: freshSong.lyrics || existingSong.lyrics,
             is_public: freshSong.is_public !== false,
             is_liked: freshSong.is_liked || false,
-            upvote_count: freshSong.upvote_count ?? existingSong.upvote_count
+            is_stem: freshSong.is_stem ?? existingSong.is_stem,
+            upvote_count: freshSong.upvote_count ?? existingSong.upvote_count,
+            owner_user_id: freshSong.owner_user_id || existingSong.owner_user_id,
+            owner_handle: freshSong.owner_handle || existingSong.owner_handle,
+            owner_display_name: freshSong.owner_display_name || existingSong.owner_display_name,
+            is_owned_by_current_user: freshSong.is_owned_by_current_user ?? existingSong.is_owned_by_current_user
         };
     }
 
@@ -878,7 +905,7 @@
         }
         if (syncNewBtn) {
             syncNewBtn.disabled = active;
-            syncNewBtn.textContent = active && currentFetchMode === 'metadata-refresh' ? 'Refreshing...' : 'Refresh';
+            syncNewBtn.textContent = active && currentFetchMode === 'incremental' ? 'Refreshing...' : 'Refresh';
         }
     }
 
@@ -1071,62 +1098,31 @@
             return;
         }
 
-        currentFetchMode = 'metadata-refresh';
+        currentFetchMode = 'incremental';
         setFetchUiState(true);
         void saveSyncMeta({
             syncStatus: 'running',
-            lastSyncMode: 'metadata-refresh',
+            lastSyncMode: 'incremental',
             lastError: null
         });
 
-        statusDiv.innerText = "Refreshing songs and metadata...";
+        statusDiv.innerText = automatic ? "Checking for new songs..." : "Refreshing songs and metadata...";
 
         try {
             api.runtime.sendMessage({
-                action: "fetch_songs_by_ids",
-                songIds: allSongs.map(song => song.id)
+                action: "fetch_songs",
+                isPublicOnly: false,
+                maxPages: 0,
+                checkNewOnly: true,
+                knownIds: allSongs.map(song => song.id)
             }, (response) => {
-                currentFetchMode = 'idle';
-                setFetchUiState(false);
-                
                 if (chrome.runtime.lastError) {
-                    console.debug('[Downloader] Refresh error:', chrome.runtime.lastError);
-                    statusDiv.innerText = "Refresh failed: " + chrome.runtime.lastError.message;
-                    void saveSyncMeta({
-                        syncStatus: 'error',
-                        lastError: chrome.runtime.lastError.message
-                    });
-                    return;
+                    console.debug('[Downloader] Incremental refresh error:', chrome.runtime.lastError);
+                } else if (response && response.error) {
+                    console.log('[Downloader] Incremental refresh error:', response.error);
+                } else {
+                    console.log('[Downloader] Incremental refresh request sent');
                 }
-                
-                if (!response || !response.ok) {
-                    const errorMsg = response?.error || 'Unknown error';
-                    console.log('[Downloader] Refresh error:', errorMsg);
-                    statusDiv.innerText = "Refresh failed: " + errorMsg;
-                    void saveSyncMeta({
-                        syncStatus: 'error',
-                        lastError: errorMsg
-                    });
-                    return;
-                }
-                
-                // Process the fresh song data
-                const freshSongs = (response.data?.clips || []).map(normalizeSongClip);
-                const updatedCount = mergeSongs(freshSongs);
-                
-                const completedAt = Date.now();
-                void saveSyncMeta({
-                    lastSyncAt: completedAt,
-                    lastIncrementalSyncAt: completedAt,
-                    lastSyncMode: 'metadata-refresh',
-                    lastAddedCount: 0, // Metadata refresh doesn't add new songs
-                    totalSongsAtLastSync: allSongs.length,
-                    lastError: null,
-                    syncStatus: 'complete'
-                });
-                
-                statusDiv.innerText = `Metadata refreshed for ${allSongs.length} songs.`;
-                console.log('[Downloader] Metadata refresh complete, updated', updatedCount, 'songs');
             });
         } catch (e) {
             console.debug('[Downloader] Could not refresh:', e.message);
@@ -1298,22 +1294,57 @@
     function mergeSongs(newSongs) {
         const existingIds = new Set(allSongs.map(s => s.id));
         const addedSongs = newSongs.filter(s => !existingIds.has(s.id));
+        const staleImageSongIds = [];
+        let metadataUpdateCount = 0;
 
-        // Refresh mutable fields from fresh API data: title, is_public, is_liked, upvote_count, etc.
+        // Refresh mutable fields from fresh API data: title, lyrics, cover, liked/public state, counts, etc.
         if (newSongs.length > 0) {
             const newSongsById = new Map(newSongs.map(s => [s.id, s]));
             allSongs = allSongs.map(s => {
                 const fresh = newSongsById.get(s.id);
-                return fresh ? mergeSongMetadata(s, fresh) : s;
+                if (!fresh) {
+                    return s;
+                }
+
+                const mergedSong = mergeSongMetadata(s, fresh);
+
+                if (!areSongDetailsEqual(s, mergedSong)) {
+                    metadataUpdateCount += 1;
+                    songItemCache.delete(s.id);
+
+                    if (getSongThumbnailUrl(s) !== getSongThumbnailUrl(mergedSong)) {
+                        mergedSong.image_cache_bust = Date.now();
+                        staleImageSongIds.push(s.id);
+                    }
+
+                    if (currentPlayingSongId === s.id) {
+                        updatePlayerTabUi(mergedSong);
+                        if (playerTitle) {
+                            playerTitle.textContent = mergedSong.title || 'Untitled';
+                        }
+                    }
+                }
+
+                return mergedSong;
             });
         }
 
         if (addedSongs.length > 0) {
             // Add new songs at the beginning
             allSongs = [...addedSongs, ...allSongs];
+        }
+
+        if (metadataUpdateCount > 0 || addedSongs.length > 0) {
             filteredSongs = [...allSongs];
-            applyFilter();
-            saveToStorage();
+            applyFilter({
+                preserveScroll: true,
+                minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
+            });
+            void saveToStorage();
+        }
+
+        if (staleImageSongIds.length > 0) {
+            void Promise.all(staleImageSongIds.map(songId => deleteImageBlobFromIDB(songId)));
         }
 
         return addedSongs.length;
@@ -1376,6 +1407,7 @@
                         if (imgResponse.ok) {
                             const imgBlob = await imgResponse.blob();
                             await saveImageBlobToIDB(song.id, imgBlob);
+                            delete song.image_cache_bust;
                         }
                     } catch (imgErr) {
                         // thumbnail failure is non-fatal
@@ -1764,7 +1796,7 @@
         if (message.action === "fetch_started") {
             // background informs us fetching has started (manual or auto)
             setFetchUiState(true);
-            statusDiv.innerText = currentFetchMode === 'incremental' ? "Syncing new songs..." : "Fetching songs...";
+            statusDiv.innerText = currentFetchMode === 'incremental' ? "Refreshing songs and metadata..." : "Fetching songs...";
         }
         if (message.action === "songs_page_update") {
             // start or continue fetching, ensure UI shows stop button
@@ -1996,7 +2028,7 @@
             thumbnail.appendChild(thumbnailImage);
         }
 
-        if (cachedSongIds.has(song.id)) {
+        if (cachedSongIds.has(song.id) && !song.image_cache_bust) {
             // Try to load from the local imageCache first; fall back to CDN URL
             getImageBlobFromIDB(song.id).then(imgBlob => {
                 if (imgBlob) {

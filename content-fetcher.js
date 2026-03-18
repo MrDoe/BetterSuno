@@ -15,7 +15,6 @@
     const maxPages = window.sunoMaxPages || 0; // 0 = unlimited
     const checkNewOnly = window.sunoCheckNewOnly || false;
     const knownIds = new Set(window.sunoKnownIds || []);
-    const metadataRefreshIds = new Set(window.sunoMetadataRefreshIds || []);
     const userId = window.sunoUserId || null;
     const userIds = new Set((Array.isArray(window.sunoUserIds) ? window.sunoUserIds : []).filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()));
     if (userId && !userIds.has(userId)) userIds.add(userId);
@@ -451,29 +450,14 @@
             }
             
             let foundKnownSong = false;
-            let remainingMetadataRefresh = new Set(metadataRefreshIds);
 
             for (const clip of clips) {
                 if (isPublicOnly && !clip.is_public) {
                     continue;
                 }
 
-                const isNewSong = !knownIds.has(clip.id);
-                const needsMetadataRefresh = remainingMetadataRefresh.has(clip.id);
-
-                // Mark as processed if it needs metadata refresh
-                if (needsMetadataRefresh) {
-                    remainingMetadataRefresh.delete(clip.id);
-                }
-
-                // Stop pagination only if we found a known song AND no more metadata needs refreshing
-                if (checkNewOnly && isNewSong === false && needsMetadataRefresh === false && remainingMetadataRefresh.size === 0) {
-                    log(`✅ Found known song with all metadata updated. ${allSongs.length} new song(s) found.`);
-                    foundKnownSong = true;
-                    break;
-                }
-
                 const ownership = extractOwnershipMetadataFromClip(clip, userId, userIds);
+                const isExistingSong = knownIds.has(clip.id);
 
                 allSongs.push({
                     id: clip.id,
@@ -489,6 +473,12 @@
                     upvote_count: clip.upvote_count || 0,
                     ...ownership
                 });
+
+                if (checkNewOnly && isExistingSong) {
+                    log(`✅ Found first existing song. ${Math.max(allSongs.length - 1, 0)} new song(s) found.`);
+                    foundKnownSong = true;
+                    break;
+                }
             }
 
             // Send incremental update after each page
@@ -500,7 +490,7 @@
                 checkNewOnly: checkNewOnly
             });
 
-            if (foundKnownSong || remainingMetadataRefresh.size === 0) {
+            if (foundKnownSong) {
                 keepGoing = false;
                 break;
             }
