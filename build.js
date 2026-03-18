@@ -10,9 +10,11 @@ const DIST = path.join(SRC, 'dist');
 const SHARED_FILES = [
   'background.js',
   'content.js',
+  'content-idb.js',
   'content.css',
   'content-fetcher.js',
   'downloader.js',
+  'idb-helpers.js',
   'idb-store.js',
   'LICENSE',
   'README.md',

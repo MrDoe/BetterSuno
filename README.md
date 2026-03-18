@@ -37,7 +37,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 ### ⚙️ Settings
 - **Customizable polling** - Choose how often to check for new notifications
 - **Desktop notifications toggle** - Enable/disable desktop alerts
-- **Library actions** - Refresh library, stop fetch, or delete local library
+- **Library actions** - Refetch library, stop fetch, or delete local library
 
 ## Installation
 

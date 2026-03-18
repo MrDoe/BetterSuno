@@ -12,11 +12,8 @@
   let notificationsSentinel = null;
   let notificationsObserver = null;
 
-  // ---- Build DOM ----
-  const root = document.createElement('div');
-  root.id = 'bettersuno-root';
-
-  root.innerHTML = `
+  function getPanelMarkup() {
+    return `
     <div id="bettersuno-panel">
       <div id="bettersuno-header">
         <h3 id="bettersuno-title">BetterSuno</h3>
@@ -70,7 +67,7 @@
               <button id="cacheAllBtn" class="btn-secondary" title="Download selected songs as MP3 into the browser database for offline playback">Download to DB</button>
               <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
               <button id="deleteCachedBtn" class="btn-danger" title="Delete the selected songs from the browser database">Delete from DB</button>
-              <button id="syncNewBtn" class="btn-secondary" title="Fetch only songs that are newer than your current local library">Sync New</button>
+              <button id="syncNewBtn" class="btn-secondary" title="Refresh metadata for all songs (likes, privacy status, etc.)">Refresh</button>
               <span id="songCount">0 songs</span>
             </span>
 
@@ -150,7 +147,7 @@
             <div id="bettersuno-db-usage" class="bettersuno-setting-value">Calculating...</div>
           </div>
           <div class="bettersuno-setting-row" style="display: inline-flex; gap: 5px; align-items: flex-start;">
-            <button id="bettersuno-fetch-songs-btn" class="btn-primary" style="padding: 8px 16px; cursor: pointer;">Refresh Library</button>
+            <button id="bettersuno-fetch-songs-btn" class="btn-primary" style="padding: 8px 16px; cursor: pointer;">Refetch Library</button>
             <button id="bettersuno-stop-fetch-btn" class="btn-stop" style="padding: 8px 16px; cursor: pointer; display: none;">Stop Fetch</button>
             <button id="bettersuno-delete-library-btn" class="btn-danger" style="padding: 8px 16px; cursor: pointer;">Delete Library</button>
           </div>
@@ -201,6 +198,13 @@
       <span id="bettersuno-badge">0</span>
     </button>
   `;
+  }
+
+  // ---- Build DOM ----
+  const root = document.createElement('div');
+  root.id = 'bettersuno-root';
+
+  root.innerHTML = getPanelMarkup();
 
   document.body.appendChild(root);
 
@@ -214,6 +218,34 @@
   const settingsContent = root.querySelector('#bettersuno-settings-content');
   const libraryContent = root.querySelector('#bettersuno-download-content');
   const playerContent = root.querySelector('#bettersuno-player-content');
+
+  function setActiveTab(tabName, activeButton = null) {
+    currentTab = tabName;
+    title.textContent = 'BetterSuno';
+
+    tabButtons.forEach(button => {
+      button.classList.toggle('active', button === activeButton);
+    });
+
+    const sections = {
+      notifications: list,
+      library: libraryContent,
+      player: playerContent,
+      settings: settingsContent
+    };
+
+    Object.entries(sections).forEach(([name, element]) => {
+      if (!element) return;
+      element.style.display = name === tabName
+        ? (name === 'library' || name === 'player' ? 'flex' : 'block')
+        : 'none';
+    });
+
+    if (tabName === 'settings') {
+      loadSettings();
+      document.dispatchEvent(new CustomEvent('bettersuno:settings-opened'));
+    }
+  }
   
   // ---- Toggle panel ----
   bell.addEventListener('click', () => {
@@ -252,39 +284,8 @@
   // ---- Tab switching ----
   tabButtons.forEach(btn => {
     btn.addEventListener('click', (e) => {
-      const tab = e.target.dataset.tab;
-      currentTab = tab;
-      
-      // Update active tab button
-      tabButtons.forEach(b => b.classList.remove('active'));
-      e.target.classList.add('active');
-      
-      // Switch content visibility
-      title.textContent = 'BetterSuno';
-      
-      if (tab === 'notifications') {
-        list.style.display = 'block';
-        settingsContent.style.display = 'none';
-        libraryContent.style.display = 'none';
-        playerContent.style.display = 'none';
-      } else if (tab === 'library') {
-        list.style.display = 'none';
-        settingsContent.style.display = 'none';
-        libraryContent.style.display = 'flex';
-        playerContent.style.display = 'none';
-      } else if (tab === 'player') {
-        list.style.display = 'none';
-        settingsContent.style.display = 'none';
-        libraryContent.style.display = 'none';
-        playerContent.style.display = 'flex';
-      } else {
-        list.style.display = 'none';
-        settingsContent.style.display = 'block';
-        libraryContent.style.display = 'none';
-        playerContent.style.display = 'none';
-        loadSettings();
-        document.dispatchEvent(new CustomEvent('bettersuno:settings-opened'));
-      }
+      const tab = e.currentTarget.dataset.tab;
+      setActiveTab(tab, e.currentTarget);
     });
   });
 

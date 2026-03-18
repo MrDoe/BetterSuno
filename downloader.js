@@ -21,6 +21,15 @@
     const SYNC_META_KEY = 'sunoSyncMeta';
     const PLAYLISTS_KEY = 'sunoPlaylists';
     const SELECTED_PLAYLIST_KEY = 'sunoSelectedPlaylist';
+    const TEXT_CANDIDATE_KEYS = ['lyrics', 'display_lyrics', 'full_lyrics', 'raw_lyrics', 'prompt', 'text', 'content', 'value'];
+    const URL_CANDIDATE_KEYS = ['url', 'src', 'image_url', 'image', 'cover_url', 'cover_image_url', 'thumbnail_url', 'artwork_url'];
+    const SONG_CLIP_FIELD_PATHS = {
+        audio: ['audio_url', 'stream_audio_url', 'song_path'],
+        video: ['video_url', 'video_cdn_url', 'mp4_url', 'metadata.video_url'],
+        image: ['image_url', 'image', 'image_large_url', 'cover_url', 'cover_image_url', 'thumbnail_url', 'artwork_url', 'metadata.image_url', 'metadata.cover_image_url', 'meta.image_url'],
+        lyrics: ['lyrics', 'display_lyrics', 'full_lyrics', 'raw_lyrics', 'prompt', 'metadata.lyrics', 'metadata.prompt', 'meta.lyrics'],
+        ownerUserId: ['user_id', 'owner_user_id', 'user.id', 'user.user_id']
+    };
     let currentFetchMode = 'idle';
     let syncMeta = createDefaultSyncMeta();
     let playlistSongs = null; // Active playlist songs when a playlist is selected, else null
@@ -106,16 +115,7 @@
         }
 
         if (value && typeof value === 'object') {
-            const nestedCandidates = [
-                value.lyrics,
-                value.display_lyrics,
-                value.full_lyrics,
-                value.raw_lyrics,
-                value.prompt,
-                value.text,
-                value.content,
-                value.value
-            ];
+            const nestedCandidates = TEXT_CANDIDATE_KEYS.map(key => value[key]);
             for (const candidate of nestedCandidates) {
                 const text = extractText(candidate);
                 if (text) return text;
@@ -139,16 +139,7 @@
         }
 
         if (value && typeof value === 'object') {
-            const nestedCandidates = [
-                value.url,
-                value.src,
-                value.image_url,
-                value.image,
-                value.cover_url,
-                value.cover_image_url,
-                value.thumbnail_url,
-                value.artwork_url
-            ];
+            const nestedCandidates = URL_CANDIDATE_KEYS.map(key => value[key]);
             for (const candidate of nestedCandidates) {
                 const url = extractUrl(candidate);
                 if (url) return url;
@@ -210,46 +201,59 @@
         return isSongFromOtherArtist(song);
     }
 
+    function getNestedValue(source, path) {
+        return path.split('.').reduce((current, key) => current?.[key], source);
+    }
+
+    function extractFirstMatchingValue(source, paths, extractor) {
+        for (const path of paths) {
+            const value = getNestedValue(source, path);
+            const extracted = extractor(value);
+            if (extracted !== null && extracted !== undefined) {
+                return extracted;
+            }
+        }
+
+        return null;
+    }
+
+    function extractTextFromPaths(source, paths) {
+        return extractFirstMatchingValue(source, paths, extractText);
+    }
+
+    function extractUrlFromPaths(source, paths) {
+        return extractFirstMatchingValue(source, paths, extractUrl);
+    }
+
+    function getSongThumbnailUrl(song) {
+        return song?.image_url || song?.thumbnail_url || song?.cover_image_url || song?.artwork_url || null;
+    }
+
+    function mergeSongMetadata(existingSong, freshSong) {
+        return {
+            ...existingSong,
+            title: freshSong.title || existingSong.title,
+            is_public: freshSong.is_public !== false,
+            is_liked: freshSong.is_liked || false,
+            upvote_count: freshSong.upvote_count ?? existingSong.upvote_count
+        };
+    }
+
     function normalizeSongClip(rawClip) {
         const clip = rawClip?.clip || rawClip || {};
         return {
             id: clip.id,
             title: clip.title || `Untitled_${clip.id || 'song'}`,
-            audio_url: clip.audio_url || clip.stream_audio_url || clip.song_path || null,
-            video_url: extractUrl(
-                clip.video_url ||
-                clip.video_cdn_url ||
-                clip.mp4_url ||
-                clip.metadata?.video_url
-            ),
-            image_url: extractUrl(
-                clip.image_url ||
-                clip.image ||
-                clip.image_large_url ||
-                clip.cover_url ||
-                clip.cover_image_url ||
-                clip.thumbnail_url ||
-                clip.artwork_url ||
-                clip.metadata?.image_url ||
-                clip.metadata?.cover_image_url ||
-                clip.meta?.image_url
-            ),
-            lyrics: extractText(
-                clip.lyrics ||
-                clip.display_lyrics ||
-                clip.full_lyrics ||
-                clip.raw_lyrics ||
-                clip.prompt ||
-                clip.metadata?.lyrics ||
-                clip.metadata?.prompt ||
-                clip.meta?.lyrics
-            ),
+            audio_url: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.audio, value => value || null),
+            video_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.video),
+            image_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.image),
+            lyrics: extractTextFromPaths(clip, SONG_CLIP_FIELD_PATHS.lyrics),
             is_public: clip.is_public !== false,
             created_at: clip.created_at || clip.createdAt || rawClip?.created_at || null,
             is_liked: clip.is_liked || false,
             is_stem: isStemClip(clip),
             upvote_count: clip.upvote_count || 0,
-            owner_user_id: clip.user_id || clip.owner_user_id || clip.user?.id || clip.user?.user_id || null,
+            owner_user_id: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null),
             is_owned_by_current_user: clip.is_owned_by_current_user
         };
     }
@@ -779,316 +783,32 @@
     }
 
     // ========================================================================
-    // IndexedDB Helper Functions
+    // IndexedDB Helpers
     // ========================================================================
-    
-    const IDB_NAME = 'BetterSunoicationsDB';
-    const IDB_VERSION = 3;
-    let dbInstance = null;
-    const textEncoder = new TextEncoder();
 
-    async function getDB() {
-        if (dbInstance) return dbInstance;
-        
-        return new Promise((resolve, reject) => {
-            const request = indexedDB.open(IDB_NAME, IDB_VERSION);
-            
-            request.onerror = () => reject(request.error);
-            request.onsuccess = () => {
-                dbInstance = request.result;
-                resolve(dbInstance);
-            };
-            
-            request.onupgradeneeded = (event) => {
-                const db = event.target.result;
-                if (!db.objectStoreNames.contains('songsList')) {
-                    db.createObjectStore('songsList', { keyPath: 'id' });
-                }
-                if (!db.objectStoreNames.contains('userPreferences')) {
-                    db.createObjectStore('userPreferences', { keyPath: 'key' });
-                }
-                if (!db.objectStoreNames.contains('audioCache')) {
-                    db.createObjectStore('audioCache', { keyPath: 'songId' });
-                }
-                if (!db.objectStoreNames.contains('imageCache')) {
-                    db.createObjectStore('imageCache', { keyPath: 'songId' });
-                }
-            };
-        });
+    const idbApi = window.BetterSunoIDB;
+
+    if (!idbApi) {
+        console.error('[Downloader] BetterSunoIDB is unavailable');
+        return;
     }
 
-    async function saveSongsToIDB(songs) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('songsList', 'readwrite');
-            const store = tx.objectStore('songsList');
-            store.clear();
-            
-            songs.forEach(song => {
-                store.add({ ...song, timestamp: Date.now() });
-            });
-            
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to save songs:', e);
-        }
-    }
-
-    async function loadSongsFromIDB() {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('songsList', 'readonly');
-            const store = tx.objectStore('songsList');
-            const request = store.getAll();
-            
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result || []);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to load songs:', e);
-            return [];
-        }
-    }
-
-    async function savePreferenceToIDB(key, value) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('userPreferences', 'readwrite');
-            const store = tx.objectStore('userPreferences');
-            store.put({
-                key,
-                value,
-                timestamp: Date.now()
-            });
-            
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to save preference:', e);
-        }
-    }
-
-    async function loadPreferenceFromIDB(key) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('userPreferences', 'readonly');
-            const store = tx.objectStore('userPreferences');
-            const request = store.get(key);
-            
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result?.value || null);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to load preference:', e);
-            return null;
-        }
-    }
-
-    async function deletePreferenceFromIDB(key) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('userPreferences', 'readwrite');
-            const store = tx.objectStore('userPreferences');
-            store.delete(key);
-            
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to delete preference:', e);
-        }
-    }
-
-    async function saveAudioBlobToIDB(songId, blob) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('audioCache', 'readwrite');
-            const store = tx.objectStore('audioCache');
-            store.put({ songId, blob, timestamp: Date.now() });
-            
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to save audio blob:', e);
-        }
-    }
-
-    async function getAudioBlobFromIDB(songId) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('audioCache', 'readonly');
-            const store = tx.objectStore('audioCache');
-            const request = store.get(songId);
-            
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result?.blob || null);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to get audio blob:', e);
-            return null;
-        }
-    }
-
-    async function getAllCachedSongIdsFromIDB() {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('audioCache', 'readonly');
-            const store = tx.objectStore('audioCache');
-            const request = store.getAllKeys();
-            
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result || []);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to get cached song IDs:', e);
-            return [];
-        }
-    }
-
-    async function deleteAudioBlobFromIDB(songId) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('audioCache', 'readwrite');
-            const store = tx.objectStore('audioCache');
-            store.delete(songId);
-
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to delete audio blob:', e);
-            throw e;
-        }
-    }
-
-    async function saveImageBlobToIDB(songId, blob) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('imageCache', 'readwrite');
-            const store = tx.objectStore('imageCache');
-            store.put({ songId, blob, timestamp: Date.now() });
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to save image blob:', e);
-        }
-    }
-
-    async function getImageBlobFromIDB(songId) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('imageCache', 'readonly');
-            const store = tx.objectStore('imageCache');
-            const request = store.get(songId);
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result?.blob || null);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            return null;
-        }
-    }
-
-    async function deleteImageBlobFromIDB(songId) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('imageCache', 'readwrite');
-            const store = tx.objectStore('imageCache');
-            store.delete(songId);
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            // ignore
-        }
-    }
-
-    async function getAllRecordsFromStore(storeName) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction(storeName, 'readonly');
-            const store = tx.objectStore(storeName);
-            const request = store.getAll();
-
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result || []);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error(`[IDB] Failed to read store ${storeName}:`, e);
-            return [];
-        }
-    }
-
-    function estimateValueSize(value, visited = new WeakSet()) {
-        if (value == null) {
-            return 0;
-        }
-
-        if (typeof Blob !== 'undefined' && value instanceof Blob) {
-            return value.size;
-        }
-
-        if (typeof value === 'string') {
-            return textEncoder.encode(value).length;
-        }
-
-        if (typeof value === 'number') {
-            return 8;
-        }
-
-        if (typeof value === 'boolean') {
-            return 4;
-        }
-
-        if (value instanceof Date) {
-            return 8;
-        }
-
-        if (value instanceof ArrayBuffer) {
-            return value.byteLength;
-        }
-
-        if (ArrayBuffer.isView(value)) {
-            return value.byteLength;
-        }
-
-        if (Array.isArray(value)) {
-            return value.reduce((total, item) => total + estimateValueSize(item, visited), 0);
-        }
-
-        if (typeof value === 'object') {
-            if (visited.has(value)) {
-                return 0;
-            }
-            visited.add(value);
-
-            let total = 0;
-            for (const [key, nestedValue] of Object.entries(value)) {
-                total += textEncoder.encode(key).length;
-                total += estimateValueSize(nestedValue, visited);
-            }
-            return total;
-        }
-
-        return 0;
-    }
+    const {
+        deleteAudioBlobFromIDB,
+        deleteImageBlobFromIDB,
+        deletePreferenceFromIDB,
+        estimateDbUsageBytes,
+        getAllCachedSongIdsFromIDB,
+        getAllRecordsFromStore,
+        getAudioBlobFromIDB,
+        getImageBlobFromIDB,
+        loadPreferenceFromIDB,
+        loadSongsFromIDB,
+        saveAudioBlobToIDB,
+        saveImageBlobToIDB,
+        savePreferenceToIDB,
+        saveSongsToIDB
+    } = idbApi;
 
     function formatBytes(bytes) {
         if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -1106,17 +826,6 @@
 
         const rounded = value >= 100 || unitIndex === 0 ? Math.round(value) : value.toFixed(1);
         return `${rounded} ${units[unitIndex]}`;
-    }
-
-    async function estimateDbUsageBytes() {
-        const [songs, preferences, audioCache, imageCache] = await Promise.all([
-            getAllRecordsFromStore('songsList'),
-            getAllRecordsFromStore('userPreferences'),
-            getAllRecordsFromStore('audioCache'),
-            getAllRecordsFromStore('imageCache')
-        ]);
-
-        return estimateValueSize(songs) + estimateValueSize(preferences) + estimateValueSize(audioCache) + estimateValueSize(imageCache);
     }
 
     // ========================================================================
@@ -1169,7 +878,7 @@
         }
         if (syncNewBtn) {
             syncNewBtn.disabled = active;
-            syncNewBtn.textContent = active && currentFetchMode === 'incremental' ? 'Syncing...' : 'Sync New';
+            syncNewBtn.textContent = active && currentFetchMode === 'metadata-refresh' ? 'Refreshing...' : 'Refresh';
         }
     }
 
@@ -1362,36 +1071,72 @@
             return;
         }
 
-        currentFetchMode = 'incremental';
+        currentFetchMode = 'metadata-refresh';
         setFetchUiState(true);
         void saveSyncMeta({
             syncStatus: 'running',
-            lastSyncMode: 'incremental',
+            lastSyncMode: 'metadata-refresh',
             lastError: null
         });
 
-        statusDiv.innerText = automatic ? "Checking for new songs..." : "Syncing new songs...";
+        statusDiv.innerText = "Refreshing songs and metadata...";
 
         try {
             api.runtime.sendMessage({
-                action: "fetch_songs",
-                isPublicOnly: false,
-                maxPages: 0,
-                checkNewOnly: true,
-                knownIds: allSongs.map(song => song.id)
+                action: "fetch_songs_by_ids",
+                songIds: allSongs.map(song => song.id)
             }, (response) => {
+                currentFetchMode = 'idle';
+                setFetchUiState(false);
+                
                 if (chrome.runtime.lastError) {
-                    console.debug('[Downloader] Check for new songs error:', chrome.runtime.lastError);
-                } else if (response && response.error) {
-                    console.log('[Downloader] Check for new songs error:', response.error);
-                } else {
-                    console.log('[Downloader] Check for new songs request sent');
+                    console.debug('[Downloader] Refresh error:', chrome.runtime.lastError);
+                    statusDiv.innerText = "Refresh failed: " + chrome.runtime.lastError.message;
+                    void saveSyncMeta({
+                        syncStatus: 'error',
+                        lastError: chrome.runtime.lastError.message
+                    });
+                    return;
                 }
+                
+                if (!response || !response.ok) {
+                    const errorMsg = response?.error || 'Unknown error';
+                    console.log('[Downloader] Refresh error:', errorMsg);
+                    statusDiv.innerText = "Refresh failed: " + errorMsg;
+                    void saveSyncMeta({
+                        syncStatus: 'error',
+                        lastError: errorMsg
+                    });
+                    return;
+                }
+                
+                // Process the fresh song data
+                const freshSongs = (response.data?.clips || []).map(normalizeSongClip);
+                const updatedCount = mergeSongs(freshSongs);
+                
+                const completedAt = Date.now();
+                void saveSyncMeta({
+                    lastSyncAt: completedAt,
+                    lastIncrementalSyncAt: completedAt,
+                    lastSyncMode: 'metadata-refresh',
+                    lastAddedCount: 0, // Metadata refresh doesn't add new songs
+                    totalSongsAtLastSync: allSongs.length,
+                    lastError: null,
+                    syncStatus: 'complete'
+                });
+                
+                statusDiv.innerText = `Metadata refreshed for ${allSongs.length} songs.`;
+                console.log('[Downloader] Metadata refresh complete, updated', updatedCount, 'songs');
             });
         } catch (e) {
-            console.debug('[Downloader] Could not check for new songs:', e.message);
+            console.debug('[Downloader] Could not refresh:', e.message);
             currentFetchMode = 'idle';
             setFetchUiState(false);
+            statusDiv.innerText = "Refresh failed: " + e.message;
+            void saveSyncMeta({
+                syncStatus: 'error',
+                lastError: e.message
+            });
         }
     }
 
@@ -1554,12 +1299,12 @@
         const existingIds = new Set(allSongs.map(s => s.id));
         const addedSongs = newSongs.filter(s => !existingIds.has(s.id));
 
-        // Refresh upvote counts from fresh API data.
+        // Refresh mutable fields from fresh API data: title, is_public, is_liked, upvote_count, etc.
         if (newSongs.length > 0) {
             const newSongsById = new Map(newSongs.map(s => [s.id, s]));
             allSongs = allSongs.map(s => {
                 const fresh = newSongsById.get(s.id);
-                return fresh ? { ...s, upvote_count: fresh.upvote_count ?? s.upvote_count } : s;
+                return fresh ? mergeSongMetadata(s, fresh) : s;
             });
         }
 
@@ -2212,7 +1957,7 @@
             item.classList.add('playing');
         }
 
-        const thumbnailUrl = song?.image_url || song?.thumbnail_url || song?.cover_image_url || song?.artwork_url || null;
+        const thumbnailUrl = getSongThumbnailUrl(song);
 
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
@@ -2429,49 +2174,57 @@
 
     function applyFilter(options = {}) {
         const { preserveScroll = false, minimumRenderCount = SONG_RENDER_BATCH_SIZE } = options;
-        const activeSongs = getActiveSongs();
-        const filter = filterInput.value.toLowerCase();
-        const showLikedOnly = filterLiked.checked;
-        const showStemsOnly = filterStems.checked;
-        const showPublicOnly = filterPublic.checked;
-        const showOfflineOnly = !!filterOffline?.checked;
+        filteredSongs = filterSongs(getActiveSongs(), getSongFilterState());
+        sortedFilteredSongs = sortSongsForDisplay(filteredSongs);
 
-        filteredSongs = activeSongs.filter(song => {
-            // Text filter
-            if (filter && !song.title.toLowerCase().includes(filter)) {
-                return false;
-            }
+        renderSongList({ preserveScroll, minimumRenderCount });
+    }
 
-            // Liked filter
-            if (showLikedOnly && !song.is_liked) {
-                return false;
-            }
+    function getSongFilterState() {
+        return {
+            searchText: filterInput.value.toLowerCase(),
+            showLikedOnly: filterLiked.checked,
+            showStemsOnly: filterStems.checked,
+            showPublicOnly: filterPublic.checked,
+            showOfflineOnly: !!filterOffline?.checked
+        };
+    }
 
-            // Stems filter
-            if (showStemsOnly && !song.is_stem) {
-                return false;
-            }
+    function matchesSongFilters(song, filterState) {
+        if (filterState.searchText && !song.title.toLowerCase().includes(filterState.searchText)) {
+            return false;
+        }
 
-            // Public filter
-            if (showPublicOnly && !song.is_public) {
-                return false;
-            }
+        if (filterState.showLikedOnly && !song.is_liked) {
+            return false;
+        }
 
-            if (showOfflineOnly && !cachedSongIds.has(song.id)) {
-                return false;
-            }
+        if (filterState.showStemsOnly && !song.is_stem) {
+            return false;
+        }
 
-            return true;
-        });
+        if (filterState.showPublicOnly && !song.is_public) {
+            return false;
+        }
 
-        sortedFilteredSongs = [...filteredSongs].sort((a, b) => {
+        if (filterState.showOfflineOnly && !cachedSongIds.has(song.id)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function filterSongs(songs, filterState) {
+        return songs.filter(song => matchesSongFilters(song, filterState));
+    }
+
+    function sortSongsForDisplay(songs) {
+        return [...songs].sort((a, b) => {
             const aTs = getSongTimestamp(a);
             const bTs = getSongTimestamp(b);
             if (bTs !== aTs) return bTs - aTs;
             return (a.title || '').localeCompare(b.title || '');
         });
-
-        renderSongList({ preserveScroll, minimumRenderCount });
     }
 
     function renderSongList(options = {}) {

@@ -1158,6 +1158,84 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Download-related message handlers
   // ============================================================================
 
+  if (msg.action === "fetch_songs_by_ids") {
+    (async () => {
+      try {
+        let token = msg.token;
+        const songIds = msg.songIds || [];
+
+        if (!token) {
+          token = await getApiTokenWithFallback('fetch_songs_by_ids');
+        }
+
+        if (!token || !Array.isArray(songIds) || songIds.length === 0) {
+          sendResponse({ ok: false, status: 0, error: "Missing token or song IDs" });
+          return;
+        }
+
+        // Fetch library pages until we collect all the requested song IDs
+        const songsByIdMap = new Map();
+        let page = 1;
+        let foundAll = false;
+        const maxPages = 100;
+
+        while (!foundAll && page <= maxPages) {
+          const controller = new AbortController();
+          const timeoutMs = 20000;
+          const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+          const response = await fetch(`https://studio-api.prod.suno.com/api/library?page=${page}&page_size=50`, {
+            method: 'GET',
+            headers: {
+              'Authorization': `Bearer ${token}`
+            },
+            signal: controller.signal
+          });
+
+          clearTimeout(timeout);
+
+          if (!response.ok) {
+            break;
+          }
+
+          const data = await response.json();
+          const clips = data?.clips || data?.results || [];
+
+          for (const clip of clips) {
+            if (songIds.includes(clip.id)) {
+              songsByIdMap.set(clip.id, clip);
+            }
+          }
+
+          // Stop if we've found all songs or if there are no more pages
+          if (songsByIdMap.size === songIds.length || clips.length === 0) {
+            foundAll = true;
+            break;
+          }
+
+          page++;
+        }
+
+        const resultSongs = songIds
+          .map(id => songsByIdMap.get(id))
+          .filter(Boolean);
+
+        sendResponse({
+          ok: true,
+          status: 200,
+          data: {
+            clips: resultSongs,
+            count: resultSongs.length,
+            pagesChecked: page - 1
+          }
+        });
+      } catch (e) {
+        sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "fetch_feed_page") {
     (async () => {
       try {
@@ -1439,7 +1517,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // tab may have closed
       }
     }
-    fetchSongsList(msg.isPublicOnly, msg.maxPages, msg.checkNewOnly, msg.knownIds);
+    fetchSongsList(msg.isPublicOnly, msg.maxPages, msg.checkNewOnly, msg.knownIds, msg.metadataRefreshIds);
   }
 
   if (msg.action === "get_fetch_state") {
@@ -1844,7 +1922,7 @@ function canDownloadSongForIdentity(song, identity) {
   return true;
 }
 
-async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, knownIds = []) {
+async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, knownIds = [], metadataRefreshIds = []) {
   const notifyTab = (message) => {
     if (fetchRequestorTabId) {
       chrome.tabs.sendMessage(fetchRequestorTabId, message).catch(() => {});
@@ -1879,7 +1957,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
 
     await chrome.scripting.executeScript({
       target: { tabId: tabId },
-      func: (t, p, m, c, k, u, ids) => {
+      func: (t, p, m, c, k, u, ids, mr) => {
         window.sunoAuthToken = t;
         window.sunoPublicOnly = p;
         window.sunoMaxPages = m;
@@ -1887,10 +1965,11 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
         window.sunoKnownIds = k;
         window.sunoUserId = u;
         window.sunoUserIds = ids;
+        window.sunoMetadataRefreshIds = mr;
         window.sunoStopFetch = false;
         window.sunoMode = "fetch";
       },
-      args: [token, isPublicOnly, maxPages, checkNewOnly, knownIds, userId, allIdentityIds]
+      args: [token, isPublicOnly, maxPages, checkNewOnly, knownIds, userId, allIdentityIds, metadataRefreshIds]
     });
 
     // Inject the fetch script (content-fetcher.js)
