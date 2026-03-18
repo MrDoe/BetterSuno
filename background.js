@@ -37,12 +37,14 @@ const DEFAULT_INTERVAL_MS = 120000;
 let stopFetchRequested = false;
 let isFetching = false;
 let fetchRequestorTabId = null;
+let activeFetchAbortController = null;
 let stopDownloadRequested = false;
 let isDownloading = false;
 let currentDownloadJobId = 0;
 let activeDownloadIds = new Set();
 let downloadRequestorTabId = null;
 const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
+const BULK_LIBRARY_PAGE_SIZE = 10000;
 
 // Gate: resolves once loadState() has completed, so alarm handlers
 // don't operate on empty in-memory state after a service-worker restart.
@@ -1528,6 +1530,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "stop_fetch") {
     stopFetchRequested = true;
     isFetching = false;
+    if (activeFetchAbortController) {
+      activeFetchAbortController.abort();
+      activeFetchAbortController = null;
+    }
     // Set the stop flag in the page context so content-fetcher.js sees it
     if (fetchRequestorTabId) {
       chrome.scripting.executeScript({
@@ -1735,6 +1741,332 @@ function normalizeDownloadOptions(options) {
     lyrics: options?.lyrics !== false,
     image: options?.image !== false
   };
+}
+
+function extractText(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value.map(extractText).filter(Boolean);
+    return parts.length > 0 ? parts.join('\n') : null;
+  }
+
+  if (value && typeof value === 'object') {
+    const nestedCandidates = [
+      value.lyrics,
+      value.display_lyrics,
+      value.full_lyrics,
+      value.raw_lyrics,
+      value.prompt,
+      value.text,
+      value.content,
+      value.value
+    ];
+
+    for (const candidate of nestedCandidates) {
+      const text = extractText(candidate);
+      if (text) return text;
+    }
+  }
+
+  return null;
+}
+
+function extractUrl(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return /^https?:\/\//i.test(trimmed) ? trimmed : null;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const url = extractUrl(item);
+      if (url) return url;
+    }
+  }
+
+  if (value && typeof value === 'object') {
+    const nestedCandidates = [
+      value.url,
+      value.src,
+      value.image_url,
+      value.image,
+      value.cover_url,
+      value.cover_image_url,
+      value.thumbnail_url,
+      value.artwork_url
+    ];
+
+    for (const candidate of nestedCandidates) {
+      const url = extractUrl(candidate);
+      if (url) return url;
+    }
+  }
+
+  return null;
+}
+
+function isStemClip(clip) {
+  if (!clip || typeof clip !== 'object') return false;
+  if (clip.is_stem === true || clip.stem_of || clip.stem_of_id) return true;
+
+  const directStrings = [
+    clip.type,
+    clip.clip_type,
+    clip.generation_type,
+    clip.generation_mode,
+    clip.source,
+    clip.variant
+  ];
+
+  for (const value of directStrings) {
+    if (typeof value === 'string' && value.toLowerCase().includes('stem')) return true;
+  }
+
+  if (Array.isArray(clip.tags) && clip.tags.some(tag => typeof tag === 'string' && tag.toLowerCase().includes('stem'))) {
+    return true;
+  }
+
+  return typeof clip.title === 'string' && /\bstem(s)?\b/i.test(clip.title);
+}
+
+function extractLyricsFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return null;
+
+  const directCandidates = [
+    clip.lyrics,
+    clip.display_lyrics,
+    clip.full_lyrics,
+    clip.raw_lyrics,
+    clip.prompt,
+    clip.metadata?.lyrics,
+    clip.metadata?.display_lyrics,
+    clip.metadata?.full_lyrics,
+    clip.metadata?.raw_lyrics,
+    clip.metadata?.prompt,
+    clip.meta?.lyrics,
+    clip.meta?.display_lyrics,
+    clip.meta?.prompt
+  ];
+
+  for (const candidate of directCandidates) {
+    const text = extractText(candidate);
+    if (text) return text;
+  }
+
+  return null;
+}
+
+function extractImageUrlFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return null;
+
+  const directCandidates = [
+    clip.image_url,
+    clip.image,
+    clip.image_large_url,
+    clip.cover_url,
+    clip.cover_image_url,
+    clip.thumbnail_url,
+    clip.artwork_url,
+    clip.metadata?.image_url,
+    clip.metadata?.image,
+    clip.metadata?.cover_url,
+    clip.metadata?.cover_image_url,
+    clip.meta?.image_url,
+    clip.meta?.image,
+    clip.meta?.cover_url,
+    clip.meta?.cover_image_url
+  ];
+
+  for (const candidate of directCandidates) {
+    const url = extractUrl(candidate);
+    if (url) return url;
+  }
+
+  return null;
+}
+
+function extractVideoUrlFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return null;
+
+  const directCandidates = [
+    clip.video_url,
+    clip.video_cdn_url,
+    clip.mp4_url,
+    clip.cover_video_url,
+    clip.metadata?.video_url,
+    clip.metadata?.video_cdn_url,
+    clip.metadata?.mp4_url,
+    clip.meta?.video_url,
+    clip.meta?.video_cdn_url,
+    clip.meta?.mp4_url
+  ];
+
+  for (const candidate of directCandidates) {
+    const url = extractUrl(candidate);
+    if (url) return url;
+  }
+
+  return null;
+}
+
+function extractAudioUrlFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return null;
+
+  const directCandidates = [
+    clip.audio_url,
+    clip.stream_audio_url,
+    clip.song_path,
+    clip.metadata?.audio_url,
+    clip.metadata?.stream_audio_url,
+    clip.metadata?.song_path,
+    clip.meta?.audio_url,
+    clip.meta?.stream_audio_url,
+    clip.meta?.song_path
+  ];
+
+  for (const candidate of directCandidates) {
+    const url = extractUrl(candidate);
+    if (url) return url;
+  }
+
+  return null;
+}
+
+function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
+  const idSet = currentUserIds || new Set();
+  if (currentUserId && !idSet.has(currentUserId)) idSet.add(currentUserId);
+
+  if (!clip || typeof clip !== 'object') {
+    return {
+      owner_user_id: currentUserId || null,
+      owner_handle: null,
+      owner_display_name: null,
+      is_owned_by_current_user: idSet.size > 0 ? true : undefined
+    };
+  }
+
+  const profiles = [
+    clip.user,
+    clip.owner,
+    clip.creator,
+    clip.author,
+    clip.profile,
+    clip.user_profile,
+    clip.owner_profile,
+    clip.creator_profile,
+    clip.author_profile,
+    ...(Array.isArray(clip.user_profiles) ? clip.user_profiles : []),
+    ...(Array.isArray(clip.users) ? clip.users : [])
+  ].filter(Boolean);
+
+  const ownerUserId = pickFirstNonEmptyString([
+    clip.user_id,
+    clip.owner_user_id,
+    clip.creator_user_id,
+    clip.author_user_id,
+    clip.owner_id,
+    clip.creator_id,
+    clip.author_id,
+    clip.profile_id,
+    ...profiles.map(profile => pickFirstNonEmptyString([
+      profile?.id,
+      profile?.user_id,
+      profile?.profile_id,
+      profile?.owner_id
+    ]))
+  ]) || currentUserId || null;
+
+  const ownerHandle = normalizeHandle(pickFirstNonEmptyString([
+    clip.handle,
+    clip.user_handle,
+    clip.owner_handle,
+    clip.creator_handle,
+    clip.author_handle,
+    clip.username,
+    ...profiles.map(profile => pickFirstNonEmptyString([
+      profile?.handle,
+      profile?.username,
+      profile?.user_handle
+    ]))
+  ]));
+
+  const ownerDisplayName = pickFirstNonEmptyString([
+    clip.display_name,
+    clip.user_display_name,
+    clip.owner_display_name,
+    clip.creator_display_name,
+    clip.author_display_name,
+    ...profiles.map(profile => pickFirstNonEmptyString([
+      profile?.display_name,
+      profile?.name
+    ]))
+  ]);
+
+  return {
+    owner_user_id: ownerUserId,
+    owner_handle: ownerHandle,
+    owner_display_name: ownerDisplayName,
+    is_owned_by_current_user: idSet.size > 0 && !!ownerUserId && idSet.has(ownerUserId) ? true : undefined
+  };
+}
+
+function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
+  const rawClip = clip?.clip || clip || {};
+  return {
+    id: rawClip.id,
+    title: rawClip.title || `Untitled_${rawClip.id || 'song'}`,
+    audio_url: extractAudioUrlFromClip(rawClip),
+    video_url: extractVideoUrlFromClip(rawClip),
+    image_url: extractImageUrlFromClip(rawClip),
+    lyrics: extractLyricsFromClip(rawClip),
+    is_public: rawClip.is_public !== false,
+    created_at: rawClip.created_at || rawClip.createdAt || clip?.created_at || null,
+    is_liked: rawClip.is_liked || false,
+    is_stem: isStemClip(rawClip),
+    upvote_count: rawClip.upvote_count || 0,
+    ...extractOwnershipMetadataFromClip(rawClip, currentUserId, currentUserIds)
+  };
+}
+
+async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly) {
+  const controller = new AbortController();
+  activeFetchAbortController = controller;
+
+  try {
+    const response = await fetch(`https://studio-api.prod.suno.com/api/library?page=1&page_size=${BULK_LIBRARY_PAGE_SIZE}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Bulk library fetch failed with HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const clips = data?.clips || data?.results || data?.items || data?.data || [];
+    const totalResults = Number(data?.num_total_results ?? data?.total ?? data?.count ?? 0);
+    const hasMore = data?.has_more === true || data?.next_cursor != null;
+    const mayBeTruncated = hasMore || (Number.isFinite(totalResults) && totalResults > clips.length) || clips.length >= BULK_LIBRARY_PAGE_SIZE;
+
+    if (mayBeTruncated) {
+      return null;
+    }
+
+    return clips
+      .filter(clip => !isPublicOnly || clip?.is_public)
+      .map(clip => normalizeLibraryClip(clip, userId, userIds));
+  } finally {
+    if (activeFetchAbortController === controller) {
+      activeFetchAbortController = null;
+    }
+  }
 }
 
 function pickFirstNonEmptyString(values) {
@@ -1953,6 +2285,31 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
 
     if (!checkNewOnly) {
       notifyTab({ action: "log", text: "✅ Token found! Fetching songs list..." });
+    }
+
+    if (!checkNewOnly) {
+      try {
+        notifyTab({ action: "log", text: "⚡ Fast library rebuild via bulk library API..." });
+        const bulkSongs = await fetchLibrarySongsBulk(token, userId, new Set(allIdentityIds), isPublicOnly);
+
+        if (stopFetchRequested) {
+          return;
+        }
+
+        if (Array.isArray(bulkSongs)) {
+          isFetching = false;
+          notifyTab({ action: "songs_fetched", songs: bulkSongs, checkNewOnly: false });
+          return;
+        }
+
+        notifyTab({ action: "log", text: "ℹ️ Bulk library API appears truncated. Falling back to cursor fetch..." });
+      } catch (err) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+
+        notifyTab({ action: "log", text: `ℹ️ Bulk library fetch failed (${err.message}). Falling back to cursor fetch...` });
+      }
     }
 
     await chrome.scripting.executeScript({
