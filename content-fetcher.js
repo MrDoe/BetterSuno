@@ -43,35 +43,68 @@
     function isStemClip(clip) {
         if (!clip || typeof clip !== 'object') return false;
 
-        if (clip.is_stem === true || clip.stem_of || clip.stem_of_id) return true;
+        const normalizeToken = (value) => {
+            if (typeof value !== 'string') return null;
+            return value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+        };
 
-        const directStrings = [
+        const STEM_TOKENS = new Set([
+            'stem',
+            'stems',
+            'audio_stem',
+            'audio_stems',
+            'stem_split',
+            'stem_separation',
+            'stem_separated'
+        ]);
+
+        const explicitFlags = [
+            clip.is_stem,
+            clip.stem,
+            clip.metadata?.is_stem,
+            clip.metadata?.stem,
+            clip.meta?.is_stem,
+            clip.meta?.stem,
+            clip.generation?.is_stem,
+            clip.generation?.stem,
+            clip.model?.is_stem,
+            clip.model?.stem
+        ];
+
+        if (explicitFlags.some(flag => flag === true)) return true;
+
+        const typeMarkers = [
             clip.type,
             clip.clip_type,
             clip.generation_type,
             clip.generation_mode,
             clip.source,
-            clip.variant
+            clip.variant,
+            clip.metadata?.type,
+            clip.metadata?.clip_type,
+            clip.metadata?.generation_type,
+            clip.metadata?.generation_mode,
+            clip.meta?.type,
+            clip.meta?.clip_type,
+            clip.meta?.generation_type,
+            clip.meta?.generation_mode,
+            clip.generation?.type,
+            clip.generation?.mode,
+            clip.model?.type,
+            clip.model?.mode
         ];
 
-        for (const value of directStrings) {
-            if (typeof value === 'string' && value.toLowerCase().includes('stem')) return true;
+        for (const value of typeMarkers) {
+            const token = normalizeToken(value);
+            if (token && STEM_TOKENS.has(token)) return true;
         }
 
-        const nested = [clip.metadata, clip.meta, clip.generation, clip.model, clip.source_clip, clip.parent_clip];
-        for (const obj of nested) {
-            if (!obj || typeof obj !== 'object') continue;
-            for (const v of Object.values(obj)) {
-                if (typeof v === 'string' && v.toLowerCase().includes('stem')) return true;
-                if (v === true && (obj.is_stem === true || obj.stem === true)) return true;
+        if (Array.isArray(clip.tags)) {
+            for (const tag of clip.tags) {
+                const token = normalizeToken(tag);
+                if (token && STEM_TOKENS.has(token)) return true;
             }
         }
-
-        if (Array.isArray(clip.tags) && clip.tags.some(t => typeof t === 'string' && t.toLowerCase().includes('stem'))) {
-            return true;
-        }
-
-        if (typeof clip.title === 'string' && /\bstem(s)?\b/i.test(clip.title)) return true;
 
         return false;
     }
