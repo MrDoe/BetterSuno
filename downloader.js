@@ -167,6 +167,30 @@
             'stem_separated'
         ]);
 
+        const coverFlags = [
+            clip.is_cover,
+            clip.metadata?.is_cover,
+            clip.meta?.is_cover,
+            clip.generation?.is_cover,
+            clip.model?.is_cover,
+            clip.source_clip?.is_cover,
+            clip.parent_clip?.is_cover
+        ];
+
+        const coverRelationships = [
+            clip.cover_of,
+            clip.cover_of_id,
+            clip.metadata?.cover_of,
+            clip.metadata?.cover_of_id,
+            clip.meta?.cover_of,
+            clip.meta?.cover_of_id,
+            clip.generation?.cover_of,
+            clip.generation?.cover_of_id
+        ];
+
+        if (coverFlags.some(flag => flag === true)) return false;
+        if (coverRelationships.some(value => typeof value === 'string' ? value.trim().length > 0 : !!value)) return false;
+
         const explicitFlags = [
             clip.is_stem,
             clip.stem,
