@@ -1851,6 +1851,19 @@ function isStemClip(clip) {
   if (coverFlags.some(flag => flag === true)) return false;
   if (coverRelationships.some(value => typeof value === 'string' ? value.trim().length > 0 : !!value)) return false;
 
+  const stemRelationships = [
+    clip.stem_of,
+    clip.stem_of_id,
+    clip.metadata?.stem_of,
+    clip.metadata?.stem_of_id,
+    clip.meta?.stem_of,
+    clip.meta?.stem_of_id,
+    clip.generation?.stem_of,
+    clip.generation?.stem_of_id
+  ];
+
+  if (stemRelationships.some(value => typeof value === 'string' ? value.trim().length > 0 : !!value)) return true;
+
   const explicitFlags = [
     clip.is_stem,
     clip.stem,
