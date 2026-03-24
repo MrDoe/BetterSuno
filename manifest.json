@@ -1,24 +1,8 @@
 {
   "manifest_version": 3,
   "name": "BetterSuno",
-  "version": "1.2.2",
+  "version": "1.5.0",
   "description": "Enhanced Suno.com experience with notifications and song downloads",
-
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "bettersuno@bettersuno.ext",
-      "strict_min_version": "142.0",
-      "data_collection_permissions": {
-        "is_exempt": true,
-        "is_data_collected": false,
-        "required": ["none"]
-      }
-    },
-    "gecko_android": {
-      "strict_min_version": "113.0"
-    }
-  },
-
   "permissions": [
     "cookies",
     "alarms",
@@ -28,20 +12,16 @@
     "notifications",
     "downloads"
   ],
-  
   "host_permissions": [
     "https://suno.com/*",
     "https://*.suno.com/*",
     "https://*.suno.ai/*",
     "https://studio-api.prod.suno.com/*"
   ],
-  
   "background": {
     "service_worker": "background.js",
-    "scripts": ["background.js"],
     "type": "module"
   },
-  
   "action": {
     "default_title": "BetterSuno",
     "default_icon": {
@@ -50,18 +30,24 @@
       "128": "icons/icon128.png"
     }
   },
-  
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-
   "content_scripts": [
     {
-      "matches": ["https://suno.com/*"],
-      "js": ["content.js", "downloader.js"],
-      "css": ["content.css"],
+      "matches": [
+        "https://suno.com/*"
+      ],
+      "js": [
+        "content.js",
+        "content-idb.js",
+        "downloader.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     }
   ]

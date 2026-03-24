@@ -37,12 +37,14 @@ const DEFAULT_INTERVAL_MS = 120000;
 let stopFetchRequested = false;
 let isFetching = false;
 let fetchRequestorTabId = null;
+let activeFetchAbortController = null;
 let stopDownloadRequested = false;
 let isDownloading = false;
 let currentDownloadJobId = 0;
 let activeDownloadIds = new Set();
 let downloadRequestorTabId = null;
 const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
+const BULK_LIBRARY_PAGE_SIZE = 10000;
 
 // Gate: resolves once loadState() has completed, so alarm handlers
 // don't operate on empty in-memory state after a service-worker restart.
@@ -369,6 +371,134 @@ async function fetchTokenDirect(tabId) {
     return result.token;
   } catch (err) {
     log("fetchTokenDirect exception:", err.message);
+    return null;
+  }
+}
+
+async function fetchCurrentUserIdentityDirect(tabId) {
+  if (isFirefox) return null;
+  if (typeof tabId !== 'number' || isNaN(tabId)) return null;
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        try {
+          const clerk = window.Clerk;
+          const user = clerk?.user || clerk?.session?.user || null;
+          if (!user) {
+            return { ok: false, reason: 'no-user' };
+          }
+
+          // Collect Clerk authentication identifiers (user.id is the primary Clerk ID)
+          const userIdClerk = typeof user.id === 'string' && user.id.trim() ? user.id.trim() : null;
+          const clerkRelatedIds = [
+            user.externalId,
+            user.external_id,
+            user.username,
+            user.primaryEmailAddress?.id,
+            ...(Array.isArray(user.emailAddresses) ? user.emailAddresses.map(entry => entry?.id) : [])
+          ].filter(value => typeof value === 'string' && value.trim());
+
+          const displayName = [
+            user.fullName,
+            [user.firstName, user.lastName].filter(Boolean).join(' ').trim(),
+            user.username,
+            user.primaryEmailAddress?.emailAddress
+          ].find(value => typeof value === 'string' && value.trim()) || null;
+
+          // Try to find Suno profile UUID from page data
+          const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+          let userIdSuno = null;
+          
+          try {
+            // Try localStorage for any cached profile data
+            for (let i = 0; i < localStorage.length; i++) {
+              const key = localStorage.key(i);
+              if (key && (key.includes('profile') || key.includes('user') || key.includes('suno'))) {
+                const value = localStorage.getItem(key);
+                if (value && typeof value === 'string') {
+                  const match = value.match(uuidRegex);
+                  if (match) {
+                    userIdSuno = match[0];
+                    console.log('[fetchCurrentUserIdentityDirect] Found Suno UUID in localStorage key', key, ':', userIdSuno);
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.log('[fetchCurrentUserIdentityDirect] localStorage search failed:', e?.message);
+          }
+
+          // Try to extract from window globals
+          if (!userIdSuno) {
+            try {
+              const globalsToCheck = [
+                window.currentUser,
+                window.user,
+                window.profile,
+                window.userData,
+                window.sunoUser,
+                window.sunoProfile,
+                window.__INITIAL_STATE__,
+                window.__data__
+              ];
+              
+              for (const obj of globalsToCheck) {
+                if (obj && typeof obj === 'object') {
+                  const jsonStr = JSON.stringify(obj);
+                  const match = jsonStr.match(uuidRegex);
+                  if (match) {
+                    userIdSuno = match[0];
+                    console.log('[fetchCurrentUserIdentityDirect] Found Suno UUID in window global');
+                    break;
+                  }
+                }
+              }
+            } catch (e) {
+              console.log('[fetchCurrentUserIdentityDirect] Window global search failed:', e?.message);
+            }
+          }
+
+          return {
+            ok: true,
+            identity: {
+              id: userIdClerk,
+              ids: clerkRelatedIds,
+              handle: typeof user.username === 'string' && user.username.trim() ? user.username.trim() : null,
+              displayName,
+              userIdSuno  // Pass Suno UUID back if found
+            }
+          };
+        } catch (error) {
+          return { ok: false, reason: error?.message || String(error) };
+        }
+      }
+    });
+
+    const result = results?.[0]?.result;
+    if (!result?.ok || !result.identity) {
+      log('fetchCurrentUserIdentityDirect failed for tab', tabId, ':', result?.reason || 'unknown');
+      return null;
+    }
+
+    // Collect IDs including the Suno UUID if found
+    const allIds = collectNormalizedIds([
+      result.identity.id,  // userIdClerk
+      ...result.identity.ids || [],
+      result.identity.userIdSuno
+    ]);
+
+    return {
+      id: typeof result.identity.id === 'string' ? result.identity.id.trim() : null,
+      ids: allIds,
+      handle: normalizeHandle(result.identity.handle),
+      displayName: pickFirstNonEmptyString([result.identity.displayName])
+    };
+  } catch (error) {
+    log('fetchCurrentUserIdentityDirect exception for tab', tabId, ':', error?.message || String(error));
     return null;
   }
 }
@@ -762,6 +892,68 @@ async function fetchExistingNotifications() {
 }
 
 // ============================================================================
+// Fetch older notifications (pagination via before_datetime_utc)
+// ============================================================================
+
+async function fetchOlderNotifications(beforeUtc) {
+  log("fetchOlderNotifications: fetching notifications before", beforeUtc);
+  const st = ensureTabState("global");
+
+  const token = await getApiTokenWithFallback('fetchOlderNotifications');
+  if (!token) {
+    return { ok: false, reason: 'no-token', count: 0 };
+  }
+
+  try {
+    const params = new URLSearchParams({
+      before_datetime_utc: beforeUtc,
+      include_inactive: 'true'
+    });
+
+    const res = await fetch(
+      `https://studio-api.prod.suno.com/api/notification/v2?${params}`,
+      { headers: { Authorization: "Bearer " + token } }
+    );
+
+    if (!res.ok) {
+      log("fetchOlderNotifications: HTTP", res.status);
+      return { ok: false, reason: `HTTP ${res.status}`, count: 0 };
+    }
+
+    const data = await res.json();
+    const incoming = data.notifications || [];
+    log("fetchOlderNotifications: received", incoming.length, "notifications");
+
+    if (!incoming.length) {
+      return { ok: true, count: 0, exhausted: true };
+    }
+
+    const existingById = new Map(st.notifications.map(n => [n.id, n]));
+    for (const n of incoming) {
+      existingById.set(n.id, n);
+    }
+    st.notifications = Array.from(existingById.values()).sort((a, b) => {
+      const ta = new Date(a.updated_at || a.notified_at || a.created_at || 0).getTime();
+      const tb = new Date(b.updated_at || b.notified_at || b.created_at || 0).getTime();
+      return tb - ta;
+    });
+
+    saveState();
+
+    chrome.runtime.sendMessage({
+      type: "stateUpdate",
+      tabId: "global",
+      state: { ...st }
+    });
+
+    return { ok: true, count: incoming.length };
+  } catch (e) {
+    log("fetchOlderNotifications: error", e.message);
+    return { ok: false, reason: e.message, count: 0 };
+  }
+}
+
+// ============================================================================
 // Messages from Offscreen
 // ============================================================================
 
@@ -883,6 +1075,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }).catch(err => {
         log("contentFetchExisting: error =", err.message);
         sendResponse({ ok: false, reason: err.message });
+      });
+    });
+    return true;
+  }
+
+  // Content script requests older notifications (pagination)
+  if (msg.type === "contentFetchOlder") {
+    const { beforeUtc } = msg;
+    stateReadyPromise.then(() => {
+      fetchOlderNotifications(beforeUtc).then(result => {
+        sendResponse(result);
+      }).catch(err => {
+        sendResponse({ ok: false, reason: err.message, count: 0 });
       });
     });
     return true;
@@ -1030,6 +1235,84 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Download-related message handlers
   // ============================================================================
 
+  if (msg.action === "fetch_songs_by_ids") {
+    (async () => {
+      try {
+        let token = msg.token;
+        const songIds = msg.songIds || [];
+
+        if (!token) {
+          token = await getApiTokenWithFallback('fetch_songs_by_ids');
+        }
+
+        if (!token || !Array.isArray(songIds) || songIds.length === 0) {
+          sendResponse({ ok: false, status: 0, error: "Missing token or song IDs" });
+          return;
+        }
+
+        // Fetch library pages until we collect all the requested song IDs
+        const songsByIdMap = new Map();
+        let page = 1;
+        let foundAll = false;
+        const maxPages = 100;
+
+        while (!foundAll && page <= maxPages) {
+          const controller = new AbortController();
+          const timeoutMs = 20000;
+          const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+          const response = await fetch(`https://studio-api.prod.suno.com/api/library?page=${page}&page_size=50`, {
+            method: 'GET',
+            headers: {
+              'Authorization': `Bearer ${token}`
+            },
+            signal: controller.signal
+          });
+
+          clearTimeout(timeout);
+
+          if (!response.ok) {
+            break;
+          }
+
+          const data = await response.json();
+          const clips = data?.clips || data?.results || [];
+
+          for (const clip of clips) {
+            if (songIds.includes(clip.id)) {
+              songsByIdMap.set(clip.id, clip);
+            }
+          }
+
+          // Stop if we've found all songs or if there are no more pages
+          if (songsByIdMap.size === songIds.length || clips.length === 0) {
+            foundAll = true;
+            break;
+          }
+
+          page++;
+        }
+
+        const resultSongs = songIds
+          .map(id => songsByIdMap.get(id))
+          .filter(Boolean);
+
+        sendResponse({
+          ok: true,
+          status: 200,
+          data: {
+            clips: resultSongs,
+            count: resultSongs.length,
+            pagesChecked: page - 1
+          }
+        });
+      } catch (e) {
+        sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "fetch_feed_page") {
     (async () => {
       try {
@@ -1055,7 +1338,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (userId) {
           body.filters.user = {
             presence: "True",
-            userId: userId
+            user_id: userId
           };
         }
 
@@ -1118,6 +1401,77 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try { data = await response.json(); } catch (e) {}
         sendResponse({ ok: response.ok, status, data });
       } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "fetch_playlist_info") {
+    (async () => {
+      try {
+        const token = await getApiTokenWithFallback('fetch_playlist_info');
+        if (!token) { sendResponse({ ok: false, error: "No auth token" }); return; }
+        const { playlistId } = msg;
+        if (!playlistId) { sendResponse({ ok: false, error: "No playlist ID" }); return; }
+        const headers = { Authorization: `Bearer ${token}` };
+        const enc = encodeURIComponent(playlistId);
+        for (const url of [
+          `https://studio-api.prod.suno.com/api/playlist/v2/${enc}?page=1&page_size=1`,
+          `https://studio-api.prod.suno.com/api/playlist/${enc}?page=1&page_size=1`
+        ]) {
+          const res = await fetch(url, { headers });
+          if (!res.ok) continue;
+          let data = null;
+          try { data = await res.json(); } catch (e) {}
+          if (!data) continue;
+          sendResponse({
+            ok: true,
+            playlist: {
+              id: data.id || playlistId,
+              name: data.name || data.title || null,
+              image_url: data.image_url || null,
+              song_count: data.num_total_results ?? data.total ?? null,
+              is_public: data.is_public,
+              is_owned: data.is_owned,
+              is_owned_by_current_user: data.is_owned_by_current_user
+            }
+          });
+          return;
+        }
+        sendResponse({ ok: false, error: 'Playlist not found' });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "get_current_user_identity") {
+    (async () => {
+      try {
+        log('[get_current_user_identity] Message handler called');
+        const token = await getApiTokenWithFallback('get_current_user_identity');
+        if (!token) {
+          log('[get_current_user_identity] No auth token available');
+          sendResponse({ ok: false, error: 'No auth token' });
+          return;
+        }
+
+        log('[get_current_user_identity] Calling fetchCurrentUserIdentity...');
+        const identity = await fetchCurrentUserIdentity(token);
+        log('[get_current_user_identity] Received identity:', identity);
+        
+        if (!identity?.id && !identity?.handle && !identity?.displayName) {
+          log('[get_current_user_identity] Identity invalid - no id, handle, or displayName');
+          sendResponse({ ok: false, error: 'Could not determine current user identity' });
+          return;
+        }
+
+        log('[get_current_user_identity] Sending identity to downloader:', identity);
+        sendResponse({ ok: true, identity });
+      } catch (e) {
+        log('[get_current_user_identity] Exception:', e?.message || String(e));
         sendResponse({ ok: false, error: e?.message || String(e) });
       }
     })();
@@ -1231,6 +1585,83 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "resolve_song_cover_video") {
+    (async () => {
+      try {
+        const songId = typeof msg.songId === 'string' ? msg.songId.trim() : '';
+        if (!songId) {
+          sendResponse({ ok: false, error: 'Missing songId' });
+          return;
+        }
+
+        const songUrl = `https://suno.com/song/${encodeURIComponent(songId)}`;
+        const response = await fetch(songUrl, {
+          method: 'GET',
+          credentials: 'include'
+        });
+
+        if (!response.ok) {
+          sendResponse({ ok: false, status: response.status, error: `Song page request failed (${response.status})` });
+          return;
+        }
+
+        const html = await response.text();
+        const videoUrl = extractFirstVideoUrlFromHtml(html, songId);
+        if (!videoUrl) {
+          sendResponse({ ok: false, status: response.status, error: 'No cover video URL found on song page' });
+          return;
+        }
+
+        sendResponse({ ok: true, status: response.status, videoUrl });
+      } catch (e) {
+        sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "update_song_reaction") {
+    (async () => {
+      try {
+        const songId = typeof msg.songId === 'string' ? msg.songId.trim() : '';
+        const reaction = typeof msg.reaction === 'string' ? msg.reaction.trim().toUpperCase() : '';
+
+        if (!songId || !reaction) {
+          sendResponse({ ok: false, error: 'Missing songId or reaction' });
+          return;
+        }
+
+        const token = await getApiTokenWithFallback('update_song_reaction');
+        if (!token) {
+          sendResponse({ ok: false, error: 'No auth token' });
+          return;
+        }
+
+        const url = `https://studio-api.prod.suno.com/api/gen/${encodeURIComponent(songId)}/update_reaction_type/`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ reaction, recommendation_metadata: {} })
+        });
+
+        let responseBody = null;
+        try {
+          responseBody = await response.json();
+        } catch (error) {
+          responseBody = null;
+        }
+
+        sendResponse({ ok: response.ok, status: response.status, data: responseBody });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "fetch_songs") {
     log("[MSG] fetch_songs received - isPublicOnly:", msg.isPublicOnly, "maxPages:", msg.maxPages, "checkNewOnly:", msg.checkNewOnly, "knownIds count:", msg.knownIds?.length || 0);
     stopFetchRequested = false;
@@ -1245,7 +1676,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // tab may have closed
       }
     }
-    fetchSongsList(msg.isPublicOnly, msg.maxPages, msg.checkNewOnly, msg.knownIds);
+    fetchSongsList(msg.isPublicOnly, msg.maxPages, msg.checkNewOnly, msg.knownIds, msg.metadataRefreshIds);
   }
 
   if (msg.action === "get_fetch_state") {
@@ -1256,6 +1687,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "stop_fetch") {
     stopFetchRequested = true;
     isFetching = false;
+    if (activeFetchAbortController) {
+      activeFetchAbortController.abort();
+      activeFetchAbortController = null;
+    }
     // Set the stop flag in the page context so content-fetcher.js sees it
     if (fetchRequestorTabId) {
       chrome.scripting.executeScript({
@@ -1280,7 +1715,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "download_selected") {
     if (isDownloading) {
       log("⚠️ Download already running. Stop it first.");
-      chrome.runtime.sendMessage({ action: "log", text: "⚠️ Download already running. Stop it first." });
+      const alreadyRunningTab = sender.tab?.id || downloadRequestorTabId;
+      if (alreadyRunningTab) {
+        chrome.tabs.sendMessage(alreadyRunningTab, { action: "log", text: "⚠️ Download already running. Stop it first." }).catch(() => {});
+      }
       return;
     }
     stopDownloadRequested = false;
@@ -1462,7 +1900,513 @@ function normalizeDownloadOptions(options) {
   };
 }
 
-async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, knownIds = []) {
+function extractText(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  if (Array.isArray(value)) {
+    const parts = value.map(extractText).filter(Boolean);
+    return parts.length > 0 ? parts.join('\n') : null;
+  }
+
+  if (value && typeof value === 'object') {
+    const nestedCandidates = [
+      value.lyrics,
+      value.display_lyrics,
+      value.full_lyrics,
+      value.raw_lyrics,
+      value.prompt,
+      value.text,
+      value.content,
+      value.value
+    ];
+
+    for (const candidate of nestedCandidates) {
+      const text = extractText(candidate);
+      if (text) return text;
+    }
+  }
+
+  return null;
+}
+
+function extractUrl(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return /^https?:\/\//i.test(trimmed) ? trimmed : null;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const url = extractUrl(item);
+      if (url) return url;
+    }
+  }
+
+  if (value && typeof value === 'object') {
+    const nestedCandidates = [
+      value.url,
+      value.src,
+      value.image_url,
+      value.image,
+      value.cover_url,
+      value.cover_image_url,
+      value.thumbnail_url,
+      value.artwork_url
+    ];
+
+    for (const candidate of nestedCandidates) {
+      const url = extractUrl(candidate);
+      if (url) return url;
+    }
+  }
+
+  return null;
+}
+
+function isStemClip(clip) {
+  if (!clip || typeof clip !== 'object') return false;
+
+  const meta = clip.metadata || clip.meta || {};
+
+  // Primary signal: task explicitly set to gen_stem
+  if (meta.task === 'gen_stem') return true;
+
+  // Secondary signal: stem_from_id present (UUID of the source clip)
+  if (typeof meta.stem_from_id === 'string' && meta.stem_from_id.trim().length > 0) return true;
+
+  // Tertiary signal: Suno's own badge system marks this as a stem
+  const badges = Array.isArray(meta.secondary_badges) ? meta.secondary_badges
+    : Array.isArray(clip.secondary_badges) ? clip.secondary_badges : [];
+  if (badges.some(b => b && b.icon_key === 'stem')) return true;
+
+  return false;
+}
+
+function extractLyricsFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return null;
+
+  const directCandidates = [
+    clip.lyrics,
+    clip.display_lyrics,
+    clip.full_lyrics,
+    clip.raw_lyrics,
+    clip.prompt,
+    clip.metadata?.lyrics,
+    clip.metadata?.display_lyrics,
+    clip.metadata?.full_lyrics,
+    clip.metadata?.raw_lyrics,
+    clip.metadata?.prompt,
+    clip.meta?.lyrics,
+    clip.meta?.display_lyrics,
+    clip.meta?.prompt
+  ];
+
+  for (const candidate of directCandidates) {
+    const text = extractText(candidate);
+    if (text) return text;
+  }
+
+  return null;
+}
+
+function extractImageUrlFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return null;
+
+  const directCandidates = [
+    clip.image_url,
+    clip.image,
+    clip.image_large_url,
+    clip.cover_url,
+    clip.cover_image_url,
+    clip.thumbnail_url,
+    clip.artwork_url,
+    clip.metadata?.image_url,
+    clip.metadata?.image,
+    clip.metadata?.cover_url,
+    clip.metadata?.cover_image_url,
+    clip.meta?.image_url,
+    clip.meta?.image,
+    clip.meta?.cover_url,
+    clip.meta?.cover_image_url
+  ];
+
+  for (const candidate of directCandidates) {
+    const url = extractUrl(candidate);
+    if (url) return url;
+  }
+
+  return null;
+}
+
+function extractVideoUrlFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return null;
+
+  const directCandidates = [
+    clip.video_url,
+    clip.video_cdn_url,
+    clip.mp4_url,
+    clip.cover_video_url,
+    clip.metadata?.video_url,
+    clip.metadata?.video_cdn_url,
+    clip.metadata?.mp4_url,
+    clip.meta?.video_url,
+    clip.meta?.video_cdn_url,
+    clip.meta?.mp4_url
+  ];
+
+  for (const candidate of directCandidates) {
+    const url = extractUrl(candidate);
+    if (url) return url;
+  }
+
+  return null;
+}
+
+function extractAudioUrlFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return null;
+
+  const directCandidates = [
+    clip.audio_url,
+    clip.stream_audio_url,
+    clip.song_path,
+    clip.metadata?.audio_url,
+    clip.metadata?.stream_audio_url,
+    clip.metadata?.song_path,
+    clip.meta?.audio_url,
+    clip.meta?.stream_audio_url,
+    clip.meta?.song_path
+  ];
+
+  for (const candidate of directCandidates) {
+    const url = extractUrl(candidate);
+    if (url) return url;
+  }
+
+  return null;
+}
+
+function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
+  const idSet = currentUserIds || new Set();
+  if (currentUserId && !idSet.has(currentUserId)) idSet.add(currentUserId);
+
+  if (!clip || typeof clip !== 'object') {
+    return {
+      owner_user_id: currentUserId || null,
+      owner_handle: null,
+      owner_display_name: null,
+      is_owned_by_current_user: idSet.size > 0 ? true : undefined
+    };
+  }
+
+  const profiles = [
+    clip.user,
+    clip.owner,
+    clip.creator,
+    clip.author,
+    clip.profile,
+    clip.user_profile,
+    clip.owner_profile,
+    clip.creator_profile,
+    clip.author_profile,
+    ...(Array.isArray(clip.user_profiles) ? clip.user_profiles : []),
+    ...(Array.isArray(clip.users) ? clip.users : [])
+  ].filter(Boolean);
+
+  const ownerUserId = pickFirstNonEmptyString([
+    clip.user_id,
+    clip.owner_user_id,
+    clip.creator_user_id,
+    clip.author_user_id,
+    clip.owner_id,
+    clip.creator_id,
+    clip.author_id,
+    clip.profile_id,
+    ...profiles.map(profile => pickFirstNonEmptyString([
+      profile?.id,
+      profile?.user_id,
+      profile?.profile_id,
+      profile?.owner_id
+    ]))
+  ]) || currentUserId || null;
+
+  const ownerHandle = normalizeHandle(pickFirstNonEmptyString([
+    clip.handle,
+    clip.user_handle,
+    clip.owner_handle,
+    clip.creator_handle,
+    clip.author_handle,
+    clip.username,
+    ...profiles.map(profile => pickFirstNonEmptyString([
+      profile?.handle,
+      profile?.username,
+      profile?.user_handle
+    ]))
+  ]));
+
+  const ownerDisplayName = pickFirstNonEmptyString([
+    clip.display_name,
+    clip.user_display_name,
+    clip.owner_display_name,
+    clip.creator_display_name,
+    clip.author_display_name,
+    ...profiles.map(profile => pickFirstNonEmptyString([
+      profile?.display_name,
+      profile?.name
+    ]))
+  ]);
+
+  return {
+    owner_user_id: ownerUserId,
+    owner_handle: ownerHandle,
+    owner_display_name: ownerDisplayName,
+    is_owned_by_current_user: idSet.size > 0 && !!ownerUserId && idSet.has(ownerUserId) ? true : undefined
+  };
+}
+
+function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
+  const rawClip = clip?.clip || clip || {};
+  return {
+    id: rawClip.id,
+    title: rawClip.title || `Untitled_${rawClip.id || 'song'}`,
+    audio_url: extractAudioUrlFromClip(rawClip),
+    video_url: extractVideoUrlFromClip(rawClip),
+    image_url: extractImageUrlFromClip(rawClip),
+    lyrics: extractLyricsFromClip(rawClip),
+    is_public: rawClip.is_public !== false,
+    created_at: rawClip.created_at || rawClip.createdAt || clip?.created_at || null,
+    is_liked: rawClip.is_liked || false,
+    is_stem: isStemClip(rawClip),
+    upvote_count: rawClip.upvote_count || 0,
+    ...extractOwnershipMetadataFromClip(rawClip, currentUserId, currentUserIds)
+  };
+}
+
+async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly) {
+  const controller = new AbortController();
+  activeFetchAbortController = controller;
+
+  try {
+    const response = await fetch(`https://studio-api.prod.suno.com/api/library?page=1&page_size=${BULK_LIBRARY_PAGE_SIZE}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Bulk library fetch failed with HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const clips = data?.clips || data?.results || data?.items || data?.data || [];
+    const totalResults = Number(data?.num_total_results ?? data?.total ?? data?.count ?? 0);
+    const hasMore = data?.has_more === true || data?.next_cursor != null;
+    const mayBeTruncated = hasMore || (Number.isFinite(totalResults) && totalResults > clips.length) || clips.length >= BULK_LIBRARY_PAGE_SIZE;
+
+    if (mayBeTruncated) {
+      return null;
+    }
+
+    return clips
+      .filter(clip => !isPublicOnly || clip?.is_public)
+      .map(clip => normalizeLibraryClip(clip, userId, userIds));
+  } finally {
+    if (activeFetchAbortController === controller) {
+      activeFetchAbortController = null;
+    }
+  }
+}
+
+function pickFirstNonEmptyString(values) {
+  for (const value of values) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+  }
+  return null;
+}
+
+function normalizeHandle(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim().replace(/^@+/, '').toLowerCase();
+  return trimmed || null;
+}
+
+function collectNormalizedIds(values) {
+  const ids = [];
+
+  values.forEach(value => {
+    if (typeof value !== 'string') {
+      return;
+    }
+
+    const trimmed = value.trim();
+    if (trimmed) {
+      ids.push(trimmed);
+    }
+  });
+
+  return Array.from(new Set(ids));
+}
+
+function collectUuidLikeIds(obj) {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const stack = [obj];
+  const found = new Set();
+  let safety = 0;
+
+  while (stack.length && safety < 5000) {
+    safety += 1;
+    const cur = stack.pop();
+    if (!cur || typeof cur !== 'object') continue;
+
+    for (const value of Object.values(cur)) {
+      if (typeof value === 'string' && uuidRegex.test(value)) {
+        found.add(value.trim());
+      } else if (value && typeof value === 'object') {
+        stack.push(value);
+      }
+    }
+  }
+
+  return Array.from(found);
+}
+
+function getIdentityIds(identity) {
+  return collectNormalizedIds([
+    identity?.id,
+    ...(Array.isArray(identity?.ids) ? identity.ids : [])
+  ]);
+}
+
+function getNormalizedSongOwnerIds(song) {
+  const values = [
+    song?.owner_user_id,
+    song?.user_id,
+    song?.creator_user_id,
+    song?.author_user_id,
+    song?.owner_profile_id,
+    song?.profile_id
+  ];
+
+  return new Set(values.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()));
+}
+
+function getNormalizedSongOwnerHandles(song) {
+  const values = [
+    song?.owner_handle,
+    song?.handle,
+    song?.user_handle,
+    song?.creator_handle,
+    song?.author_handle,
+    song?.username
+  ];
+
+  return new Set(values.map(normalizeHandle).filter(Boolean));
+}
+
+function hasSongOwnershipMetadata(song) {
+  if (!song || typeof song !== 'object') {
+    return false;
+  }
+
+  return song.is_owned_by_current_user === true ||
+    song.is_owned_by_current_user === false ||
+    song.is_own_song === true ||
+    song.is_own_song === false ||
+    getNormalizedSongOwnerIds(song).size > 0 ||
+    getNormalizedSongOwnerHandles(song).size > 0 ||
+    typeof song?.owner_display_name === 'string';
+}
+
+function isSongOwnedByIdentity(song, identity) {
+  if (!song || !identity) {
+    return false;
+  }
+
+  const identityIds = getIdentityIds(identity);
+  const identityHandle = normalizeHandle(identity.handle);
+  const identityDisplayName = pickFirstNonEmptyString([identity.displayName]);
+
+  const ownerIds = getNormalizedSongOwnerIds(song);
+  if (identityIds.some(id => ownerIds.has(id))) {
+    return true;
+  }
+
+  const ownerHandles = getNormalizedSongOwnerHandles(song);
+  if (identityHandle && ownerHandles.has(identityHandle)) {
+    return true;
+  }
+
+  if (song.is_owned_by_current_user === true || song.is_own_song === true) {
+    return true;
+  }
+
+  if (identityDisplayName && typeof song?.owner_display_name === 'string') {
+    return song.owner_display_name.trim().toLowerCase() === identityDisplayName.trim().toLowerCase();
+  }
+
+  return false;
+}
+
+function isSongExplicitlyKnownToBeOtherArtist(song) {
+  return !!song && (song.is_owned_by_current_user === false || song.is_own_song === false);
+}
+
+function canDownloadSongForIdentity(song, identity) {
+  if (!song || typeof song !== 'object') {
+    return false;
+  }
+
+  // Positive ownership match (multi-ID check) — always allow
+  if (isSongOwnedByIdentity(song, identity)) {
+    return true;
+  }
+
+  if (isSongExplicitlyKnownToBeOtherArtist(song)) {
+    return false;
+  }
+
+  // If the song has an owner ID and the identity has IDs, but none overlap verify before blocking
+  const identityIds = getIdentityIds(identity);
+  const ownerIds = getNormalizedSongOwnerIds(song);
+
+  if (identityIds.length > 0 && ownerIds.size > 0) {
+    const isMatch = identityIds.some(id => ownerIds.has(id));
+    if (!isMatch) {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      const identityHasUuid = identityIds.some(id => uuidRegex.test(id));
+      const ownerHasUuid = Array.from(ownerIds).some(id => uuidRegex.test(id));
+      
+      if (identityHasUuid && ownerHasUuid) {
+        return false; // Confident mismatch on UUIDs
+      }
+
+      const clerkRegex = /^user_[a-zA-Z0-9]+$/i;
+      const identityHasClerk = identityIds.some(id => clerkRegex.test(id));
+      const ownerHasClerk = Array.from(ownerIds).some(id => clerkRegex.test(id));
+
+      if (identityHasClerk && ownerHasClerk) {
+        return false; // Confident mismatch on Clerk IDs
+      }
+    }
+  }
+
+  // Otherwise: ownership is inconclusive (IDs might use different formats).
+  // Allow the download rather than blocking the user's own songs.
+  return true;
+}
+
+async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, knownIds = [], metadataRefreshIds = []) {
   const notifyTab = (message) => {
     if (fetchRequestorTabId) {
       chrome.tabs.sendMessage(fetchRequestorTabId, message).catch(() => {});
@@ -1487,25 +2431,54 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
       return;
     }
 
-    const userId = await fetchCurrentUserId(token);
+    const identity = await fetchCurrentUserIdentity(token);
+    const allIdentityIds = getIdentityIds(identity);
+    const userId = allIdentityIds[0] || null;
 
     if (!checkNewOnly) {
       notifyTab({ action: "log", text: "✅ Token found! Fetching songs list..." });
     }
 
+    if (!checkNewOnly) {
+      try {
+        notifyTab({ action: "log", text: "⚡ Fast library rebuild via bulk library API..." });
+        const bulkSongs = await fetchLibrarySongsBulk(token, userId, new Set(allIdentityIds), isPublicOnly);
+
+        if (stopFetchRequested) {
+          return;
+        }
+
+        if (Array.isArray(bulkSongs)) {
+          isFetching = false;
+          notifyTab({ action: "songs_fetched", songs: bulkSongs, checkNewOnly: false });
+          return;
+        }
+
+        notifyTab({ action: "log", text: "ℹ️ Bulk library API appears truncated. Falling back to cursor fetch..." });
+      } catch (err) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+
+        notifyTab({ action: "log", text: `ℹ️ Bulk library fetch failed (${err.message}). Falling back to cursor fetch...` });
+      }
+    }
+
     await chrome.scripting.executeScript({
       target: { tabId: tabId },
-      func: (t, p, m, c, k, u) => {
+      func: (t, p, m, c, k, u, ids, mr) => {
         window.sunoAuthToken = t;
         window.sunoPublicOnly = p;
         window.sunoMaxPages = m;
         window.sunoCheckNewOnly = c;
         window.sunoKnownIds = k;
         window.sunoUserId = u;
+        window.sunoUserIds = ids;
+        window.sunoMetadataRefreshIds = mr;
         window.sunoStopFetch = false;
         window.sunoMode = "fetch";
       },
-      args: [token, isPublicOnly, maxPages, checkNewOnly, knownIds, userId]
+      args: [token, isPublicOnly, maxPages, checkNewOnly, knownIds, userId, allIdentityIds, metadataRefreshIds]
     });
 
     // Inject the fetch script (content-fetcher.js)
@@ -1520,7 +2493,11 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
   }
 }
 
-async function fetchCurrentUserId(token) {
+async function fetchCurrentUserIdentity(token) {
+  log('[fetchCurrentUserIdentity] START - token length:', token?.length || 0);
+  
+  let identity = { id: null, ids: [], handle: null, displayName: null };
+  
   try {
     const endpoints = [
       'https://studio-api.prod.suno.com/api/me/',
@@ -1529,26 +2506,153 @@ async function fetchCurrentUserId(token) {
 
     for (const url of endpoints) {
       try {
+        log('[fetchCurrentUserIdentity] Fetching from:', url);
         const res = await fetch(url, {
           method: 'GET',
           headers: { 'Authorization': `Bearer ${token}` }
         });
+        log('[fetchCurrentUserIdentity] Response status:', res.status);
         if (!res.ok) continue;
+
         const data = await res.json();
+        log('[fetchCurrentUserIdentity] Got data from /api/me/');
+        
+        const candidateIds = collectNormalizedIds([
+          data?.id,
+          data?.user_id,
+          data?.account_id,
+          data?.profile_id,
+          data?.user?.id,
+          data?.user?.user_id,
+          data?.user?.account_id,
+          data?.user?.profile_id,
+          data?.profile?.id,
+          data?.profile?.user_id,
+          data?.profile?.owner_id,
+          ...collectUuidLikeIds(data)
+        ]);
+        
+        identity = {
+          id: candidateIds[0] || null,
+          ids: candidateIds,
+          handle: normalizeHandle(pickFirstNonEmptyString([
+            data?.handle,
+            data?.username,
+            data?.user?.handle,
+            data?.user?.username,
+            data?.profile?.handle,
+            data?.profile?.username
+          ])),
+          displayName: pickFirstNonEmptyString([
+            data?.display_name,
+            data?.name,
+            data?.user?.display_name,
+            data?.user?.name,
+            data?.profile?.display_name,
+            data?.profile?.name
+          ])
+        };
 
-        const direct = data?.id || data?.user_id || data?.user?.id || data?.profile?.id;
-        if (typeof direct === 'string' && direct.length > 0) return direct;
-
-        const fromTree = findUuidLikeId(data);
-        if (fromTree) return fromTree;
+        log('[fetchCurrentUserIdentity] Base identity IDs from /api/me/:', identity.ids);
+        break;  // Got data, stop trying endpoints
       } catch (e) {
+        log('[fetchCurrentUserIdentity] Error fetching from', url, ':', e?.message);
         // try next endpoint
       }
     }
   } catch (e) {
-    // ignore
+    log('[fetchCurrentUserIdentity] Outer catch:', e?.message);
   }
-  return null;
+
+  // ALWAYS try to get Suno profile UUID from library (whether /api/me/ worked or not)
+  const hasUuid = identity.ids.some(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id));
+  log('[fetchCurrentUserIdentity] Has UUID in identity?', hasUuid);
+  
+  if (!hasUuid) {
+    log('[fetchCurrentUserIdentity] No UUID, fetching library to extract Suno profile UUID...');
+    try {
+      const libRes = await fetch('https://studio-api.prod.suno.com/api/library?page=1', {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      log('[fetchCurrentUserIdentity] Library fetch status:', libRes.status);
+      
+      if (libRes.ok) {
+        const libData = await libRes.json();
+        const items = libData?.clips || libData?.results || libData?.items || libData?.data || [];
+        
+        log('[fetchCurrentUserIdentity] Found items in library:', items.length);
+        
+        let ownSong = items.find(item => {
+          const c = item?.clip || item;
+          if (c?.is_owned_by_current_user === true || c?.is_own_song === true) return true;
+          const ownerHandle = c?.handle || c?.user_handle || c?.owner_handle;
+          if (ownerHandle && identity.handle && String(ownerHandle).toLowerCase() === String(identity.handle).toLowerCase()) return true;
+          return false;
+        });
+
+        // Don't arbitrarily pull the first song's UUID since it might belong to another artist in the library.
+        if (!ownSong) {
+          log('[fetchCurrentUserIdentity] Could not definitively verify any library song as owned. Skipping UUID extraction.');
+        } else {
+          log('[fetchCurrentUserIdentity] Found verified own song!');
+        }
+        
+        if (ownSong) {
+          const songClip = ownSong?.clip || ownSong;
+          const ownerUuid = songClip?.owner_user_id || songClip?.user_id || songClip?.profile_id;
+          log('[fetchCurrentUserIdentity] Extracted owner UUID:', ownerUuid);
+          
+          if (ownerUuid && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ownerUuid)) {
+            log('[fetchCurrentUserIdentity] Valid UUID found! Adding to identity:', ownerUuid);
+            identity.ids = collectNormalizedIds([...identity.ids, ownerUuid]);
+            log('[fetchCurrentUserIdentity] Updated identity IDs with UUID:', identity.ids);
+          } else {
+            log('[fetchCurrentUserIdentity] Owner UUID is not a valid UUID format:', ownerUuid);
+          }
+        }
+      } else {
+        log('[fetchCurrentUserIdentity] Library fetch failed with status:', libRes.status);
+      }
+    } catch (e) {
+      log('[fetchCurrentUserIdentity] Failed to fetch library:', e?.message);
+    }
+  }
+
+  // If we still have no identity, try direct tab fallback
+  if (identity.ids.length === 0 && !identity.handle && !identity.displayName) {
+    log('[fetchCurrentUserIdentity] No identity from /api/me/, trying direct tab fallback...');
+    try {
+      const preferredTabs = [];
+      if (typeof downloadRequestorTabId === 'number') preferredTabs.push(downloadRequestorTabId);
+      if (typeof fetchRequestorTabId === 'number') preferredTabs.push(fetchRequestorTabId);
+
+      const sunoTabs = await chrome.tabs.query({ url: 'https://suno.com/*' });
+      const candidateTabIds = Array.from(new Set([
+        ...preferredTabs,
+        ...sunoTabs.map(tab => tab.id).filter(tabId => typeof tabId === 'number')
+      ]));
+
+      for (const tabId of candidateTabIds) {
+        const tabIdentity = await fetchCurrentUserIdentityDirect(tabId);
+        if (tabIdentity && (tabIdentity.ids.length > 0 || tabIdentity.handle || tabIdentity.displayName)) {
+          log('[fetchCurrentUserIdentity] Got identity from tab', tabId);
+          identity = tabIdentity;
+          break;
+        }
+      }
+    } catch (e) {
+      log('[fetchCurrentUserIdentity] Direct tab fallback failed:', e?.message || String(e));
+    }
+  }
+
+  log('[fetchCurrentUserIdentity] FINAL identity:', identity);
+  return identity;
+}
+
+async function fetchCurrentUserId(token) {
+  const identity = await fetchCurrentUserIdentity(token);
+  return getIdentityIds(identity)[0] || null;
 }
 
 function findUuidLikeId(obj) {
@@ -1574,6 +2678,73 @@ function findUuidLikeId(obj) {
   return null;
 }
 
+function extractFirstVideoUrlFromHtml(html, songId = '') {
+  if (typeof html !== 'string' || !html.trim()) {
+    return null;
+  }
+
+  const derivedMatch = html.match(/video_gen_([0-9a-f-]{36})[^"'\s<>]*?(?:cover_snapshot|image\.jpe?g|video_upload)/i);
+  if (derivedMatch?.[1]) {
+    return `https://cdn1.suno.ai/video_gen_${derivedMatch[1]}_processed_video.mp4`;
+  }
+
+  const urls = [];
+  const seen = new Set();
+  const patterns = [
+    /<source[^>]+src=["']([^"']+\.(?:mp4|webm|mov|m4v)(?:\?[^"']*)?)["']/gi,
+    /<video[^>]+src=["']([^"']+\.(?:mp4|webm|mov|m4v)(?:\?[^"']*)?)["']/gi
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      const raw = match[1];
+      const decoded = raw.replace(/&amp;/g, '&');
+      if (!seen.has(decoded)) {
+        seen.add(decoded);
+        urls.push(decoded);
+      }
+    }
+  }
+
+  if (urls.length === 0) {
+    return null;
+  }
+
+  const normalizedSongId = String(songId || '').trim().toLowerCase();
+  const scoreUrl = (url) => {
+    const normalized = String(url || '').toLowerCase();
+    let score = 0;
+
+    // Strongly prefer URLs that are clearly tied to this song id.
+    if (normalizedSongId) {
+      if (normalized.includes(normalizedSongId)) score += 220;
+      if (normalized.includes(`video_gen_${normalizedSongId}`)) score += 120;
+    }
+
+    // Prefer Suno's generated final cover video.
+    if (normalized.includes('processed_video')) score += 100;
+    if (normalized.includes('video_gen_')) score += 60;
+
+    // De-prioritize generic uploads/snapshots and uncertain variants.
+    if (normalized.includes('video_upload')) score -= 35;
+    if (normalized.includes('cover_snapshot')) score -= 35;
+
+    // Generic UUID-only mp4 URLs are often not the actual song cover video.
+    if (/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.mp4(?:\?|$)/i.test(normalized)) {
+      score -= 80;
+    }
+
+    // Prefer mp4 for broad compatibility.
+    if (normalized.includes('.mp4')) score += 10;
+
+    return score;
+  };
+
+  urls.sort((a, b) => scoreUrl(b) - scoreUrl(a));
+  return urls[0] || null;
+}
+
 // Fallback download for platforms without chrome.downloads (e.g. Firefox Android).
 // Fetches the resource in the background service worker (avoids CORS), converts to a
 // base64 data-URL, then injects a one-shot anchor-click into the active Suno tab.
@@ -1583,7 +2754,12 @@ async function downloadViaInject(url, filename) {
 
   let dataUrl = url;
   if (!url.startsWith('data:')) {
-    const response = await fetch(url);
+    const token = await getApiTokenWithFallback('downloadViaInject');
+    const fetchOptions = {};
+    if (token) {
+      fetchOptions.headers = { Authorization: `Bearer ${token}` };
+    }
+    const response = await fetch(url, fetchOptions);
     if (!response.ok) throw new Error(`Fetch failed: HTTP ${response.status}`);
     const buffer = await response.arrayBuffer();
     const view = new Uint8Array(buffer);
@@ -1613,8 +2789,96 @@ async function downloadViaInject(url, filename) {
   return true;
 }
 
+function replaceFilenameExtension(filename, nextExtension) {
+  if (typeof filename !== 'string' || !filename) {
+    return filename;
+  }
+
+  const cleanExtension = String(nextExtension || '').trim().replace(/^\./, '').toLowerCase();
+  if (!cleanExtension) {
+    return filename;
+  }
+
+  return filename.replace(/\.[^.\/]+$/, `.${cleanExtension}`);
+}
+
+function inferAudioExtension(url, contentType, fallbackExtension = 'mp3') {
+  const normalizedType = String(contentType || '').toLowerCase();
+  if (normalizedType.includes('audio/wav') || normalizedType.includes('audio/x-wav') || normalizedType.includes('audio/wave')) {
+    return 'wav';
+  }
+  if (normalizedType.includes('audio/mpeg') || normalizedType.includes('audio/mp3')) {
+    return 'mp3';
+  }
+  if (normalizedType.includes('audio/mp4') || normalizedType.includes('audio/x-m4a')) {
+    return 'm4a';
+  }
+  if (normalizedType.includes('audio/ogg')) {
+    return 'ogg';
+  }
+
+  const normalizedUrl = String(url || '').split('?')[0].toLowerCase();
+  const extensionMatch = normalizedUrl.match(/\.([a-z0-9]{2,5})$/i);
+  if (extensionMatch?.[1]) {
+    return extensionMatch[1].toLowerCase();
+  }
+
+  return String(fallbackExtension || 'mp3').toLowerCase();
+}
+
+async function fetchResourceBlob(url, token) {
+  const attempts = [];
+  if (token) {
+    attempts.push({
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include'
+    });
+  }
+  attempts.push({
+    headers: {},
+    credentials: 'include'
+  });
+
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: attempt.headers,
+        credentials: attempt.credentials
+      });
+
+      if (!response.ok) {
+        lastError = new Error(`Fetch failed: HTTP ${response.status}`);
+        continue;
+      }
+
+      const blob = await response.blob();
+      return {
+        blob,
+        contentType: response.headers.get('content-type') || blob.type || '',
+        finalUrl: response.url || url
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error('Fetch failed');
+}
+
+async function downloadBlobFile(blob, filename) {
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    return await downloadOneFile(objectUrl, filename);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 0, downloadOptions = { music: true, lyrics: true, image: true }) {
-  const cleanFolder = folderName.replace(/[^a-zA-Z0-9_-]/g, "");
+  const cleanFolder = String(folderName || '').replace(/[^a-zA-Z0-9_-]/g, "");
 
   function notifyDownloadUi(message) {
     if (downloadRequestorTabId) {
@@ -1628,6 +2892,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
     }
   }
 
+  try {
   function sanitizeFilename(name) {
     return name.replace(/[<>:"/\\|?*]/g, "").trim().substring(0, 100);
   }
@@ -1655,7 +2920,42 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
       return await downloadViaInject(url, filename);
     }
 
-    let downloadId;
+    // Set up completion tracking BEFORE starting the download to avoid a race
+    // condition where fast downloads (e.g. blob URLs) complete before the
+    // listener is registered.
+    let downloadId = null;
+    let settled = false;
+    let settleResolve, settleReject;
+
+    const completionPromise = new Promise((resolve, reject) => {
+      settleResolve = resolve;
+      settleReject = reject;
+    });
+
+    function settle(fn, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      chrome.downloads.onChanged.removeListener(listener);
+      fn(value);
+    }
+
+    const timeoutId = setTimeout(() => {
+      settle(settleReject, new Error('Download timed out after 5 minutes'));
+    }, 5 * 60 * 1000);
+
+    function listener(delta) {
+      if (downloadId === null || delta.id !== downloadId) return;
+      const state = delta.state?.current;
+      if (state === 'complete') {
+        settle(settleResolve, undefined);
+      } else if (state === 'interrupted') {
+        settle(settleReject, new Error(delta.error?.current || 'Download interrupted'));
+      }
+    }
+
+    chrome.downloads.onChanged.addListener(listener);
+
     try {
       downloadId = await chrome.downloads.download({
         url,
@@ -1665,39 +2965,43 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
     } catch (err) {
       // Some Firefox Android builds reject custom filenames. Retry without filename.
       if (isAndroid || isFirefox) {
-        downloadId = await chrome.downloads.download({
-          url,
-          conflictAction: "uniquify"
-        });
+        try {
+          downloadId = await chrome.downloads.download({
+            url,
+            conflictAction: "uniquify"
+          });
+        } catch (retryErr) {
+          settle(settleReject, retryErr);
+          await completionPromise;
+        }
       } else {
-        throw err;
+        settle(settleReject, err);
+        await completionPromise;
       }
     }
 
-    if (typeof downloadId !== 'number') return false;
+    if (typeof downloadId !== 'number') {
+      settle(settleReject, new Error('Download failed: no download ID returned'));
+      await completionPromise;
+    }
 
     activeDownloadIds.add(downloadId);
     persistDownloadState();
 
-    // Wait until the browser actually finishes writing the file
-    await new Promise((resolve) => {
-      const timeoutId = setTimeout(() => {
-        chrome.downloads.onChanged.removeListener(listener);
-        resolve(); // give up waiting after 5 min, don't block forever
-      }, 5 * 60 * 1000);
-
-      function listener(delta) {
-        if (delta.id !== downloadId) return;
-        const state = delta.state?.current;
-        if (state === 'complete' || state === 'interrupted') {
-          clearTimeout(timeoutId);
-          chrome.downloads.onChanged.removeListener(listener);
-          resolve();
-        }
+    // Check if the download already completed before we linked the listener
+    // to this downloadId (handles the race condition for very fast downloads).
+    try {
+      const [item] = await chrome.downloads.search({ id: downloadId });
+      if (item?.state === 'complete') {
+        settle(settleResolve, undefined);
+      } else if (item?.state === 'interrupted') {
+        settle(settleReject, new Error(item?.error || 'Download interrupted'));
       }
-      chrome.downloads.onChanged.addListener(listener);
-    });
+    } catch (_) {
+      // search unavailable, rely on the listener
+    }
 
+    await completionPromise;
     return true;
   }
 
@@ -1709,23 +3013,62 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
   if (shouldDownloadLyrics) selectedTypes.push('lyrics');
   if (shouldDownloadImage) selectedTypes.push('images');
 
+  const token = await getApiTokenWithFallback('download_selected');
+  const currentUserIdentity = token ? await fetchCurrentUserIdentity(token) : null;
+  const canVerifyOwnership = !!(getIdentityIds(currentUserIdentity).length > 0 || currentUserIdentity?.handle || currentUserIdentity?.displayName);
+
+  // Final ownership gate: trust explicit per-song ownership metadata from the fetched library payload.
+  // This avoids false denials when API identity lookup returns a different ID format than song owner IDs.
+  const downloadableSongs = songs.filter(song => !isSongExplicitlyKnownToBeOtherArtist(song));
+  const blockedSongs = songs.filter(song => isSongExplicitlyKnownToBeOtherArtist(song));
+
+  if (!canVerifyOwnership) {
+    notifyDownloadUi({
+      action: 'log',
+      text: '⚠️ Could not verify account identity via API. Using song ownership metadata for download eligibility.'
+    });
+  }
+
   if (selectedTypes.length === 0) {
+    const completionText = '⚠️ Nothing selected to download.';
     const notifyNoTypes = (msg) => {
       if (downloadRequestorTabId) {
         chrome.tabs.sendMessage(downloadRequestorTabId, msg).catch(() => {});
       }
     };
-    notifyNoTypes({ action: "log", text: '⚠️ Nothing selected to download.' });
+    notifyNoTypes({ action: "log", text: completionText });
     stopDownloadRequested = false;
     isDownloading = false;
     activeDownloadIds = new Set();
     persistDownloadState({ finishedAt: Date.now() });
     broadcastDownloadState();
-    notifyNoTypes({ action: "download_complete", stopped: false });
+    notifyNoTypes({ action: "download_complete", stopped: false, text: completionText, ok: false });
     return;
   }
 
-  notifyDownloadUi({ action: "log", text: `🚀 Starting download of ${songs.length} song(s): ${selectedTypes.join(', ')}...` });
+  if (blockedSongs.length > 0) {
+    notifyDownloadUi({
+      action: 'log',
+      text: `🚫 Skipping ${blockedSongs.length} song(s) by other artists. Those tracks may only be saved to the local database.`
+    });
+  }
+
+  if (downloadableSongs.length === 0) {
+    const completionText = '🚫 Only your own songs can be downloaded as files. Songs by other artists may only be saved to the local database.';
+    notifyDownloadUi({
+      action: 'log',
+      text: completionText
+    });
+    stopDownloadRequested = false;
+    isDownloading = false;
+    activeDownloadIds = new Set();
+    persistDownloadState({ finishedAt: Date.now() });
+    broadcastDownloadState();
+    notifyDownloadUi({ action: 'download_complete', stopped: false, text: completionText, ok: false });
+    return;
+  }
+
+  notifyDownloadUi({ action: "log", text: `🚀 Starting download of ${downloadableSongs.length} song(s): ${selectedTypes.join(', ')}...` });
 
   if (isAndroid) {
     notifyDownloadUi({ action: "log", text: '📱 Android detected: using compatibility mode for file saving.' });
@@ -1733,8 +3076,9 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
 
   let downloadedCount = 0;
   let failedCount = 0;
+  let downloadedFileCount = 0;
 
-  for (const song of songs) {
+  for (const song of downloadableSongs) {
     if (stopDownloadRequested || !isDownloading || jobId !== currentDownloadJobId) {
       notifyDownloadUi({ action: "log", text: "⏹️ Download stopped by user." });
       break;
@@ -1744,12 +3088,44 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
     const safeTitle = sanitizeFilename(title);
 
     try {
+      let downloadedSomething = false;
+
       // 1. Download Music
-      if (shouldDownloadMusic && song.audio_url) {
-        const ext = format.toLowerCase();
-        const baseName = `${safeTitle}_${song.id.slice(-4)}.${ext}`;
-        const filename = buildDownloadFilename(baseName);
-        await downloadOneFile(song.audio_url, filename);
+      if (shouldDownloadMusic) {
+        if (!song.audio_url) {
+          throw new Error('No audio URL available');
+        }
+
+        const requestedExt = format.toLowerCase();
+        const baseName = `${safeTitle}_${song.id.slice(-4)}.${requestedExt}`;
+        const directFilename = buildDownloadFilename(baseName);
+
+        try {
+          await downloadOneFile(song.audio_url, directFilename);
+          downloadedSomething = true;
+          downloadedFileCount += 1;
+        } catch (directError) {
+          notifyDownloadUi({
+            action: 'log',
+            text: `ℹ️ ${title}: direct audio download failed (${directError.message}). Retrying via authenticated fetch.`
+          });
+
+          let fallbackFilename = directFilename;
+          const audioFile = await fetchResourceBlob(song.audio_url, token);
+          const actualExt = inferAudioExtension(audioFile.finalUrl, audioFile.contentType, requestedExt);
+
+          if (actualExt && actualExt !== requestedExt) {
+            fallbackFilename = replaceFilenameExtension(fallbackFilename, actualExt);
+            notifyDownloadUi({
+              action: 'log',
+              text: `ℹ️ ${title}: Suno returned ${actualExt.toUpperCase()} audio; saving with that format.`
+            });
+          }
+
+          await downloadBlobFile(audioFile.blob, fallbackFilename);
+          downloadedSomething = true;
+          downloadedFileCount += 1;
+        }
       }
 
       // 2. Download Lyrics (Blob/Data URL approach)
@@ -1764,6 +3140,8 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
         const baseName = `${safeTitle}_${song.id.slice(-4)}.txt`;
         const filename = buildDownloadFilename(baseName);
         await downloadOneFile(lyricsDataUrl, filename);
+        downloadedSomething = true;
+        downloadedFileCount += 1;
       }
 
       // 3. Download Image
@@ -1776,13 +3154,20 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
           imageUrl = imageUrl.replace('_8x8.png', '.png');
         }
 
-        const baseName = `${safeTitle}_${song.id.slice(-4)}.jpg`;
+        const imageExt = (imageUrl.split('?')[0].match(/\.([a-z0-9]{2,5})$/i)?.[1] || 'jpg').toLowerCase();
+        const baseName = `${safeTitle}_${song.id.slice(-4)}.${imageExt}`;
         const filename = buildDownloadFilename(baseName);
         await downloadOneFile(imageUrl, filename);
+        downloadedSomething = true;
+        downloadedFileCount += 1;
+      }
+
+      if (!downloadedSomething) {
+        throw new Error('No downloadable files available for the selected options');
       }
 
       downloadedCount++;
-      notifyDownloadUi({ action: "log", text: `✅ Downloaded: ${title} (${downloadedCount}/${songs.length})` });
+      notifyDownloadUi({ action: "log", text: `✅ Downloaded: ${title} (${downloadedCount}/${downloadableSongs.length})` });
     } catch (err) {
       failedCount++;
       notifyDownloadUi({ action: "log", text: `❌ Failed: ${title} - ${err.message}` });
@@ -1799,11 +3184,28 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
   persistDownloadState({ finishedAt: Date.now() });
   broadcastDownloadState();
 
+  const completionText = wasStopped
+    ? `⏹️ Download stopped. ${downloadedCount} songs downloaded, ${failedCount} failed, ${blockedSongs.length} blocked.`
+    : downloadedFileCount > 0
+      ? `✅ Download complete! ${downloadedCount} songs downloaded, ${downloadedFileCount} files saved, ${failedCount} failed, ${blockedSongs.length} blocked.`
+      : `❌ Download finished without saving files. ${failedCount} failed, ${blockedSongs.length} blocked.`;
+
   notifyDownloadUi({
     action: "log",
-    text: `✅ Download complete! ${downloadedCount} succeeded, ${failedCount} failed.`
+    text: completionText
   });
-  notifyDownloadUi({ action: "download_complete", stopped: wasStopped });
+  notifyDownloadUi({ action: "download_complete", stopped: wasStopped, text: completionText, ok: downloadedFileCount > 0 && !wasStopped });
+  } catch (fatalError) {
+    log('downloadSelectedSongs fatal error:', fatalError?.message || String(fatalError));
+    stopDownloadRequested = false;
+    isDownloading = false;
+    activeDownloadIds = new Set();
+    persistDownloadState({ finishedAt: Date.now() });
+    broadcastDownloadState();
+    const errorText = `❌ Download failed unexpectedly: ${fatalError?.message || 'Unknown error'}`;
+    notifyDownloadUi({ action: 'log', text: errorText });
+    notifyDownloadUi({ action: 'download_complete', stopped: false, text: errorText, ok: false });
+  }
 }
 
 // Keep active download IDs in sync
@@ -1848,7 +3250,7 @@ function buildDesktopNotifText(n) {
     who = `${others} ${others > 1 ? 'people' : 'person'}`;
   }
 
-  switch (n.type) {
+  switch (n.notification_type || n.type) {
     case 'clip_like':
       return { title: 'Suno: New Like', message: `${who} liked your song "${title}"` };
     case 'clip_comment':
@@ -1857,10 +3259,20 @@ function buildDesktopNotifText(n) {
       return { title: 'Suno: Comment Liked', message: `${who} liked your comment on "${title}"` };
     case 'comment_reply':
       return { title: 'Suno: Comment Reply', message: `${who} replied to your comment on "${title}"` };
+    case 'comment_mention':
+      return { title: 'Suno: You were mentioned', message: `${who} mentioned you in a comment on "${title}"` };
+    case 'caption_mention':
+      return { title: 'Suno: You were mentioned', message: `${who} mentioned you in their caption on "${title}"` };
     case 'video_cover_hook_like':
       return { title: 'Suno: Hook Liked', message: `${who} liked your video cover in Hooks` };
     case 'hook_like':
       return { title: 'Suno: Hook Liked', message: `${who} liked your hook` };
+    case 'hook_comment':
+      return { title: 'Suno: Hook Comment', message: `${who} commented on your hook` };
+    case 'playlist_like':
+      return { title: 'Suno: Playlist Liked', message: `${who} liked your playlist "${title}"` };
+    case 'follow':
+      return { title: 'Suno: New Follower', message: `${who} followed you` };
     default:
       return { title: 'Suno Notification', message: `New notification from ${who || 'someone'}` };
   }
@@ -1868,17 +3280,25 @@ function buildDesktopNotifText(n) {
 
 function getSunoUrl(n) {
   const id = n.content_id || '';
-  switch (n.type) {
+  const handle = (n.user_profiles || [])[0]?.handle || '';
+  switch (n.notification_type || n.type) {
     case 'clip_like':
-      return `https://suno.com/song/${id}`;
     case 'clip_comment':
       return `https://suno.com/song/${id}`;
     case 'comment_like':
     case 'comment_reply':
+    case 'comment_mention':
       return `https://suno.com/song/${id}?show_comments=true`;
+    case 'caption_mention':
+      return `https://suno.com/song/${id}`;
     case 'video_cover_hook_like':
     case 'hook_like':
+    case 'hook_comment':
       return `https://suno.com/hook/${id}`;
+    case 'playlist_like':
+      return `https://suno.com/playlist/${id}`;
+    case 'follow':
+      return handle ? `https://suno.com/@${handle}` : 'https://suno.com';
     default:
       return 'https://suno.com';
   }

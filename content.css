@@ -16,7 +16,7 @@
   position: fixed !important;
   top: 20px !important;
   left: 20px !important;
-  z-index: 9999999999 !important;
+  z-index: 99999 !important;
   display: block !important;
   visibility: visible !important;
   opacity: 1 !important;
@@ -37,8 +37,18 @@
   filter: none !important;
 }
 
+/* Hide audio element to prevent interference with Suno's audio player */
+#bettersuno-audio-element {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  visibility: hidden !important;
+  position: absolute !important;
+  pointer-events: none !important;
+}
+
 #bettersuno-title {
-  font-size: 16px !important;
+  font-size: 20px !important;
   font-weight: 600 !important;
   color: var(--bettersuno-text) !important;
   margin: 0 !important;
@@ -58,12 +68,12 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
   transition: background 0.15s, transform 0.15s !important;
   position: relative !important;
-  top: -10px !important;
-  left: 100px !important;
+  top: -17px !important;
+  left: 95px !important;
   pointer-events: auto !important;
   visibility: visible !important;
   opacity: 1 !important;
-  z-index: 999999999 !important;
+  z-index: 99999 !important;
   padding: 0 !important;
   margin: 0 !important;
 }
@@ -86,7 +96,7 @@
   right: -4px !important;
   background: #ef4444 !important;
   color: #fff !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   font-weight: 700 !important;
   min-width: 20px !important;
   height: 20px !important;
@@ -114,7 +124,9 @@
   overflow: hidden !important;
   flex-direction: column !important;
   pointer-events: auto !important;
-  z-index: 999999999 !important;
+  z-index: 99999 !important;
+  color: var(--bettersuno-text) !important;
+  font-size: 14px !important;
 }
 
 #bettersuno-panel.open {
@@ -138,7 +150,7 @@
 }
 
 #bettersuno-header .bettersuno-status {
-  font-size: 11px !important;
+  font-size: 12px !important;
   color: var(--bettersuno-text-muted) !important;
 }
 
@@ -190,12 +202,23 @@
 .bettersuno-list-sentinel {
   padding: 10px 16px !important;
   text-align: center !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   color: var(--bettersuno-text-muted) !important;
 }
 
 .bettersuno-list-sentinel.is-complete {
   opacity: 0.7 !important;
+}
+
+.bettersuno-list-sentinel.is-loadmore {
+  cursor: pointer !important;
+  color: var(--bettersuno-accent, #7c6af7) !important;
+  opacity: 1 !important;
+  text-decoration: underline !important;
+}
+
+.bettersuno-list-sentinel.is-loadmore:hover {
+  opacity: 0.8 !important;
 }
 
 /* Individual notification row */
@@ -255,7 +278,7 @@
 }
 
 .bettersuno-item .bettersuno-time {
-  font-size: 11px !important;
+  font-size: 12px !important;
   color: var(--bettersuno-text-muted) !important;
   margin-top: 2px !important;
 }
@@ -334,7 +357,7 @@
   background: rgba(245, 158, 11, 0.12) !important;
   border-bottom: 1px solid rgba(245, 158, 11, 0.25) !important;
   color: #f59e0b !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   gap: 6px !important;
   flex-shrink: 0 !important;
 }
@@ -437,12 +460,7 @@
 
 /* ========== Downloader (popup.html) embedded in Download tab ========== */
 
-#bettersuno-panel {
-  color: #333 !important;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen", "Ubuntu", "Cantarell", sans-serif !important;
-  font-size: 13px !important;
-  padding: 0 !important;
-}
+/* Scoped downloader styles - keep panel colors intact */
 
 #bettersuno-panel .note {
   font-size: 12px !important;
@@ -507,14 +525,19 @@
 }
 
 #bettersuno-panel button {
-  padding: 10px 14px !important;
+  padding: 8px 12px !important;
   cursor: pointer !important;
   border: none !important;
   font-weight: 600 !important;
   border-radius: 6px !important;
-  font-size: 12px !important;
+  font-size: 13px !important;
   letter-spacing: 0.3px !important;
   font-family: inherit !important;
+}
+
+#bettersuno-panel .player-tab-buttons > button
+{
+  font-size: 20px !important;
 }
 
 #bettersuno-panel button:disabled
@@ -590,14 +613,15 @@
   color: white !important;
   border: none !important;
   border-radius: 50% !important;
-  width: 32px !important;
-  height: 32px !important;
+  width: 42px !important;
+  height: 42px !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
   cursor: pointer !important;
-  font-size: 14px !important;
+  font-size: 20px !important;
   flex-shrink: 0 !important;
+  font-variant-emoji: text !important;
 }
 
 .player-btn:hover {
@@ -610,7 +634,7 @@
 }
 
 .player-title {
-  font-size: 12px !important;
+  font-size: 14px !important;
   font-weight: 600 !important;
   color: var(--bettersuno-text) !important;
   white-space: nowrap !important;
@@ -631,7 +655,7 @@
 .player-progress {
   height: 100% !important;
   background: var(--bettersuno-accent) !important;
-  width: 0% !important;
+  width: 0%;
   border-radius: 999px !important;
   position: relative !important;
 }
@@ -662,10 +686,199 @@
 }
 
 .player-time {
-  font-size: 11px !important;
+  font-size: 14px !important;
   color: var(--bettersuno-text-muted) !important;
   font-variant-numeric: tabular-nums !important;
 }
+
+/* ---- Player Tab ---- */
+#bettersuno-player-content {
+  flex-direction: column !important;
+  padding: 0 !important;
+}
+
+.player-tab-inner {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+.player-tab-no-song {
+  display: flex;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 1 !important;
+  color: var(--bettersuno-text-muted) !important;
+  gap: 8px !important;
+  padding: 32px !important;
+}
+
+.player-tab-no-song-icon {
+  font-size: 56px !important;
+  opacity: 0.25 !important;
+  line-height: 1 !important;
+}
+
+.player-tab-song {
+  display: flex;
+  flex-direction: column !important;
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.player-tab-subtabs {
+  display: flex !important;
+  gap: 8px !important;
+  padding: 0 16px 10px !important;
+  flex-shrink: 0 !important;
+}
+
+.player-tab-subtab {
+  flex: 1 !important;
+  border: 1px solid var(--bettersuno-border) !important;
+  border-radius: 8px !important;
+  padding: 8px 10px !important;
+  background: transparent !important;
+  color: var(--bettersuno-text-muted) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+}
+
+.player-tab-subtab.active {
+  background: var(--bettersuno-bg-hover) !important;
+  color: var(--bettersuno-text) !important;
+  border-color: var(--bettersuno-accent) !important;
+}
+
+.player-tab-view {
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column !important;
+}
+
+.player-tab-art-wrapper {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 16px 0px 8px !important;
+  flex-shrink: 0 !important;
+  position: relative !important;
+  top: -1rem !important;
+  height: 100% !important;
+}
+
+#player-tab-video {
+  width: 100% !important;
+  height: 100% !important;
+  max-height: 80vh !important;
+  object-fit: scale-down !important;
+  border-radius: 10px !important;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5) !important;
+}
+
+.player-tab-cover-image {
+  width: 100% !important;
+  height: 100% !important;
+  max-height: 80vh !important;
+  object-fit: contain !important;
+  border-radius: 10px !important;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5) !important;
+}
+
+.player-tab-title {
+  text-align: center !important;
+  font-weight: 700 !important;
+  font-size: 18px !important;
+  color: var(--bettersuno-text) !important;
+  padding: 0 16px 8px !important;
+  flex-shrink: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.player-tab-lyrics-wrapper {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  padding: 0 16px 8px !important;
+  min-height: 0 !important;
+}
+
+.player-tab-lyrics-wrapper::-webkit-scrollbar {
+  width: 4px !important;
+}
+
+.player-tab-lyrics-wrapper::-webkit-scrollbar-thumb {
+  background: var(--bettersuno-border) !important;
+  border-radius: 3px !important;
+}
+
+.player-tab-lyrics {
+  font-size: 13px !important;
+  color: var(--bettersuno-text) !important;
+  line-height: 1.8 !important;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+}
+
+.player-tab-controls {
+  padding: 10px 16px 12px !important;
+  border-top: 1px solid var(--bettersuno-border) !important;
+  flex-shrink: 0 !important;
+  background: var(--bettersuno-bg-hover) !important;
+}
+
+.player-tab-progress-row {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  margin-bottom: 10px !important;
+}
+
+.player-tab-progress-row .player-progress-container {
+  flex: 1 !important;
+}
+
+.player-tab-buttons {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 25px !important;
+}
+
+.player-btn-large {
+  width: 44px !important;
+  height: 44px !important;
+  font-size: 24px !important;
+}
+
+#player-tab-progress-handle {
+  position: absolute !important;
+  top: 50% !important;
+  left: 0%;
+  width: 12px !important;
+  height: 12px !important;
+  border-radius: 50% !important;
+  background: #fff !important;
+  border: 1px solid rgba(0, 0, 0, 0.35) !important;
+  box-sizing: border-box !important;
+  transform: translate(-50%, -50%) !important;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12) !important;
+  pointer-events: none !important;
+  z-index: 2 !important;
+}
+
+#player-tab-progress-container:hover #player-tab-progress-handle {
+  width: 13px !important;
+  height: 13px !important;
+}
+
 
 .song-item.playing {
   background: rgba(139, 92, 246, 0.1) !important;
@@ -772,7 +985,7 @@
 
 #bettersuno-panel #status {
   margin-top: 10px !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   height: 80px !important;
   overflow-y: auto !important;
   border: 1px solid #3f3f46 !important;
@@ -950,7 +1163,7 @@
 #bettersuno-panel #selectControls #selectAll {
   flex: 0 0 auto !important;
   padding: 5px 8px !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   letter-spacing: 0 !important;
   min-height: 28px !important;
   line-height: 1 !important;
@@ -965,7 +1178,7 @@
 #bettersuno-panel #selectControls #cacheAllBtn {
   flex: 0 0 auto !important;
   padding: 5px 8px !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   letter-spacing: 0 !important;
   min-height: 28px !important;
   line-height: 1 !important;
@@ -976,14 +1189,14 @@
   min-width: 52px !important;
   min-height: 28px !important;
   padding: 5px 8px !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   line-height: 1 !important;
 }
 
 #bettersuno-panel #selectControls #deleteCachedBtn {
   flex: 0 0 auto !important;
   padding: 5px 8px !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   letter-spacing: 0 !important;
   min-height: 28px !important;
   line-height: 1 !important;
@@ -992,7 +1205,7 @@
 #bettersuno-panel #selectControls #syncNewBtn {
   flex: 0 0 auto !important;
   padding: 5px 8px !important;
-  font-size: 11px !important;
+  font-size: 12px !important;
   letter-spacing: 0 !important;
   min-height: 28px !important;
   line-height: 1 !important;
@@ -1093,6 +1306,94 @@
   letter-spacing: 0 !important;
 }
 
+#bettersuno-panel #playlistSearchControls {
+  display: flex !important;
+  gap: 6px !important;
+  margin-bottom: 6px !important;
+  align-items: center !important;
+}
+
+#bettersuno-panel #playlistSearchInput {
+  flex: 1 1 0 !important;
+  min-width: 0 !important;
+  background: #27272a !important;
+  border: 1px solid #3f3f46 !important;
+  border-radius: 4px !important;
+  color: #f4f4f5 !important;
+  padding: 5px 8px !important;
+  font-size: 12px !important;
+  font-family: inherit !important;
+  outline: none !important;
+}
+
+#bettersuno-panel #playlistSearchInput:focus {
+  border-color: #667eea !important;
+}
+
+#bettersuno-panel #playlistSearchBtn {
+  flex: 0 0 auto !important;
+  padding: 4px 10px !important;
+  font-size: 12px !important;
+  min-height: 26px !important;
+}
+
+#bettersuno-panel #playlistSearchResults {
+  background: #18181b !important;
+  border: 1px solid #3f3f46 !important;
+  border-radius: 6px !important;
+  max-height: 200px !important;
+  overflow-y: auto !important;
+  margin-bottom: 6px !important;
+}
+
+#bettersuno-panel .playlist-search-item {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 7px 10px !important;
+  cursor: pointer !important;
+  transition: background 0.1s !important;
+}
+
+#bettersuno-panel .playlist-search-item:hover {
+  background: #27272a !important;
+}
+
+#bettersuno-panel .playlist-search-thumb {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 4px !important;
+  object-fit: cover !important;
+  flex: 0 0 auto !important;
+}
+
+#bettersuno-panel .playlist-search-info {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 2px !important;
+  min-width: 0 !important;
+}
+
+#bettersuno-panel .playlist-search-name {
+  font-size: 13px !important;
+  color: #f4f4f5 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+#bettersuno-panel .playlist-search-count {
+  font-size: 12px !important;
+  color: #a1a1aa !important;
+}
+
+#bettersuno-panel .playlist-search-empty {
+  padding: 10px !important;
+  text-align: center !important;
+  font-size: 12px !important;
+  color: #a1a1aa !important;
+}
+
 #bettersuno-panel #songListContainer input[type="text"] {
   background: #27272a !important;
   border-color: #3f3f46 !important;
@@ -1186,6 +1487,24 @@
     padding-bottom: max(10px, env(safe-area-inset-bottom)) !important;
   }
 
+  #player-tab-video {
+    width: 100% !important;
+    height: 90% !important;
+    max-height: 80vh !important;
+    object-fit: cover !important;
+    border-radius: 10px !important;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5) !important;
+  }
+
+  .player-tab-cover-image {
+    width: 100% !important;
+    height: 90% !important;
+    max-height: 80vh !important;
+    object-fit: contain !important;
+    border-radius: 10px !important;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5) !important;
+  }
+
   #bettersuno-panel .song-item {
     gap: 12px !important;
     padding: 12px 0 !important;
@@ -1194,6 +1513,34 @@
   #bettersuno-panel .song-thumbnail {
     width: 52px !important;
     height: 52px !important;
+  }
+}
+
+/* ---- Wide-screen player: cover art left, lyrics right ---- */
+@media (min-width: 769px) {
+  /* Hide the Cover / Lyrics sub-tab buttons */
+  #player-tab-subtabs {
+    display: none !important;
+  }
+
+  /* Arrange the two view panels horizontally */
+  .player-tab-song {
+    flex-direction: row !important;
+    align-items: stretch !important;
+    overflow: hidden !important;
+  }
+
+  /* Both views take equal space */
+  .player-tab-song > .player-tab-view {
+    flex: 1 !important;
+    min-width: 0 !important;
+    display: flex !important;
+  }
+
+  /* Force the lyrics panel visible even when JS has set display:none */
+  #player-tab-view-lyrics {
+    display: flex !important;
+    border-left: 1px solid var(--bettersuno-border) !important;
   }
 }
 

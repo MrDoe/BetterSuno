@@ -11,6 +11,8 @@
   let renderedNotificationCount = 0;
   let notificationsSentinel = null;
   let notificationsObserver = null;
+  let olderNotificationsFetching = false;
+  let olderNotificationsExhausted = false;
 
   // ---- Build DOM ----
   const root = document.createElement('div');
@@ -20,9 +22,6 @@
     <div id="bettersuno-panel">
       <div id="bettersuno-header">
         <h3 id="bettersuno-title">BetterSuno</h3>
-        <span class="bettersuno-status" id="bettersuno-status">inactive</span>
-        <!-- refresh button allows manual fetch of latest notifications -->
-        <button id="bettersuno-refresh" title="Refresh notifications" style="margin-left:8px;">⟳</button>
       </div>
       <div id="bettersuno-tabs">
         <button class="bettersuno-tab active" data-tab="library">Song Library</button>
@@ -45,6 +44,11 @@
               </select>
               <button id="refreshPlaylistsBtn" class="btn-secondary" title="Refresh playlists from Suno" type="button">⟳</button>
             </div>
+            <div id="playlistSearchControls">
+              <input type="text" id="playlistSearchInput" placeholder="Paste Suno playlist URL or ID..." autocomplete="off" />
+              <button id="playlistSearchBtn" class="btn-secondary" type="button">Load</button>
+            </div>
+            <div id="playlistSearchResults" style="display:none;"></div>
 
             <div id="filterControls">
               <label>Filter:</label>
@@ -66,7 +70,7 @@
 
             <span id="selectControls">
               <button id="selectAll" class="btn-secondary" type="button" aria-pressed="false">Select All</button>
-              <button id="cacheAllBtn" class="btn-secondary" title="Download selected songs as MP3 into the browser database for offline playback">Download to DB</button>
+              <button id="cacheAllBtn" class="btn-secondary" title="Download selected songs as MP3 into the browser database for offline playback">Save to DB</button>
               <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
               <button id="deleteCachedBtn" class="btn-danger" title="Delete the selected songs from the browser database">Delete from DB</button>
               <button id="syncNewBtn" class="btn-secondary" title="Fetch only songs that are newer than your current local library">Sync New</button>
@@ -168,7 +172,6 @@
   const badge = root.querySelector('#bettersuno-badge');
   const panel = root.querySelector('#bettersuno-panel');
   const list = root.querySelector('#bettersuno-list');
-  const status = root.querySelector('#bettersuno-status');
   const tabButtons = root.querySelectorAll('.bettersuno-tab');
   const title = root.querySelector('#bettersuno-title');
   const settingsContent = root.querySelector('#bettersuno-settings-content');
@@ -187,14 +190,6 @@
       badge.textContent = '0';
     }
   });
-
-  // ---- Manual refresh button ----
-  const refreshBtn = root.querySelector('#bettersuno-refresh');
-  if (refreshBtn) {
-    refreshBtn.addEventListener('click', () => {
-      refresh();
-    });
-  }
 
   // Close panel on outside click
   document.addEventListener('click', (e) => {
@@ -399,6 +394,16 @@
         text = 'followed you';
         url = firstHandle ? `https://suno.com/@${firstHandle}` : url;
         break;
+      case 'comment_mention':
+        text = `mentioned you in a comment on "${title}"`;
+        if (n.content_message) text += `: "${n.content_message}"`;
+        url = `https://suno.com/song/${contentId}?show_comments=true`;
+        break;
+      case 'caption_mention':
+        text = `mentioned you in their caption on "${title}"`;
+        if (n.content_message) text += `: "${n.content_message}"`;
+        url = `https://suno.com/song/${contentId}`;
+        break;
       default:
         text = 'sent a notification';
     }
@@ -433,9 +438,43 @@
 
     const remaining = Math.max(currentNotifications.length - renderedNotificationCount, 0);
     notificationsSentinel.classList.toggle('is-complete', remaining === 0);
-    notificationsSentinel.textContent = remaining > 0
-      ? `Scroll to load ${Math.min(remaining, NOTIFICATION_RENDER_BATCH_SIZE)} more notifications`
-      : (currentNotifications.length > 0 ? 'All notifications loaded' : '');
+    notificationsSentinel.classList.toggle('is-loadmore', false);
+    notificationsSentinel.onclick = null;
+
+    if (remaining > 0) {
+      notificationsSentinel.textContent = `Scroll to load ${Math.min(remaining, NOTIFICATION_RENDER_BATCH_SIZE)} more notifications`;
+    } else if (currentNotifications.length === 0) {
+      notificationsSentinel.textContent = '';
+    } else if (olderNotificationsFetching) {
+      notificationsSentinel.textContent = 'Loading older notifications…';
+    } else if (olderNotificationsExhausted) {
+      notificationsSentinel.textContent = 'All notifications loaded';
+    } else {
+      notificationsSentinel.classList.toggle('is-loadmore', true);
+      notificationsSentinel.textContent = 'Load older notifications';
+      notificationsSentinel.onclick = loadOlderNotifications;
+    }
+  }
+
+  function loadOlderNotifications() {
+    if (olderNotificationsFetching || olderNotificationsExhausted || !isContextValid()) return;
+
+    const oldest = currentNotifications[currentNotifications.length - 1];
+    if (!oldest) return;
+
+    const beforeUtc = oldest.updated_at || oldest.notified_at || oldest.created_at;
+    if (!beforeUtc) return;
+
+    olderNotificationsFetching = true;
+    updateNotificationSentinelState();
+
+    chrome.runtime.sendMessage({ type: 'contentFetchOlder', beforeUtc }, (response) => {
+      olderNotificationsFetching = false;
+      if (!response || response.count === 0 || response.exhausted) {
+        olderNotificationsExhausted = true;
+      }
+      updateNotificationSentinelState();
+    });
   }
 
   function ensureNotificationSentinel() {
@@ -536,15 +575,6 @@
   }
 
   function renderNotifications(notifications, enabled) {
-    // Status indicator
-    if (enabled) {
-      status.textContent = 'active';
-      status.classList.add('active');
-    } else {
-      status.textContent = 'inactive';
-      status.classList.remove('active');
-    }
-
     currentNotifCount = (notifications || []).length;
 
     // Badge (only show new ones since last panel open)
@@ -584,14 +614,6 @@
   let refreshInterval;
 
   function refresh() {
-    // provide immediate UI feedback
-    status.textContent = 'refreshing';
-    status.classList.remove('active');
-    const refreshBtn = root.querySelector('#bettersuno-refresh');
-    if (refreshBtn) {
-      refreshBtn.disabled = true;
-    }
-
     if (!isContextValid()) {
       clearInterval(refreshInterval);
       root.remove();
@@ -606,11 +628,9 @@
           if (!chrome.runtime.lastError && response) {
             renderNotifications(response.notifications, response.enabled);
           }
-          if (refreshBtn) refreshBtn.disabled = false;
         });
       } catch (e) {
         console.debug('[BetterSuno] Could not refresh state');
-        if (refreshBtn) refreshBtn.disabled = false;
       }
     });
   }
@@ -627,7 +647,35 @@
       // background started sending both tab-specific and global
       // updates this restriction was unnecessary and in fact meant the
       // UI would never refresh on Chrome.  Just render whatever we get.
-      renderNotifications(msg.state.notifications, msg.state.enabled);
+      const newNotifs = msg.state.notifications || [];
+      // Detect "append older" update: same newest item, list grew, all current items already rendered
+      if (
+        currentNotifications.length > 0 &&
+        renderedNotificationCount === currentNotifications.length &&
+        newNotifs.length > currentNotifications.length &&
+        newNotifs[0]?.id === currentNotifications[0]?.id
+      ) {
+        const appendStart = currentNotifications.length;
+        currentNotifications = newNotifs;
+        currentNotifCount = newNotifs.length;
+        const end = Math.min(appendStart + NOTIFICATION_RENDER_BATCH_SIZE, currentNotifications.length);
+        if (appendStart < end) {
+          const fragment = document.createDocumentFragment();
+          for (let i = appendStart; i < end; i++) {
+            fragment.appendChild(createNotificationItem(currentNotifications[i]));
+          }
+          if (notificationsSentinel) {
+            list.insertBefore(fragment, notificationsSentinel);
+          } else {
+            list.appendChild(fragment);
+          }
+          renderedNotificationCount = end;
+        }
+        updateNotificationSentinelState();
+      } else {
+        olderNotificationsExhausted = false;
+        renderNotifications(newNotifs, msg.state.enabled);
+      }
     }
   });
 

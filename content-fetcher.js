@@ -15,7 +15,11 @@
     const maxPages = window.sunoMaxPages || 0; // 0 = unlimited
     const checkNewOnly = window.sunoCheckNewOnly || false;
     const knownIds = new Set(window.sunoKnownIds || []);
+    const metadataRefreshIds = new Set((window.sunoMetadataRefreshIds || []).filter(id => typeof id === 'string' && id));
+    const metadataRefreshTargetCount = metadataRefreshIds.size;
     const userId = window.sunoUserId || null;
+    const userIds = new Set((Array.isArray(window.sunoUserIds) ? window.sunoUserIds : []).filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()));
+    if (userId && !userIds.has(userId)) userIds.add(userId);
 
     if (!token) {
         api.runtime.sendMessage({ action: "fetch_error_internal", error: "❌ Fatal: No Auth Token received." });
@@ -41,35 +45,18 @@
     function isStemClip(clip) {
         if (!clip || typeof clip !== 'object') return false;
 
-        if (clip.is_stem === true || clip.stem_of || clip.stem_of_id) return true;
+        const meta = clip.metadata || clip.meta || {};
 
-        const directStrings = [
-            clip.type,
-            clip.clip_type,
-            clip.generation_type,
-            clip.generation_mode,
-            clip.source,
-            clip.variant
-        ];
+        // Primary signal: task explicitly set to gen_stem
+        if (meta.task === 'gen_stem') return true;
 
-        for (const value of directStrings) {
-            if (typeof value === 'string' && value.toLowerCase().includes('stem')) return true;
-        }
+        // Secondary signal: stem_from_id present (UUID of the source clip)
+        if (typeof meta.stem_from_id === 'string' && meta.stem_from_id.trim().length > 0) return true;
 
-        const nested = [clip.metadata, clip.meta, clip.generation, clip.model, clip.source_clip, clip.parent_clip];
-        for (const obj of nested) {
-            if (!obj || typeof obj !== 'object') continue;
-            for (const v of Object.values(obj)) {
-                if (typeof v === 'string' && v.toLowerCase().includes('stem')) return true;
-                if (v === true && (obj.is_stem === true || obj.stem === true)) return true;
-            }
-        }
-
-        if (Array.isArray(clip.tags) && clip.tags.some(t => typeof t === 'string' && t.toLowerCase().includes('stem'))) {
-            return true;
-        }
-
-        if (typeof clip.title === 'string' && /\bstem(s)?\b/i.test(clip.title)) return true;
+        // Tertiary signal: Suno's own badge system marks this as a stem
+        const badges = Array.isArray(meta.secondary_badges) ? meta.secondary_badges
+            : Array.isArray(clip.secondary_badges) ? clip.secondary_badges : [];
+        if (badges.some(b => b && b.icon_key === 'stem')) return true;
 
         return false;
     }
@@ -198,6 +185,148 @@
         return null;
     }
 
+    function extractVideoUrlFromClip(clip) {
+        if (!clip || typeof clip !== 'object') return null;
+
+        const directCandidates = [
+            clip.video_url,
+            clip.video_cdn_url,
+            clip.mp4_url,
+            clip.cover_video_url,
+            clip.metadata?.video_url,
+            clip.metadata?.video_cdn_url,
+            clip.metadata?.mp4_url,
+            clip.meta?.video_url,
+            clip.meta?.video_cdn_url,
+            clip.meta?.mp4_url
+        ];
+
+        for (const candidate of directCandidates) {
+            const url = extractUrl(candidate);
+            if (url) return url;
+        }
+
+        return null;
+    }
+
+    function extractAudioUrlFromClip(clip) {
+        if (!clip || typeof clip !== 'object') return null;
+
+        const directCandidates = [
+            clip.audio_url,
+            clip.stream_audio_url,
+            clip.song_path,
+            clip.metadata?.audio_url,
+            clip.metadata?.stream_audio_url,
+            clip.metadata?.song_path,
+            clip.meta?.audio_url,
+            clip.meta?.stream_audio_url,
+            clip.meta?.song_path
+        ];
+
+        for (const candidate of directCandidates) {
+            const url = extractUrl(candidate);
+            if (url) return url;
+        }
+
+        return null;
+    }
+
+    function pickFirstNonEmptyString(values) {
+        for (const value of values) {
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                if (trimmed) return trimmed;
+            }
+        }
+
+        return null;
+    }
+
+    function normalizeHandle(value) {
+        if (typeof value !== 'string') return null;
+        const trimmed = value.trim().replace(/^@+/, '').toLowerCase();
+        return trimmed || null;
+    }
+
+    function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
+        const idSet = currentUserIds || new Set();
+        if (currentUserId && !idSet.has(currentUserId)) idSet.add(currentUserId);
+
+        if (!clip || typeof clip !== 'object') {
+            return {
+                owner_user_id: currentUserId || null,
+                owner_handle: null,
+                owner_display_name: null,
+                is_owned_by_current_user: idSet.size > 0 ? true : undefined
+            };
+        }
+
+        const profiles = [
+            clip.user,
+            clip.owner,
+            clip.creator,
+            clip.author,
+            clip.profile,
+            clip.user_profile,
+            clip.owner_profile,
+            clip.creator_profile,
+            clip.author_profile,
+            ...(Array.isArray(clip.user_profiles) ? clip.user_profiles : []),
+            ...(Array.isArray(clip.users) ? clip.users : [])
+        ].filter(Boolean);
+
+        const ownerUserId = pickFirstNonEmptyString([
+            clip.user_id,
+            clip.owner_user_id,
+            clip.creator_user_id,
+            clip.author_user_id,
+            clip.owner_id,
+            clip.creator_id,
+            clip.author_id,
+            clip.profile_id,
+            ...profiles.map(profile => pickFirstNonEmptyString([
+                profile?.id,
+                profile?.user_id,
+                profile?.profile_id,
+                profile?.owner_id
+            ]))
+        ]) || currentUserId || null;
+
+        const ownerHandle = normalizeHandle(pickFirstNonEmptyString([
+            clip.handle,
+            clip.user_handle,
+            clip.owner_handle,
+            clip.creator_handle,
+            clip.author_handle,
+            clip.username,
+            ...profiles.map(profile => pickFirstNonEmptyString([
+                profile?.handle,
+                profile?.username,
+                profile?.user_handle
+            ]))
+        ]));
+
+        const ownerDisplayName = pickFirstNonEmptyString([
+            clip.display_name,
+            clip.user_display_name,
+            clip.owner_display_name,
+            clip.creator_display_name,
+            clip.author_display_name,
+            ...profiles.map(profile => pickFirstNonEmptyString([
+                profile?.display_name,
+                profile?.name
+            ]))
+        ]);
+
+        return {
+            owner_user_id: ownerUserId,
+            owner_handle: ownerHandle,
+            owner_display_name: ownerDisplayName,
+            is_owned_by_current_user: idSet.size > 0 && !!ownerUserId && idSet.has(ownerUserId) ? true : undefined
+        };
+    }
+
     async function fetchPage(cursorValue) {
         const res = await Promise.race([
             api.runtime.sendMessage({
@@ -305,31 +434,47 @@
                 keepGoing = false;
             }
             
-            let foundKnownSong = false;
+            let shouldStopAfterPage = false;
 
             for (const clip of clips) {
                 if (isPublicOnly && !clip.is_public) {
                     continue;
                 }
 
-                if (checkNewOnly && knownIds.has(clip.id)) {
-                    log(`✅ Found known song. ${allSongs.length} new song(s) found.`);
-                    foundKnownSong = true;
-                    break;
+                const ownership = extractOwnershipMetadataFromClip(clip, userId, userIds);
+                const isExistingSong = knownIds.has(clip.id);
+
+                if (isExistingSong && metadataRefreshIds.has(clip.id)) {
+                    metadataRefreshIds.delete(clip.id);
                 }
 
                 allSongs.push({
                     id: clip.id,
                     title: clip.title || `Untitled_${clip.id}`,
-                    audio_url: clip.audio_url || null,
+                    audio_url: extractAudioUrlFromClip(clip),
+                    video_url: extractVideoUrlFromClip(clip),
                     image_url: extractImageUrlFromClip(clip),
                     lyrics: extractLyricsFromClip(clip),
-                    is_public: clip.is_public,
+                    is_public: clip.is_public !== false,
                     created_at: clip.created_at,
                     is_liked: clip.is_liked || false,
                     is_stem: isStemClip(clip),
-                    upvote_count: clip.upvote_count || 0
+                    upvote_count: clip.upvote_count || 0,
+                    ...ownership
                 });
+
+                if (checkNewOnly && isExistingSong) {
+                    if (metadataRefreshIds.size === 0) {
+                        if (metadataRefreshTargetCount > 0) {
+                            const newSongCount = allSongs.reduce((count, song) => count + (knownIds.has(song.id) ? 0 : 1), 0);
+                            log(`✅ Refreshed metadata for ${metadataRefreshTargetCount} known song(s). Found ${newSongCount} new song(s).`);
+                        } else {
+                            log(`✅ Found first existing song. ${Math.max(allSongs.length - 1, 0)} new song(s) found.`);
+                        }
+                        shouldStopAfterPage = true;
+                        break;
+                    }
+                }
             }
 
             // Send incremental update after each page
@@ -341,7 +486,7 @@
                 checkNewOnly: checkNewOnly
             });
 
-            if (foundKnownSong) {
+            if (shouldStopAfterPage) {
                 keepGoing = false;
                 break;
             }

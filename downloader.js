@@ -11,7 +11,6 @@
     let currentPlayingSongId = null;
     let cachedSongIds = new Set();
     let currentBlobUrl = null;
-    let isCachingAll = false;
     let stopCachingRequested = false;
     const SONG_RENDER_BATCH_SIZE = 40;
     let sortedFilteredSongs = [];
@@ -22,9 +21,20 @@
     const SYNC_META_KEY = 'sunoSyncMeta';
     const PLAYLISTS_KEY = 'sunoPlaylists';
     const SELECTED_PLAYLIST_KEY = 'sunoSelectedPlaylist';
+    const TEXT_CANDIDATE_KEYS = ['lyrics', 'display_lyrics', 'full_lyrics', 'raw_lyrics', 'prompt', 'text', 'content', 'value'];
+    const URL_CANDIDATE_KEYS = ['url', 'src', 'image_url', 'image', 'cover_url', 'cover_image_url', 'thumbnail_url', 'artwork_url'];
+    const SONG_CLIP_FIELD_PATHS = {
+        audio: ['audio_url', 'stream_audio_url', 'song_path'],
+        video: ['video_url', 'video_cdn_url', 'mp4_url', 'metadata.video_url'],
+        image: ['image_url', 'image', 'image_large_url', 'cover_url', 'cover_image_url', 'thumbnail_url', 'artwork_url', 'metadata.image_url', 'metadata.cover_image_url', 'meta.image_url'],
+        lyrics: ['lyrics', 'display_lyrics', 'full_lyrics', 'raw_lyrics', 'prompt', 'metadata.lyrics', 'metadata.prompt', 'meta.lyrics'],
+        ownerUserId: ['user_id', 'owner_user_id', 'user.id', 'user.user_id']
+    };
     let currentFetchMode = 'idle';
+    let currentMetadataRefreshRequested = false;
     let syncMeta = createDefaultSyncMeta();
     let playlistSongs = null; // Active playlist songs when a playlist is selected, else null
+    let sunoUserId = null; // Set from the first own song when My Songs are loaded
 
     function createDefaultSyncMeta() {
         return {
@@ -55,9 +65,48 @@
             num_total_results: playlist?.num_total_results ?? null,
             is_public: playlist?.is_public,
             is_owned: playlist?.is_owned,
+            is_owned_by_current_user: playlist?.is_owned_by_current_user,
             image_url: playlist?.image_url || null,
-            description: playlist?.description || ''
+            description: playlist?.description || '',
+            owner_user_id: playlist?.owner_user_id || playlist?.user_id || playlist?.creator_user_id || playlist?.author_user_id || null,
+            owner_handle: playlist?.owner_handle || playlist?.user_handle || playlist?.creator_handle || playlist?.author_handle || null,
+            owner_display_name: playlist?.owner_display_name || playlist?.user_display_name || playlist?.creator_display_name || playlist?.author_display_name || playlist?.name || null
         };
+    }
+
+    function isPlaylistOtherArtist(playlist) {
+        return playlist?.is_owned_by_current_user === false || playlist?.is_owned === false;
+    }
+
+    function mergePlaylistsById(...collections) {
+        const merged = new Map();
+
+        collections.forEach(collection => {
+            if (!Array.isArray(collection)) return;
+            collection.forEach(playlist => {
+                const normalized = normalizePlaylistMetadata(playlist);
+                if (!normalized.id) return;
+
+                const existing = merged.get(normalized.id);
+                merged.set(normalized.id, existing ? {
+                    ...existing,
+                    ...normalized,
+                    is_owned: normalized.is_owned ?? existing.is_owned,
+                    is_owned_by_current_user: normalized.is_owned_by_current_user ?? existing.is_owned_by_current_user
+                } : normalized);
+            });
+        });
+
+        return Array.from(merged.values()).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    }
+
+    async function savePlaylistToDropdown(playlist, preferredValue = '') {
+        if (!playlist?.id) return;
+
+        const cachedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
+        const mergedPlaylists = mergePlaylistsById(Array.isArray(cachedPlaylists) ? cachedPlaylists : [], [playlist]);
+        await savePreferenceToIDB(PLAYLISTS_KEY, mergedPlaylists);
+        renderPlaylistOptions(mergedPlaylists, preferredValue || playlist.id);
     }
 
     async function clearPlaylistCache() {
@@ -84,8 +133,11 @@
             const option = document.createElement('option');
             option.value = pl.id || '';
             const count = pl.song_count ?? pl.num_total_results;
+            const ownerName = pl.owner_display_name || pl.owner_handle || 'Other artist';
+            const suffix = isPlaylistOtherArtist(pl) ? ` (by ${ownerName})` : '';
             option.textContent = (pl.name || 'Unnamed Playlist') +
-                (count != null ? ` (${count})` : '');
+                (count != null ? ` (${count})` : '') +
+                suffix;
             playlistFilter.appendChild(option);
         });
 
@@ -106,16 +158,7 @@
         }
 
         if (value && typeof value === 'object') {
-            const nestedCandidates = [
-                value.lyrics,
-                value.display_lyrics,
-                value.full_lyrics,
-                value.raw_lyrics,
-                value.prompt,
-                value.text,
-                value.content,
-                value.value
-            ];
+            const nestedCandidates = TEXT_CANDIDATE_KEYS.map(key => value[key]);
             for (const candidate of nestedCandidates) {
                 const text = extractText(candidate);
                 if (text) return text;
@@ -139,16 +182,7 @@
         }
 
         if (value && typeof value === 'object') {
-            const nestedCandidates = [
-                value.url,
-                value.src,
-                value.image_url,
-                value.image,
-                value.cover_url,
-                value.cover_image_url,
-                value.thumbnail_url,
-                value.artwork_url
-            ];
+            const nestedCandidates = URL_CANDIDATE_KEYS.map(key => value[key]);
             for (const candidate of nestedCandidates) {
                 const url = extractUrl(candidate);
                 if (url) return url;
@@ -160,26 +194,114 @@
 
     function isStemClip(clip) {
         if (!clip || typeof clip !== 'object') return false;
-        if (clip.is_stem === true || clip.stem_of || clip.stem_of_id) return true;
 
-        const directStrings = [
-            clip.type,
-            clip.clip_type,
-            clip.generation_type,
-            clip.generation_mode,
-            clip.source,
-            clip.variant
-        ];
+        const meta = clip.metadata || clip.meta || {};
 
-        for (const value of directStrings) {
-            if (typeof value === 'string' && value.toLowerCase().includes('stem')) return true;
+        // Primary signal: task explicitly set to gen_stem
+        if (meta.task === 'gen_stem') return true;
+
+        // Secondary signal: stem_from_id present (UUID of the source clip)
+        if (typeof meta.stem_from_id === 'string' && meta.stem_from_id.trim().length > 0) return true;
+
+        // Tertiary signal: Suno's own badge system marks this as a stem
+        const badges = Array.isArray(meta.secondary_badges) ? meta.secondary_badges
+            : Array.isArray(clip.secondary_badges) ? clip.secondary_badges : [];
+        if (badges.some(b => b && b.icon_key === 'stem')) return true;
+
+        return false;
+    }
+
+
+    function isSongFromOtherArtist(song) {
+        if (song?.is_owned_by_current_user === false) return true;
+        if (sunoUserId && song?.owner_user_id && song.owner_user_id !== sunoUserId) return true;
+        return false;
+    }
+
+    function initSunoUserId() {
+        if (!sunoUserId && allSongs.length > 0) {
+            sunoUserId = allSongs[0].owner_user_id || null;
+        }
+    }
+
+    function splitSongsByDownloadEligibility(songs) {
+        const downloadable = [];
+        const blocked = [];
+        songs.forEach(song => {
+            if (isSongFromOtherArtist(song)) blocked.push(song);
+            else downloadable.push(song);
+        });
+        return { downloadable, blocked };
+    }
+
+    function shouldShowOtherArtistBadge(song) {
+        if (!playlistFilter || !playlistFilter.value) return false;
+        return isSongFromOtherArtist(song);
+    }
+
+    function getNestedValue(source, path) {
+        return path.split('.').reduce((current, key) => current?.[key], source);
+    }
+
+    function extractFirstMatchingValue(source, paths, extractor) {
+        for (const path of paths) {
+            const value = getNestedValue(source, path);
+            const extracted = extractor(value);
+            if (extracted !== null && extracted !== undefined) {
+                return extracted;
+            }
         }
 
-        if (Array.isArray(clip.tags) && clip.tags.some(tag => typeof tag === 'string' && tag.toLowerCase().includes('stem'))) {
-            return true;
-        }
+        return null;
+    }
 
-        return typeof clip.title === 'string' && /\bstem(s)?\b/i.test(clip.title);
+    function extractTextFromPaths(source, paths) {
+        return extractFirstMatchingValue(source, paths, extractText);
+    }
+
+    function extractUrlFromPaths(source, paths) {
+        return extractFirstMatchingValue(source, paths, extractUrl);
+    }
+
+    function getSongThumbnailUrl(song) {
+        return song?.image_url || song?.thumbnail_url || song?.cover_image_url || song?.artwork_url || null;
+    }
+
+    function areSongDetailsEqual(leftSong, rightSong) {
+        return (
+            (leftSong?.title || '') === (rightSong?.title || '') &&
+            (leftSong?.lyrics || '') === (rightSong?.lyrics || '') &&
+            (leftSong?.audio_url || '') === (rightSong?.audio_url || '') &&
+            (leftSong?.video_url || '') === (rightSong?.video_url || '') &&
+            (leftSong?.image_url || '') === (rightSong?.image_url || '') &&
+            (leftSong?.owner_user_id || '') === (rightSong?.owner_user_id || '') &&
+            (leftSong?.owner_handle || '') === (rightSong?.owner_handle || '') &&
+            (leftSong?.owner_display_name || '') === (rightSong?.owner_display_name || '') &&
+            leftSong?.is_public === rightSong?.is_public &&
+            leftSong?.is_liked === rightSong?.is_liked &&
+            leftSong?.is_stem === rightSong?.is_stem &&
+            (leftSong?.upvote_count ?? null) === (rightSong?.upvote_count ?? null) &&
+            (leftSong?.is_owned_by_current_user ?? null) === (rightSong?.is_owned_by_current_user ?? null)
+        );
+    }
+
+    function mergeSongMetadata(existingSong, freshSong) {
+        return {
+            ...existingSong,
+            title: freshSong.title ?? existingSong.title,
+            audio_url: freshSong.audio_url || existingSong.audio_url,
+            video_url: freshSong.video_url || existingSong.video_url,
+            image_url: freshSong.image_url || existingSong.image_url,
+            lyrics: freshSong.lyrics ?? existingSong.lyrics,
+            is_public: typeof freshSong.is_public === 'boolean' ? freshSong.is_public : existingSong.is_public,
+            is_liked: typeof freshSong.is_liked === 'boolean' ? freshSong.is_liked : (existingSong.is_liked ?? false),
+            is_stem: freshSong.is_stem ?? existingSong.is_stem,
+            upvote_count: freshSong.upvote_count ?? existingSong.upvote_count,
+            owner_user_id: freshSong.owner_user_id || existingSong.owner_user_id,
+            owner_handle: freshSong.owner_handle || existingSong.owner_handle,
+            owner_display_name: freshSong.owner_display_name || existingSong.owner_display_name,
+            is_owned_by_current_user: freshSong.is_owned_by_current_user ?? existingSong.is_owned_by_current_user
+        };
     }
 
     function normalizeSongClip(rawClip) {
@@ -187,34 +309,19 @@
         return {
             id: clip.id,
             title: clip.title || `Untitled_${clip.id || 'song'}`,
-            audio_url: clip.audio_url || clip.stream_audio_url || clip.song_path || null,
-            image_url: extractUrl(
-                clip.image_url ||
-                clip.image ||
-                clip.image_large_url ||
-                clip.cover_url ||
-                clip.cover_image_url ||
-                clip.thumbnail_url ||
-                clip.artwork_url ||
-                clip.metadata?.image_url ||
-                clip.metadata?.cover_image_url ||
-                clip.meta?.image_url
-            ),
-            lyrics: extractText(
-                clip.lyrics ||
-                clip.display_lyrics ||
-                clip.full_lyrics ||
-                clip.raw_lyrics ||
-                clip.prompt ||
-                clip.metadata?.lyrics ||
-                clip.metadata?.prompt ||
-                clip.meta?.lyrics
-            ),
+            audio_url: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.audio, value => value || null),
+            video_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.video),
+            image_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.image),
+            lyrics: extractTextFromPaths(clip, SONG_CLIP_FIELD_PATHS.lyrics),
             is_public: clip.is_public !== false,
             created_at: clip.created_at || clip.createdAt || rawClip?.created_at || null,
             is_liked: clip.is_liked || false,
             is_stem: isStemClip(clip),
-            upvote_count: clip.upvote_count || 0
+            upvote_count: clip.upvote_count || 0,
+            owner_user_id: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null),
+            owner_handle: extractFirstMatchingValue(clip, ['handle', 'user_handle', 'owner_handle', 'creator_handle', 'author_handle', 'username'], value => (typeof value === 'string' ? value.trim() : null)),
+            owner_display_name: extractFirstMatchingValue(clip, ['display_name', 'user_display_name', 'owner_display_name', 'creator_display_name', 'author_display_name', 'name'], value => (typeof value === 'string' ? value.trim() : null)),
+            is_owned_by_current_user: clip.is_owned_by_current_user
         };
     }
 
@@ -253,12 +360,70 @@
     const playerTime = document.getElementById('player-time');
     let progressHandle = null;
 
+    // Player tab references
+    const playerTabVideo = document.getElementById('player-tab-video');
+    const playerTabCoverImage = document.getElementById('player-tab-cover-image');
+    const playerTabTitle = document.getElementById('player-tab-title');
+    const playerTabLyrics = document.getElementById('player-tab-lyrics');
+    const playerTabViewCover = document.getElementById('player-tab-view-cover');
+    const playerTabViewLyrics = document.getElementById('player-tab-view-lyrics');
+    const playerTabSubtabCover = document.getElementById('player-tab-subtab-cover');
+    const playerTabSubtabLyrics = document.getElementById('player-tab-subtab-lyrics');
+    const playerTabNoSong = document.getElementById('player-tab-no-song');
+    const playerTabSong = document.getElementById('player-tab-song');
+    const playerTabPlayPause = document.getElementById('player-tab-play-pause');
+    const playerTabPrev = document.getElementById('player-tab-prev');
+    const playerTabNext = document.getElementById('player-tab-next');
+    const playerTabProgressBar = document.getElementById('player-tab-progress-bar');
+    const playerTabProgressContainer = document.getElementById('player-tab-progress-container');
+    const playerTabTime = document.getElementById('player-tab-time');
+    let playerTabProgressHandle = null;
+    let playerTabMediaRequestId = 0;
+    let playerTabCurrentView = 'cover';
+
+    function setPlayerTabView(view) {
+        const nextView = view === 'lyrics' ? 'lyrics' : 'cover';
+        playerTabCurrentView = nextView;
+
+        if (playerTabViewCover) {
+            playerTabViewCover.style.display = nextView === 'cover' ? 'flex' : 'none';
+        }
+        if (playerTabViewLyrics) {
+            playerTabViewLyrics.style.display = nextView === 'lyrics' ? 'flex' : 'none';
+        }
+
+        if (playerTabSubtabCover) {
+            playerTabSubtabCover.classList.toggle('active', nextView === 'cover');
+        }
+        if (playerTabSubtabLyrics) {
+            playerTabSubtabLyrics.classList.toggle('active', nextView === 'lyrics');
+        }
+    }
+
+    if (playerTabSubtabCover) {
+        playerTabSubtabCover.addEventListener('click', () => setPlayerTabView('cover'));
+    }
+    if (playerTabSubtabLyrics) {
+        playerTabSubtabLyrics.addEventListener('click', () => setPlayerTabView('lyrics'));
+    }
+    setPlayerTabView(playerTabCurrentView);
+
     if (progressContainer) {
         progressHandle = progressContainer.querySelector('#player-progress-handle');
         if (!progressHandle) {
             progressHandle = document.createElement('div');
             progressHandle.id = 'player-progress-handle';
             progressContainer.appendChild(progressHandle);
+        }
+    }
+
+    if (playerTabProgressContainer) {
+        playerTabProgressHandle = playerTabProgressContainer.querySelector('#player-tab-progress-handle');
+        if (!playerTabProgressHandle) {
+            playerTabProgressHandle = document.createElement('div');
+            playerTabProgressHandle.id = 'player-tab-progress-handle';
+            playerTabProgressHandle.className = 'player-tab-progress-handle';
+            playerTabProgressContainer.appendChild(playerTabProgressHandle);
         }
     }
 
@@ -274,7 +439,7 @@
     }
 
     function updatePlayerProgressUi() {
-        if (!audioElement || !progressBar || !playerTime) {
+        if (!audioElement) {
             return;
         }
 
@@ -289,11 +454,56 @@
             ? Math.max(0, Math.min(100, (current / duration) * 100))
             : 0;
 
-        progressBar.style.width = `${percent}%`;
+        if (progressBar) {
+            progressBar.style.width = `${percent}%`;
+        }
         if (progressHandle) {
             progressHandle.style.left = `${percent}%`;
         }
-        playerTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
+        if (playerTime) {
+            playerTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
+        }
+
+        // Sync player tab progress
+        if (playerTabProgressBar) {
+            playerTabProgressBar.style.width = `${percent}%`;
+        }
+        if (playerTabProgressHandle) {
+            playerTabProgressHandle.style.left = `${percent}%`;
+        }
+        if (playerTabTime) {
+            playerTabTime.textContent = `${formatPlayerTime(current)} / ${formatPlayerTime(duration)}`;
+        }
+    }
+
+    function seekAudioFromProgressContainer(container, bar, handle, event) {
+        if (!audioElement || !container) {
+            return;
+        }
+
+        if (!Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
+            return;
+        }
+
+        const rect = container.getBoundingClientRect();
+        if (rect.width <= 0) {
+            return;
+        }
+
+        const rawOffset = event.clientX - rect.left;
+        const clampedOffset = Math.max(0, Math.min(rect.width, rawOffset));
+        const seekRatio = clampedOffset / rect.width;
+        const seekPercent = seekRatio * 100;
+
+        if (bar) {
+            bar.style.width = `${seekPercent}%`;
+        }
+        if (handle) {
+            handle.style.left = `${seekPercent}%`;
+        }
+
+        audioElement.currentTime = seekRatio * audioElement.duration;
+        updatePlayerProgressUi();
     }
 
     async function togglePlay(song) {
@@ -314,6 +524,15 @@
 
             currentPlayingSongId = song.id;
 
+            // Reset progress immediately so next/previous track changes are reflected
+            // before metadata/timeupdate events arrive for the new source.
+            if (audioElement) {
+                audioElement.pause();
+                audioElement.removeAttribute('src');
+                audioElement.load();
+                updatePlayerProgressUi();
+            }
+
             // Use cached audio if available, otherwise stream online
             const cachedBlob = await getAudioBlobFromIDB(song.id);
             if (cachedBlob) {
@@ -323,18 +542,36 @@
                 audioElement.src = song.audio_url;
             }
 
+            audioElement.currentTime = 0;
+            updatePlayerProgressUi();
+
             // Revoke the previous blob URL now that the audio element has moved to the new source
             if (prevBlobUrl) {
                 URL.revokeObjectURL(prevBlobUrl);
             }
 
+            audioElement.load();
             audioElement.play();
             miniPlayer.style.display = 'block';
             playerTitle.textContent = song.title || 'Untitled';
             playPauseBtn.textContent = '■';
 
+            updatePlayerTabUi(song);
             refreshVisibleSongPlaybackState();
         }
+    }
+
+    function getPreviousSong() {
+        if (!Array.isArray(sortedFilteredSongs) || sortedFilteredSongs.length === 0) {
+            return null;
+        }
+
+        const currentIndex = sortedFilteredSongs.findIndex(song => song.id === currentPlayingSongId);
+        if (currentIndex <= 0) {
+            return null;
+        }
+
+        return sortedFilteredSongs[currentIndex - 1] || null;
     }
 
     function getNextSongForPlayback() {
@@ -350,12 +587,172 @@
         return sortedFilteredSongs[currentIndex + 1] || null;
     }
 
+    function updatePlayerTabUi(song) {
+        if (!playerTabSong || !playerTabNoSong) return;
+
+        const isLikelyVideoUrl = (url) => {
+            if (typeof url !== 'string') return false;
+            const cleaned = url.split('?')[0].toLowerCase();
+            return cleaned.endsWith('.mp4') || cleaned.endsWith('.webm') || cleaned.endsWith('.mov') || cleaned.endsWith('.m4v');
+        };
+
+        const deriveProcessedVideoUrl = (...values) => {
+            for (const value of values) {
+                if (typeof value !== 'string' || !value) continue;
+                const match = value.match(/video_gen_([0-9a-f-]{36})/i);
+                if (match?.[1]) {
+                    return `https://cdn1.suno.ai/video_gen_${match[1]}_processed_video.mp4`;
+                }
+            }
+            return null;
+        };
+
+        const hideVideo = () => {
+            if (!playerTabVideo) return;
+            playerTabVideo.pause();
+            playerTabVideo.removeAttribute('src');
+            playerTabVideo.load();
+            playerTabVideo.style.display = 'none';
+            playerTabVideo.onerror = null;
+            playerTabVideo.onloadeddata = null;
+        };
+
+        const hideCoverImage = () => {
+            if (!playerTabCoverImage) return;
+            playerTabCoverImage.style.display = 'none';
+            playerTabCoverImage.removeAttribute('src');
+        };
+
+        const showCoverImage = (src) => {
+            if (!playerTabCoverImage) return;
+            if (src) {
+                playerTabCoverImage.src = src;
+                playerTabCoverImage.style.display = 'block';
+            } else {
+                hideCoverImage();
+            }
+        };
+
+        const showNoMedia = () => {
+            hideVideo();
+            showCoverImage(thumbnailUrl);
+        };
+
+        const showVideo = (src, posterUrl = null) => {
+            hideCoverImage();
+            playerTabVideo.muted = true;
+            playerTabVideo.loop = true;
+            playerTabVideo.playsInline = true;
+            playerTabVideo.poster = posterUrl || '';
+            playerTabVideo.src = src;
+            playerTabVideo.style.display = 'block';
+            playerTabVideo.onerror = () => {
+                showNoMedia();
+            };
+            playerTabVideo.onloadeddata = () => {
+                const playPromise = playerTabVideo.play();
+                if (playPromise && typeof playPromise.catch === 'function') {
+                    playPromise.catch(() => {
+                        // Keep video visible even if autoplay is blocked.
+                    });
+                }
+            };
+            const initialPlayPromise = playerTabVideo.play();
+            if (initialPlayPromise && typeof initialPlayPromise.catch === 'function') {
+                initialPlayPromise.catch(() => {
+                    // loadeddata may still trigger playback.
+                });
+            }
+        };
+
+        if (!song) {
+            playerTabMediaRequestId += 1;
+            playerTabNoSong.style.display = 'flex';
+            playerTabSong.style.display = 'none';
+            hideVideo();
+            if (playerTabCoverImage) playerTabCoverImage.style.display = 'none';
+            return;
+        }
+
+        const requestId = ++playerTabMediaRequestId;
+        const isStillCurrentSong = () => requestId === playerTabMediaRequestId && currentPlayingSongId === song.id;
+
+        playerTabNoSong.style.display = 'none';
+        playerTabSong.style.display = 'flex';
+        setPlayerTabView(playerTabCurrentView);
+
+        if (playerTabTitle) {
+            playerTabTitle.textContent = song.title || 'Untitled';
+        }
+
+        if (playerTabLyrics) {
+            const lyrics = song.lyrics || '';
+            playerTabLyrics.textContent = lyrics || 'No lyrics available.';
+        }
+
+        // Update cover media: video only
+        const thumbnailUrl = song.image_url || song.thumbnail_url || song.cover_image_url || song.artwork_url || null;
+        const derivedProcessedVideoUrl = deriveProcessedVideoUrl(
+            song.video_url,
+            song.image_url,
+            song.thumbnail_url,
+            song.cover_image_url,
+            song.artwork_url
+        );
+        const videoUrl =
+            derivedProcessedVideoUrl ||
+            song.video_url ||
+            song.video_cdn_url ||
+            song.mp4_url ||
+            song.cover_video_url ||
+            (isLikelyVideoUrl(song.image_url) ? song.image_url : null) ||
+            (isLikelyVideoUrl(song.thumbnail_url) ? song.thumbnail_url : null) ||
+            (isLikelyVideoUrl(song.cover_image_url) ? song.cover_image_url : null) ||
+            null;
+
+        if (playerTabVideo) {
+            if (videoUrl) {
+                showVideo(videoUrl, thumbnailUrl);
+            } else {
+                showNoMedia();
+            }
+
+            // Resolve preferred cover video from the Suno song page.
+            // This can replace metadata URLs that point to the wrong clip.
+            if (song.id) {
+                void (async () => {
+                    try {
+                        const response = await api.runtime.sendMessage({
+                            action: 'resolve_song_cover_video',
+                            songId: song.id
+                        });
+
+                        if (!isStillCurrentSong()) {
+                            return;
+                        }
+
+                        const resolvedUrl = (response?.ok && typeof response.videoUrl === 'string')
+                            ? response.videoUrl
+                            : null;
+
+                        if (resolvedUrl && (!videoUrl || resolvedUrl !== videoUrl)) {
+                            showVideo(resolvedUrl, thumbnailUrl);
+                        }
+                    } catch (e) {
+                        // Keep existing image/fallback display if resolving cover video fails.
+                    }
+                })();
+            }
+        }
+    }
+
     async function playNextSongAutomatically() {
         const nextSong = getNextSongForPlayback();
         if (!nextSong) {
             currentPlayingSongId = null;
             playPauseBtn.textContent = '▶';
             playerTitle.textContent = 'Queue finished';
+            updatePlayerTabUi(null);
             refreshVisibleSongPlaybackState();
             return;
         }
@@ -376,12 +773,50 @@
         });
     }
 
+    if (playerTabPlayPause) {
+        playerTabPlayPause.addEventListener('click', () => {
+            if (!audioElement) return;
+            if (audioElement.paused) {
+                audioElement.play();
+            } else {
+                audioElement.pause();
+            }
+            refreshVisibleSongPlaybackState();
+        });
+    }
+
+    if (playerTabPrev) {
+        playerTabPrev.addEventListener('click', () => {
+            const prevSong = getPreviousSong();
+            if (prevSong) {
+                togglePlay(prevSong);
+            }
+        });
+    }
+
+    if (playerTabNext) {
+        playerTabNext.addEventListener('click', () => {
+            const nextSong = getNextSongForPlayback();
+            if (nextSong) {
+                togglePlay(nextSong);
+            }
+        });
+    }
+
     if (audioElement) {
         audioElement.addEventListener('timeupdate', () => {
             updatePlayerProgressUi();
         });
 
         audioElement.addEventListener('loadedmetadata', () => {
+            updatePlayerProgressUi();
+        });
+
+        audioElement.addEventListener('durationchange', () => {
+            updatePlayerProgressUi();
+        });
+
+        audioElement.addEventListener('canplay', () => {
             updatePlayerProgressUi();
         });
 
@@ -404,340 +839,43 @@
 
     if (audioElement && progressContainer) {
         progressContainer.addEventListener('click', (event) => {
-            if (!Number.isFinite(audioElement.duration) || audioElement.duration <= 0) {
-                return;
-            }
+            seekAudioFromProgressContainer(progressContainer, progressBar, progressHandle, event);
+        });
+    }
 
-            const rect = progressContainer.getBoundingClientRect();
-            if (rect.width <= 0) {
-                return;
-            }
-
-            const rawOffset = event.clientX - rect.left;
-            const clampedOffset = Math.max(0, Math.min(rect.width, rawOffset));
-            const seekRatio = clampedOffset / rect.width;
-            // Move the visual indicator immediately, even before media events fire.
-            const seekPercent = seekRatio * 100;
-            progressBar.style.width = `${seekPercent}%`;
-            if (progressHandle) {
-                progressHandle.style.left = `${seekPercent}%`;
-            }
-            audioElement.currentTime = seekRatio * audioElement.duration;
-            updatePlayerProgressUi();
+    if (audioElement && playerTabProgressContainer) {
+        playerTabProgressContainer.addEventListener('click', (event) => {
+            seekAudioFromProgressContainer(playerTabProgressContainer, playerTabProgressBar, playerTabProgressHandle, event);
         });
     }
 
     // ========================================================================
-    // IndexedDB Helper Functions
+    // IndexedDB Helpers
     // ========================================================================
-    
-    const IDB_NAME = 'BetterSunoicationsDB';
-    const IDB_VERSION = 3;
-    let dbInstance = null;
-    const textEncoder = new TextEncoder();
 
-    async function getDB() {
-        if (dbInstance) return dbInstance;
-        
-        return new Promise((resolve, reject) => {
-            const request = indexedDB.open(IDB_NAME, IDB_VERSION);
-            
-            request.onerror = () => reject(request.error);
-            request.onsuccess = () => {
-                dbInstance = request.result;
-                resolve(dbInstance);
-            };
-            
-            request.onupgradeneeded = (event) => {
-                const db = event.target.result;
-                if (!db.objectStoreNames.contains('songsList')) {
-                    db.createObjectStore('songsList', { keyPath: 'id' });
-                }
-                if (!db.objectStoreNames.contains('userPreferences')) {
-                    db.createObjectStore('userPreferences', { keyPath: 'key' });
-                }
-                if (!db.objectStoreNames.contains('audioCache')) {
-                    db.createObjectStore('audioCache', { keyPath: 'songId' });
-                }
-                if (!db.objectStoreNames.contains('imageCache')) {
-                    db.createObjectStore('imageCache', { keyPath: 'songId' });
-                }
-            };
-        });
+    const idbApi = window.BetterSunoIDB;
+
+    if (!idbApi) {
+        console.error('[Downloader] BetterSunoIDB is unavailable');
+        return;
     }
 
-    async function saveSongsToIDB(songs) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('songsList', 'readwrite');
-            const store = tx.objectStore('songsList');
-            store.clear();
-            
-            songs.forEach(song => {
-                store.add({ ...song, timestamp: Date.now() });
-            });
-            
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to save songs:', e);
-        }
-    }
-
-    async function loadSongsFromIDB() {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('songsList', 'readonly');
-            const store = tx.objectStore('songsList');
-            const request = store.getAll();
-            
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result || []);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to load songs:', e);
-            return [];
-        }
-    }
-
-    async function savePreferenceToIDB(key, value) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('userPreferences', 'readwrite');
-            const store = tx.objectStore('userPreferences');
-            store.put({
-                key,
-                value,
-                timestamp: Date.now()
-            });
-            
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to save preference:', e);
-        }
-    }
-
-    async function loadPreferenceFromIDB(key) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('userPreferences', 'readonly');
-            const store = tx.objectStore('userPreferences');
-            const request = store.get(key);
-            
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result?.value || null);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to load preference:', e);
-            return null;
-        }
-    }
-
-    async function deletePreferenceFromIDB(key) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('userPreferences', 'readwrite');
-            const store = tx.objectStore('userPreferences');
-            store.delete(key);
-            
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to delete preference:', e);
-        }
-    }
-
-    async function saveAudioBlobToIDB(songId, blob) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('audioCache', 'readwrite');
-            const store = tx.objectStore('audioCache');
-            store.put({ songId, blob, timestamp: Date.now() });
-            
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to save audio blob:', e);
-        }
-    }
-
-    async function getAudioBlobFromIDB(songId) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('audioCache', 'readonly');
-            const store = tx.objectStore('audioCache');
-            const request = store.get(songId);
-            
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result?.blob || null);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to get audio blob:', e);
-            return null;
-        }
-    }
-
-    async function getAllCachedSongIdsFromIDB() {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('audioCache', 'readonly');
-            const store = tx.objectStore('audioCache');
-            const request = store.getAllKeys();
-            
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result || []);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to get cached song IDs:', e);
-            return [];
-        }
-    }
-
-    async function deleteAudioBlobFromIDB(songId) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('audioCache', 'readwrite');
-            const store = tx.objectStore('audioCache');
-            store.delete(songId);
-
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to delete audio blob:', e);
-            throw e;
-        }
-    }
-
-    async function saveImageBlobToIDB(songId, blob) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('imageCache', 'readwrite');
-            const store = tx.objectStore('imageCache');
-            store.put({ songId, blob, timestamp: Date.now() });
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            console.error('[IDB] Failed to save image blob:', e);
-        }
-    }
-
-    async function getImageBlobFromIDB(songId) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('imageCache', 'readonly');
-            const store = tx.objectStore('imageCache');
-            const request = store.get(songId);
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result?.blob || null);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            return null;
-        }
-    }
-
-    async function deleteImageBlobFromIDB(songId) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction('imageCache', 'readwrite');
-            const store = tx.objectStore('imageCache');
-            store.delete(songId);
-            return new Promise((resolve, reject) => {
-                tx.oncomplete = () => resolve();
-                tx.onerror = () => reject(tx.error);
-            });
-        } catch (e) {
-            // ignore
-        }
-    }
-
-    async function getAllRecordsFromStore(storeName) {
-        try {
-            const db = await getDB();
-            const tx = db.transaction(storeName, 'readonly');
-            const store = tx.objectStore(storeName);
-            const request = store.getAll();
-
-            return new Promise((resolve, reject) => {
-                request.onsuccess = () => resolve(request.result || []);
-                request.onerror = () => reject(request.error);
-            });
-        } catch (e) {
-            console.error(`[IDB] Failed to read store ${storeName}:`, e);
-            return [];
-        }
-    }
-
-    function estimateValueSize(value, visited = new WeakSet()) {
-        if (value == null) {
-            return 0;
-        }
-
-        if (typeof Blob !== 'undefined' && value instanceof Blob) {
-            return value.size;
-        }
-
-        if (typeof value === 'string') {
-            return textEncoder.encode(value).length;
-        }
-
-        if (typeof value === 'number') {
-            return 8;
-        }
-
-        if (typeof value === 'boolean') {
-            return 4;
-        }
-
-        if (value instanceof Date) {
-            return 8;
-        }
-
-        if (value instanceof ArrayBuffer) {
-            return value.byteLength;
-        }
-
-        if (ArrayBuffer.isView(value)) {
-            return value.byteLength;
-        }
-
-        if (Array.isArray(value)) {
-            return value.reduce((total, item) => total + estimateValueSize(item, visited), 0);
-        }
-
-        if (typeof value === 'object') {
-            if (visited.has(value)) {
-                return 0;
-            }
-            visited.add(value);
-
-            let total = 0;
-            for (const [key, nestedValue] of Object.entries(value)) {
-                total += textEncoder.encode(key).length;
-                total += estimateValueSize(nestedValue, visited);
-            }
-            return total;
-        }
-
-        return 0;
-    }
+    const {
+        deleteAudioBlobFromIDB,
+        deleteImageBlobFromIDB,
+        deletePreferenceFromIDB,
+        estimateDbUsageBytes,
+        getAllCachedSongIdsFromIDB,
+        getAllRecordsFromStore,
+        getAudioBlobFromIDB,
+        getImageBlobFromIDB,
+        loadPreferenceFromIDB,
+        loadSongsFromIDB,
+        saveAudioBlobToIDB,
+        saveImageBlobToIDB,
+        savePreferenceToIDB,
+        saveSongsToIDB
+    } = idbApi;
 
     function formatBytes(bytes) {
         if (!Number.isFinite(bytes) || bytes <= 0) {
@@ -755,17 +893,6 @@
 
         const rounded = value >= 100 || unitIndex === 0 ? Math.round(value) : value.toFixed(1);
         return `${rounded} ${units[unitIndex]}`;
-    }
-
-    async function estimateDbUsageBytes() {
-        const [songs, preferences, audioCache, imageCache] = await Promise.all([
-            getAllRecordsFromStore('songsList'),
-            getAllRecordsFromStore('userPreferences'),
-            getAllRecordsFromStore('audioCache'),
-            getAllRecordsFromStore('imageCache')
-        ]);
-
-        return estimateValueSize(songs) + estimateValueSize(preferences) + estimateValueSize(audioCache) + estimateValueSize(imageCache);
     }
 
     // ========================================================================
@@ -818,7 +945,7 @@
         }
         if (syncNewBtn) {
             syncNewBtn.disabled = active;
-            syncNewBtn.textContent = active && currentFetchMode === 'incremental' ? 'Syncing...' : 'Sync New';
+            syncNewBtn.textContent = active && currentFetchMode === 'incremental' ? 'Refreshing...' : 'Refresh';
         }
     }
 
@@ -882,7 +1009,7 @@
     function setCachingUiState(active) {
         if (cacheAllBtn) {
             cacheAllBtn.disabled = active;
-            cacheAllBtn.textContent = active ? 'Downloading to DB...' : '💾 Download to DB';
+            cacheAllBtn.textContent = active ? 'Saving to DB...' : 'Save to DB';
         }
         if (stopCacheBtn) {
             stopCacheBtn.disabled = false;
@@ -957,6 +1084,8 @@
             return;
         }
 
+        currentMetadataRefreshRequested = false;
+
         if (confirmUser) {
             const proceed = confirm("BetterSuno will reload your full Suno library. This may take a while. Continue?");
             if (!proceed) {
@@ -1011,6 +1140,11 @@
             return;
         }
 
+        const metadataRefreshIds = automatic
+            ? []
+            : allSongs.map(song => song.id).filter(id => typeof id === 'string' && id);
+        currentMetadataRefreshRequested = metadataRefreshIds.length > 0;
+
         currentFetchMode = 'incremental';
         setFetchUiState(true);
         void saveSyncMeta({
@@ -1019,7 +1153,7 @@
             lastError: null
         });
 
-        statusDiv.innerText = automatic ? "Checking for new songs..." : "Syncing new songs...";
+        statusDiv.innerText = automatic ? "Checking for new songs..." : "Refreshing songs and metadata...";
 
         try {
             api.runtime.sendMessage({
@@ -1027,20 +1161,27 @@
                 isPublicOnly: false,
                 maxPages: 0,
                 checkNewOnly: true,
-                knownIds: allSongs.map(song => song.id)
+                knownIds: allSongs.map(song => song.id),
+                metadataRefreshIds
             }, (response) => {
                 if (chrome.runtime.lastError) {
-                    console.debug('[Downloader] Check for new songs error:', chrome.runtime.lastError);
+                    console.debug('[Downloader] Incremental refresh error:', chrome.runtime.lastError);
                 } else if (response && response.error) {
-                    console.log('[Downloader] Check for new songs error:', response.error);
+                    console.log('[Downloader] Incremental refresh error:', response.error);
                 } else {
-                    console.log('[Downloader] Check for new songs request sent');
+                    console.log('[Downloader] Incremental refresh request sent');
                 }
             });
         } catch (e) {
-            console.debug('[Downloader] Could not check for new songs:', e.message);
+            console.debug('[Downloader] Could not refresh:', e.message);
             currentFetchMode = 'idle';
+            currentMetadataRefreshRequested = false;
             setFetchUiState(false);
+            statusDiv.innerText = "Refresh failed: " + e.message;
+            void saveSyncMeta({
+                syncStatus: 'error',
+                lastError: e.message
+            });
         }
     }
 
@@ -1087,6 +1228,7 @@
             
             if (savedSongs && savedSongs.length > 0) {
                 allSongs = savedSongs;
+                initSunoUserId();
                 filteredSongs = [...allSongs];
                 const needsMetadataRefresh = libraryNeedsMetadataRefresh(savedSongs);
 
@@ -1201,28 +1343,63 @@
     function mergeSongs(newSongs) {
         const existingIds = new Set(allSongs.map(s => s.id));
         const addedSongs = newSongs.filter(s => !existingIds.has(s.id));
+        const staleImageSongIds = [];
+        let metadataUpdateCount = 0;
 
-        // Update upvote_count on existing songs from fresh API data
+        // Refresh mutable fields from fresh API data: title, lyrics, cover, liked/public state, counts, etc.
         if (newSongs.length > 0) {
             const newSongsById = new Map(newSongs.map(s => [s.id, s]));
             allSongs = allSongs.map(s => {
                 const fresh = newSongsById.get(s.id);
-                if (fresh && fresh.upvote_count !== undefined) {
-                    return { ...s, upvote_count: fresh.upvote_count };
+                if (!fresh) {
+                    return s;
                 }
-                return s;
+
+                const mergedSong = mergeSongMetadata(s, fresh);
+
+                if (!areSongDetailsEqual(s, mergedSong)) {
+                    metadataUpdateCount += 1;
+                    songItemCache.delete(s.id);
+
+                    if (getSongThumbnailUrl(s) !== getSongThumbnailUrl(mergedSong)) {
+                        mergedSong.image_cache_bust = Date.now();
+                        staleImageSongIds.push(s.id);
+                    }
+
+                    if (currentPlayingSongId === s.id) {
+                        updatePlayerTabUi(mergedSong);
+                        if (playerTitle) {
+                            playerTitle.textContent = mergedSong.title || 'Untitled';
+                        }
+                    }
+                }
+
+                return mergedSong;
             });
         }
 
         if (addedSongs.length > 0) {
             // Add new songs at the beginning
             allSongs = [...addedSongs, ...allSongs];
-            filteredSongs = [...allSongs];
-            applyFilter();
-            saveToStorage();
         }
 
-        return addedSongs.length;
+        if (metadataUpdateCount > 0 || addedSongs.length > 0) {
+            filteredSongs = [...allSongs];
+            applyFilter({
+                preserveScroll: true,
+                minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
+            });
+            void saveToStorage();
+        }
+
+        if (staleImageSongIds.length > 0) {
+            void Promise.all(staleImageSongIds.map(songId => deleteImageBlobFromIDB(songId)));
+        }
+
+        return {
+            addedCount: addedSongs.length,
+            metadataUpdateCount
+        };
     }
 
     async function clearStorage() {
@@ -1253,7 +1430,6 @@
         }
 
         stopCachingRequested = false;
-        isCachingAll = true;
         setCachingUiState(true);
 
         let cached = 0;
@@ -1262,11 +1438,11 @@
 
         for (const song of songsToCache) {
             if (stopCachingRequested) {
-                statusDiv.innerText = `⏹️ Download to DB stopped. ${cached} song(s) saved.`;
+                statusDiv.innerText = `⏹️ Save to DB stopped. ${cached} song(s) saved.`;
                 break;
             }
 
-            statusDiv.innerText = `💾 Downloading to DB ${cached + failed + 1}/${total}: ${song.title || 'Untitled'}...`;
+            statusDiv.innerText = `💾 Saving to DB ${cached + failed + 1}/${total}: ${song.title || 'Untitled'}...`;
 
             try {
                 const response = await fetch(song.audio_url);
@@ -1283,6 +1459,7 @@
                         if (imgResponse.ok) {
                             const imgBlob = await imgResponse.blob();
                             await saveImageBlobToIDB(song.id, imgBlob);
+                            delete song.image_cache_bust;
                         }
                     } catch (imgErr) {
                         // thumbnail failure is non-fatal
@@ -1299,12 +1476,11 @@
             }
         }
 
-        isCachingAll = false;
         setCachingUiState(false);
 
         if (!stopCachingRequested) {
             const totalCached = cachedSongIds.size;
-            statusDiv.innerText = `✅ Download to DB complete! ${cached} new, ${totalCached} total in browser database. ${failed > 0 ? `${failed} failed.` : ''}`.trim();
+            statusDiv.innerText = `✅ Save to DB complete! ${cached} new, ${totalCached} total in browser database. ${failed > 0 ? `${failed} failed.` : ''}`.trim();
         }
 
         renderSongList({
@@ -1447,11 +1623,18 @@
             }
 
             // Sort alphabetically by name
-            allPlaylists.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
             const normalizedPlaylists = allPlaylists.map(normalizePlaylistMetadata);
-            renderPlaylistOptions(normalizedPlaylists, preferredValue);
-            await savePreferenceToIDB(PLAYLISTS_KEY, normalizedPlaylists);
-            statusDiv.innerText = `Loaded ${allPlaylists.length} playlist(s).`;
+            const cachedExternalPlaylists = Array.isArray(cachedPlaylists)
+                ? cachedPlaylists.filter(isPlaylistOtherArtist)
+                : [];
+            const mergedPlaylists = mergePlaylistsById(normalizedPlaylists, cachedExternalPlaylists);
+            renderPlaylistOptions(mergedPlaylists, preferredValue);
+            await savePreferenceToIDB(PLAYLISTS_KEY, mergedPlaylists);
+
+            const externalCount = mergedPlaylists.filter(isPlaylistOtherArtist).length;
+            statusDiv.innerText = externalCount > 0
+                ? `Loaded ${normalizedPlaylists.length} own playlist(s) and kept ${externalCount} other artist playlist(s).`
+                : `Loaded ${normalizedPlaylists.length} playlist(s).`;
         } catch (e) {
             statusDiv.innerText = `Playlist load failed: ${e?.message || String(e)}`;
             console.debug('[Downloader] Failed to load playlists:', e);
@@ -1518,6 +1701,129 @@
     if (playlistFilter) {
         playlistFilter.addEventListener('change', () => {
             void selectPlaylist(playlistFilter.value);
+        });
+    }
+
+    // ========================================================================
+    // Playlist search (other users' playlists)
+    // ========================================================================
+
+    const playlistSearchInput = document.getElementById('playlistSearchInput');
+    const playlistSearchBtn = document.getElementById('playlistSearchBtn');
+    const playlistSearchResults = document.getElementById('playlistSearchResults');
+
+    function renderPlaylistSearchResults(playlists) {
+        if (!playlistSearchResults) return;
+        playlistSearchResults.innerHTML = '';
+        if (!playlists || playlists.length === 0) {
+            playlistSearchResults.style.display = 'block';
+            const empty = document.createElement('div');
+            empty.className = 'playlist-search-empty';
+            empty.textContent = 'No playlists found.';
+            playlistSearchResults.appendChild(empty);
+            return;
+        }
+        playlists.forEach(pl => {
+            const norm = normalizePlaylistMetadata(pl);
+            const item = document.createElement('div');
+            item.className = 'playlist-search-item';
+            item.title = `Load playlist: ${norm.name}`;
+
+            if (norm.image_url) {
+                const img = document.createElement('img');
+                img.src = norm.image_url;
+                img.className = 'playlist-search-thumb';
+                img.alt = '';
+                item.appendChild(img);
+            }
+
+            const info = document.createElement('div');
+            info.className = 'playlist-search-info';
+
+            const nameEl = document.createElement('span');
+            nameEl.className = 'playlist-search-name';
+            nameEl.textContent = norm.name;
+            info.appendChild(nameEl);
+
+            if (norm.song_count != null) {
+                const countEl = document.createElement('span');
+                countEl.className = 'playlist-search-count';
+                countEl.textContent = `${norm.song_count} songs`;
+                info.appendChild(countEl);
+            }
+
+            item.appendChild(info);
+            item.addEventListener('click', () => {
+                playlistSearchResults.style.display = 'none';
+                if (playlistSearchInput) playlistSearchInput.value = '';
+                void selectPlaylist(norm.id);
+            });
+            playlistSearchResults.appendChild(item);
+        });
+        playlistSearchResults.style.display = 'block';
+    }
+
+    async function runPlaylistSearch() {
+        if (!playlistSearchInput) return;
+        const input = playlistSearchInput.value.trim();
+        if (!input) {
+            if (playlistSearchResults) playlistSearchResults.style.display = 'none';
+            return;
+        }
+
+        // Extract a UUID from a suno.com/playlist/UUID URL, or use input as-is
+        let playlistId = input;
+        const urlMatch = input.match(/playlist\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)
+            || input.match(/playlist\/([0-9a-f-]{30,36})/i);
+        if (urlMatch) {
+            playlistId = urlMatch[1];
+        }
+        // Accept only UUID-shaped IDs (with or without hyphens)
+        if (!/^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(playlistId)) {
+            if (playlistSearchResults) {
+                playlistSearchResults.innerHTML = '';
+                const msg = document.createElement('div');
+                msg.className = 'playlist-search-empty';
+                msg.textContent = 'Paste a suno.com/playlist/… URL or a playlist UUID.';
+                playlistSearchResults.appendChild(msg);
+                playlistSearchResults.style.display = 'block';
+            }
+            return;
+        }
+
+        if (playlistSearchBtn) {
+            playlistSearchBtn.disabled = true;
+            playlistSearchBtn.textContent = '…';
+        }
+        try {
+            const response = await api.runtime.sendMessage({ action: 'fetch_playlist_info', playlistId });
+            if (response?.ok && response.playlist) {
+                await savePlaylistToDropdown(response.playlist, response.playlist.id);
+                renderPlaylistSearchResults([response.playlist]);
+            } else {
+                renderPlaylistSearchResults([]);
+            }
+        } catch (e) {
+            statusDiv.innerText = `Playlist lookup error: ${e?.message || String(e)}`;
+            if (playlistSearchResults) playlistSearchResults.style.display = 'none';
+        } finally {
+            if (playlistSearchBtn) {
+                playlistSearchBtn.disabled = false;
+                playlistSearchBtn.textContent = 'Load';
+            }
+        }
+    }
+
+    if (playlistSearchBtn) {
+        playlistSearchBtn.addEventListener('click', () => void runPlaylistSearch());
+    }
+    if (playlistSearchInput) {
+        playlistSearchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') void runPlaylistSearch();
+            if (e.key === 'Escape') {
+                playlistSearchResults.style.display = 'none';
+                playlistSearchInput.value = '';
+            }
         });
     }
 
@@ -1600,7 +1906,13 @@
 
         const folder = folderInput.value;
         const format = getSelectedFormat();
-    const songsToDownload = activeSongs.filter(s => selectedIds.includes(s.id));
+        const songsToDownload = activeSongs.filter(s => selectedIds.includes(s.id));
+        const { downloadable, blocked } = splitSongsByDownloadEligibility(songsToDownload);
+
+        if (downloadable.length === 0) {
+            statusDiv.innerText = "Only your own songs can be downloaded as files. Songs by other artists may only be saved to the local database.";
+            return;
+        }
 
         setDownloadUiState(true);
 
@@ -1609,7 +1921,7 @@
                 action: "download_selected",
                 folderName: folder,
                 format: format,
-                songs: songsToDownload,
+                songs: downloadable,
                 downloadOptions: downloadOptions
             });
         } catch (e) {
@@ -1620,7 +1932,9 @@
         if (downloadOptions.music) selectedTypes.push(format.toUpperCase());
         if (downloadOptions.lyrics) selectedTypes.push("lyrics");
         if (downloadOptions.image) selectedTypes.push("images");
-        statusDiv.innerText = `Downloading ${songsToDownload.length} song(s): ${selectedTypes.join(", ")}...`;
+        statusDiv.innerText = blocked.length > 0
+            ? `Downloading ${downloadable.length} own song(s): ${selectedTypes.join(", ")}. Skipped ${blocked.length} song(s) by other artists.`
+            : `Downloading ${downloadable.length} song(s): ${selectedTypes.join(", ")}...`;
     });
 
     // Stop downloading
@@ -1664,7 +1978,7 @@
         if (message.action === "fetch_started") {
             // background informs us fetching has started (manual or auto)
             setFetchUiState(true);
-            statusDiv.innerText = currentFetchMode === 'incremental' ? "Syncing new songs..." : "Fetching songs...";
+            statusDiv.innerText = currentFetchMode === 'incremental' ? "Refreshing songs and metadata..." : "Fetching songs...";
         }
         if (message.action === "songs_page_update") {
             // start or continue fetching, ensure UI shows stop button
@@ -1677,10 +1991,13 @@
             if (wasCheckingNew) {
                 // Merge with existing songs
                 mergeSongs(newSongs);
-                statusDiv.innerText = `Page ${message.pageNum}: ${message.totalSongs} new songs found...`;
+                statusDiv.innerText = currentMetadataRefreshRequested
+                    ? `Page ${message.pageNum}: scanned ${message.totalSongs} song(s)...`
+                    : `Page ${message.pageNum}: ${message.totalSongs} new song(s) found...`;
             } else {
                 // Fresh fetch - replace all
                 allSongs = newSongs;
+                initSunoUserId();
                 filteredSongs = [...allSongs];
 
                 // Show song list immediately after first page
@@ -1718,7 +2035,7 @@
 
             if (wasCheckingNew) {
                 // Merge with existing songs
-                const addedCount = mergeSongs(newSongs);
+                const { addedCount, metadataUpdateCount } = mergeSongs(newSongs);
                 void saveSyncMeta({
                     lastSyncAt: completedAt,
                     lastIncrementalSyncAt: completedAt,
@@ -1728,7 +2045,13 @@
                     lastError: null,
                     syncStatus: 'complete'
                 });
-                if (addedCount > 0) {
+                if (currentMetadataRefreshRequested) {
+                    if (addedCount > 0 || metadataUpdateCount > 0) {
+                        statusDiv.innerText = `Updated ${metadataUpdateCount} existing song(s)${addedCount > 0 ? ` and found ${addedCount} new song(s)` : ''}. Total: ${allSongs.length}`;
+                    } else {
+                        statusDiv.innerText = `${allSongs.length} songs already up to date.`;
+                    }
+                } else if (addedCount > 0) {
                     statusDiv.innerText = `Found ${addedCount} new song(s). Total: ${allSongs.length}`;
                 } else {
                     statusDiv.innerText = `${allSongs.length} songs (no new songs found).`;
@@ -1736,6 +2059,7 @@
             } else {
                 // Fresh fetch complete
                 allSongs = newSongs;
+                initSunoUserId();
                 filteredSongs = [...allSongs];
 
                 // Only show song list if not already visible (page updates already showed it)
@@ -1765,6 +2089,7 @@
                 statusDiv.innerText = `✅ Complete! Found ${allSongs.length} songs total.`;
             }
             currentFetchMode = 'idle';
+            currentMetadataRefreshRequested = false;
         }
         if (message.action === "fetch_stopped") {
             setFetchUiState(false);
@@ -1774,6 +2099,7 @@
             });
             statusDiv.innerText = "⏹️ Fetch stopped by user – song list may be incomplete.";
             currentFetchMode = 'idle';
+            currentMetadataRefreshRequested = false;
         }
         if (message.action === "fetch_error") {
             setFetchUiState(false);
@@ -1784,12 +2110,17 @@
             });
             statusDiv.innerText = message.error;
             currentFetchMode = 'idle';
+            currentMetadataRefreshRequested = false;
         }
 
         if (message.action === "download_complete") {
             setDownloadUiState(false);
-            if (message.stopped) {
+            if (typeof message.text === 'string' && message.text.trim()) {
+                statusDiv.innerText = message.text;
+            } else if (message.stopped) {
                 statusDiv.innerText = "⏹️ Download stopped by user.";
+            } else if (message.ok === false) {
+                statusDiv.innerText = "❌ Download failed.";
             } else {
                 statusDiv.innerText = "✅ Download complete!";
             }
@@ -1820,7 +2151,54 @@
         songListSentinel.classList.toggle('is-complete', remaining === 0);
         songListSentinel.textContent = remaining > 0
             ? `Scroll to load ${Math.min(remaining, SONG_RENDER_BATCH_SIZE)} more songs`
-            : (sortedFilteredSongs.length > 0 ? 'All songs loaded' : '');
+            : (sortedFilteredSongs.length > 0 ? 'All my songs loaded' : '');
+    }
+
+    function updateSongLikeState(songId, liked) {
+        const allSongsArray = [allSongs, playlistSongs || []];
+        let changed = false;
+
+        allSongsArray.forEach(songArr => {
+            if (!Array.isArray(songArr)) return;
+            songArr.forEach(song => {
+                if (song.id !== songId) return;
+
+                const currentlyLiked = !!song.is_liked;
+                if (currentlyLiked === liked) return;
+
+                song.is_liked = liked;
+                if (!Number.isFinite(song.upvote_count)) {
+                    song.upvote_count = 0;
+                }
+
+                if (liked) {
+                    song.upvote_count = (song.upvote_count || 0) + 1;
+                } else {
+                    song.upvote_count = Math.max(0, (song.upvote_count || 1) - 1);
+                }
+
+                changed = true;
+            });
+        });
+
+        if (changed) {
+            songItemCache.delete(songId);
+            void saveToStorage();
+            applyFilter({ preserveScroll: true, minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE) });
+        }
+    }
+
+    function sendSongReactionUpdate(songId, reaction) {
+        api.runtime.sendMessage({ action: 'update_song_reaction', songId, reaction }, (response) => {
+            if (chrome.runtime.lastError) {
+                statusDiv.innerText = `Failed to update reaction: ${chrome.runtime.lastError.message}`;
+                return;
+            }
+            if (!response || !response.ok) {
+                const errorMessage = response?.error || `status=${response?.status || 'unknown'}`;
+                statusDiv.innerText = `Failed to update reaction: ${errorMessage}`;
+            }
+        });
     }
 
     function ensureSongListSentinel() {
@@ -1851,7 +2229,7 @@
             item.classList.add('playing');
         }
 
-        const thumbnailUrl = song?.image_url || song?.thumbnail_url || song?.cover_image_url || song?.artwork_url || null;
+        const thumbnailUrl = getSongThumbnailUrl(song);
 
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
@@ -1868,6 +2246,10 @@
 
         const thumbnail = document.createElement("div");
         thumbnail.className = "song-thumbnail";
+        thumbnail.style.cursor = 'pointer';
+        thumbnail.addEventListener('click', () => {
+            togglePlay(song);
+        });
 
         function attachThumbnailImage(src) {
             const thumbnailImage = document.createElement("img");
@@ -1886,7 +2268,7 @@
             thumbnail.appendChild(thumbnailImage);
         }
 
-        if (cachedSongIds.has(song.id)) {
+        if (cachedSongIds.has(song.id) && !song.image_cache_bust) {
             // Try to load from the local imageCache first; fall back to CDN URL
             getImageBlobFromIDB(song.id).then(imgBlob => {
                 if (imgBlob) {
@@ -1953,6 +2335,15 @@
             metaDiv.appendChild(document.createTextNode(' • ' + formatDate(song.created_at)));
         }
 
+        if (shouldShowOtherArtistBadge(song)) {
+            const ownershipSpan = document.createElement('span');
+            const artistName = song.owner_display_name || song.owner_handle || 'Other artist';
+            ownershipSpan.textContent = ` • 👤 ${artistName}`;
+            ownershipSpan.title = 'Only your own songs can be downloaded as files';
+            ownershipSpan.style.color = '#7ae';
+            metaDiv.appendChild(ownershipSpan);
+        }
+
         if (cachedSongIds.has(song.id)) {
             const cachedSpan = document.createElement("span");
             cachedSpan.textContent = ' • 💾 Cached';
@@ -1967,14 +2358,26 @@
         const actionsDiv = document.createElement("div");
         actionsDiv.className = "song-actions";
 
-        const playBtn = document.createElement("button");
-        playBtn.className = "song-action-btn play-btn";
-        playBtn.title = "Play Song";
-        playBtn.textContent = (currentPlayingSongId === song.id && !audioElement.paused) ? '⏸' : '▶';
-        playBtn.onclick = (e) => {
+        const likeBtn = document.createElement("button");
+        likeBtn.className = "song-action-btn like-btn";
+        likeBtn.textContent = song.is_liked ? '❤️' : '🤍';
+        likeBtn.title = song.is_liked ? 'Unlike this song' : 'Like this song';
+        likeBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            togglePlay(song);
-        };
+            const targetValue = !song.is_liked;
+            updateSongLikeState(song.id, targetValue);
+            sendSongReactionUpdate(song.id, targetValue ? 'LIKE' : 'DISLIKE');
+        });
+
+        const dislikeBtn = document.createElement("button");
+        dislikeBtn.className = "song-action-btn dislike-btn";
+        dislikeBtn.textContent = '👎';
+        dislikeBtn.title = 'Dislike (remove like)';
+        dislikeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            updateSongLikeState(song.id, false);
+            sendSongReactionUpdate(song.id, 'DISLIKE');
+        });
 
         const gotoBtn = document.createElement("button");
         gotoBtn.className = "song-action-btn goto-btn";
@@ -1985,7 +2388,8 @@
             window.open(`https://suno.com/song/${song.id}`, '_blank');
         };
 
-        actionsDiv.appendChild(playBtn);
+        actionsDiv.appendChild(likeBtn);
+        actionsDiv.appendChild(dislikeBtn);
         actionsDiv.appendChild(gotoBtn);
 
         item.appendChild(checkbox);
@@ -2043,53 +2447,70 @@
                 playBtn.textContent = (isCurrent && !isPaused) ? '⏸' : '▶';
             }
         });
+
+        // Sync player tab play/pause button
+        if (playerTabPlayPause) {
+            playerTabPlayPause.textContent = (!isPaused && currentPlayingSongId) ? '⏸' : '▶';
+        }
+        // Sync mini-player play/pause button
+        if (playPauseBtn) {
+            playPauseBtn.textContent = (!isPaused && currentPlayingSongId) ? '■' : '▶';
+        }
     }
 
     function applyFilter(options = {}) {
         const { preserveScroll = false, minimumRenderCount = SONG_RENDER_BATCH_SIZE } = options;
-        const activeSongs = getActiveSongs();
-        const filter = filterInput.value.toLowerCase();
-        const showLikedOnly = filterLiked.checked;
-        const showStemsOnly = filterStems.checked;
-        const showPublicOnly = filterPublic.checked;
-        const showOfflineOnly = !!filterOffline?.checked;
+        filteredSongs = filterSongs(getActiveSongs(), getSongFilterState());
+        sortedFilteredSongs = sortSongsForDisplay(filteredSongs);
 
-        filteredSongs = activeSongs.filter(song => {
-            // Text filter
-            if (filter && !song.title.toLowerCase().includes(filter)) {
-                return false;
-            }
+        renderSongList({ preserveScroll, minimumRenderCount });
+    }
 
-            // Liked filter
-            if (showLikedOnly && !song.is_liked) {
-                return false;
-            }
+    function getSongFilterState() {
+        return {
+            searchText: filterInput.value.toLowerCase(),
+            showLikedOnly: filterLiked.checked,
+            showStemsOnly: filterStems.checked,
+            showPublicOnly: filterPublic.checked,
+            showOfflineOnly: !!filterOffline?.checked
+        };
+    }
 
-            // Stems filter
-            if (showStemsOnly && !song.is_stem) {
-                return false;
-            }
+    function matchesSongFilters(song, filterState) {
+        if (filterState.searchText && !song.title.toLowerCase().includes(filterState.searchText)) {
+            return false;
+        }
 
-            // Public filter
-            if (showPublicOnly && !song.is_public) {
-                return false;
-            }
+        if (filterState.showLikedOnly && !song.is_liked) {
+            return false;
+        }
 
-            if (showOfflineOnly && !cachedSongIds.has(song.id)) {
-                return false;
-            }
+        if (filterState.showStemsOnly && !song.is_stem) {
+            return false;
+        }
 
-            return true;
-        });
+        if (filterState.showPublicOnly && !song.is_public) {
+            return false;
+        }
 
-        sortedFilteredSongs = [...filteredSongs].sort((a, b) => {
+        if (filterState.showOfflineOnly && !cachedSongIds.has(song.id)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    function filterSongs(songs, filterState) {
+        return songs.filter(song => matchesSongFilters(song, filterState));
+    }
+
+    function sortSongsForDisplay(songs) {
+        return [...songs].sort((a, b) => {
             const aTs = getSongTimestamp(a);
             const bTs = getSongTimestamp(b);
             if (bTs !== aTs) return bTs - aTs;
             return (a.title || '').localeCompare(b.title || '');
         });
-
-        renderSongList({ preserveScroll, minimumRenderCount });
     }
 
     function renderSongList(options = {}) {
@@ -2106,7 +2527,7 @@
             if (filterOffline?.checked) {
                 emptyDiv.textContent = cachedSongIds.size > 0
                     ? 'No offline songs match the current filters'
-                    : 'No offline songs cached yet. Select songs and use Download to DB.';
+                    : 'No offline songs cached yet. Select songs and use Save to DB.';
             } else {
                 emptyDiv.textContent = activeSongs.length > 0 ? 'No songs match the current filters' : 'No songs loaded yet';
             }
@@ -2153,6 +2574,19 @@
         const isPressed = allChecked && total > 0;
         selectAllButton.setAttribute('aria-pressed', String(isPressed));
         selectAllButton.textContent = isPressed ? 'Clear All' : 'Select All';
+
+        // Disable Download button if any selected song is from "Other artist"
+        const activeSongs = getActiveSongs();
+        const selectedSongs = activeSongs.filter(song => selectedSongIds.has(song.id));
+        const fromOtherArtist = selectedSongs.some(song => isSongFromOtherArtist(song));
+        if (downloadBtn) {
+            downloadBtn.disabled = fromOtherArtist;
+            if (fromOtherArtist) {
+                downloadBtn.title = "Cannot download as files - Songs of other artists can only be saved to local database";
+            } else {
+                downloadBtn.title = "";
+            }
+        }
     }
 
     function formatDate(dateStr) {

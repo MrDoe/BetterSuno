@@ -23,7 +23,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 
 ### 💾 Offline Database
 - **Local song cache** - Persist your library in IndexedDB
-- **Download to DB** - Cache selected songs for offline playback
+- **Save to DB** - Cache selected songs for offline playback
 - **Offline-only filter** - Show only tracks that are stored locally
 - **Delete from DB** - Remove selected cached tracks from local storage
 - **Usage display** - See local DB usage in Settings
