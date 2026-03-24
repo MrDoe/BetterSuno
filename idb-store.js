@@ -1,5 +1,7 @@
 // idb-store.js — IndexedDB wrapper for persistent storage across browser sessions
 
+import { requestToPromise, withStore } from './idb-helpers.js';
+
 const DB_NAME = 'BetterSunoicationsDB';
 const DB_VERSION = 2;
 
@@ -62,420 +64,292 @@ async function initDB() {
  * Get a specific tab state by tabId
  */
 async function getTabState(tabId) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('tabStates', 'readonly');
-    const store = transaction.objectStore('tabStates');
-    const request = store.get(String(tabId));
-
-    request.onsuccess = () => {
-      resolve(request.result || null);
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error getting tab state:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    return await withStore(initDB, 'tabStates', 'readonly', (store) => {
+      return requestToPromise(store.get(String(tabId)), (result) => result || null);
+    });
+  } catch (error) {
+    console.error('[IDB] Error getting tab state:', error);
+    throw error;
+  }
 }
 
 /**
  * Get all tab states
  */
 async function getAllTabStates() {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('tabStates', 'readonly');
-    const store = transaction.objectStore('tabStates');
-    const request = store.getAll();
-
-    request.onsuccess = () => {
-      const states = {};
-      (request.result || []).forEach(state => {
-        states[state.tabId] = state;
+  try {
+    return await withStore(initDB, 'tabStates', 'readonly', (store) => {
+      return requestToPromise(store.getAll(), (result) => {
+        const states = {};
+        (result || []).forEach(state => {
+          states[state.tabId] = state;
+        });
+        return states;
       });
-      resolve(states);
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error getting all tab states:', request.error);
-      reject(request.error);
-    };
-  });
+    });
+  } catch (error) {
+    console.error('[IDB] Error getting all tab states:', error);
+    throw error;
+  }
 }
 
 /**
  * Save a tab state
  */
 async function saveTabState(tabId, state) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('tabStates', 'readwrite');
-    const store = transaction.objectStore('tabStates');
-    
-    const stateToSave = {
-      ...state,
-      tabId: String(tabId),
-      timestamp: Date.now()
-    };
+  const stateToSave = {
+    ...state,
+    tabId: String(tabId),
+    timestamp: Date.now()
+  };
 
-    const request = store.put(stateToSave);
-
-    request.onsuccess = () => {
-      console.log('[IDB] Tab state saved for tabId:', tabId);
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error saving tab state:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'tabStates', 'readwrite', (store) => {
+      store.put(stateToSave);
+    });
+    console.log('[IDB] Tab state saved for tabId:', tabId);
+  } catch (error) {
+    console.error('[IDB] Error saving tab state:', error);
+    throw error;
+  }
 }
 
 /**
  * Delete a tab state
  */
 async function deleteTabState(tabId) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('tabStates', 'readwrite');
-    const store = transaction.objectStore('tabStates');
-    const request = store.delete(String(tabId));
-
-    request.onsuccess = () => {
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error deleting tab state:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'tabStates', 'readwrite', (store) => {
+      store.delete(String(tabId));
+    });
+  } catch (error) {
+    console.error('[IDB] Error deleting tab state:', error);
+    throw error;
+  }
 }
 
 /**
  * Clear all tab states
  */
 async function clearAllTabStates() {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('tabStates', 'readwrite');
-    const store = transaction.objectStore('tabStates');
-    const request = store.clear();
-
-    request.onsuccess = () => {
-      console.log('[IDB] All tab states cleared');
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error clearing tab states:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'tabStates', 'readwrite', (store) => {
+      store.clear();
+    });
+    console.log('[IDB] All tab states cleared');
+  } catch (error) {
+    console.error('[IDB] Error clearing tab states:', error);
+    throw error;
+  }
 }
 
 /**
  * Save songs list
  */
 async function saveSongsList(songs) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('songsList', 'readwrite');
-    const store = transaction.objectStore('songsList');
+  try {
+    await withStore(initDB, 'songsList', 'readwrite', (store) => {
+      store.clear();
 
-    // Clear existing songs first
-    store.clear();
-
-    // Add all songs
-    songs.forEach(song => {
-      const songData = {
-        ...song,
-        timestamp: Date.now()
-      };
-      store.add(songData);
+      songs.forEach(song => {
+        const songData = {
+          ...song,
+          timestamp: Date.now()
+        };
+        store.add(songData);
+      });
     });
-
-    transaction.oncomplete = () => {
-      console.log('[IDB] Saved', songs.length, 'songs');
-      resolve();
-    };
-
-    transaction.onerror = () => {
-      console.error('[IDB] Error saving songs:', transaction.error);
-      reject(transaction.error);
-    };
-  });
+    console.log('[IDB] Saved', songs.length, 'songs');
+  } catch (error) {
+    console.error('[IDB] Error saving songs:', error);
+    throw error;
+  }
 }
 
 /**
  * Get all songs
  */
 async function getAllSongs() {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('songsList', 'readonly');
-    const store = transaction.objectStore('songsList');
-    const request = store.getAll();
-
-    request.onsuccess = () => {
-      resolve(request.result || []);
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error getting songs:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    return await withStore(initDB, 'songsList', 'readonly', (store) => {
+      return requestToPromise(store.getAll(), (result) => result || []);
+    });
+  } catch (error) {
+    console.error('[IDB] Error getting songs:', error);
+    throw error;
+  }
 }
 
 /**
  * Clear all songs
  */
 async function clearAllSongs() {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('songsList', 'readwrite');
-    const store = transaction.objectStore('songsList');
-    const request = store.clear();
-
-    request.onsuccess = () => {
-      console.log('[IDB] All songs cleared');
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error clearing songs:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'songsList', 'readwrite', (store) => {
+      store.clear();
+    });
+    console.log('[IDB] All songs cleared');
+  } catch (error) {
+    console.error('[IDB] Error clearing songs:', error);
+    throw error;
+  }
 }
 
 /**
  * Save a user preference
  */
 async function savePreference(key, value) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('userPreferences', 'readwrite');
-    const store = transaction.objectStore('userPreferences');
+  const prefData = {
+    key,
+    value,
+    timestamp: Date.now()
+  };
 
-    const prefData = {
-      key,
-      value,
-      timestamp: Date.now()
-    };
-
-    const request = store.put(prefData);
-
-    request.onsuccess = () => {
-      console.log('[IDB] Preference saved:', key);
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error saving preference:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'userPreferences', 'readwrite', (store) => {
+      store.put(prefData);
+    });
+    console.log('[IDB] Preference saved:', key);
+  } catch (error) {
+    console.error('[IDB] Error saving preference:', error);
+    throw error;
+  }
 }
 
 /**
  * Get a user preference
  */
 async function getPreference(key) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('userPreferences', 'readonly');
-    const store = transaction.objectStore('userPreferences');
-    const request = store.get(key);
-
-    request.onsuccess = () => {
-      resolve(request.result?.value || null);
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error getting preference:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    return await withStore(initDB, 'userPreferences', 'readonly', (store) => {
+      return requestToPromise(store.get(key), (result) => result?.value || null);
+    });
+  } catch (error) {
+    console.error('[IDB] Error getting preference:', error);
+    throw error;
+  }
 }
 
 /**
  * Get all preferences
  */
 async function getAllPreferences() {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('userPreferences', 'readonly');
-    const store = transaction.objectStore('userPreferences');
-    const request = store.getAll();
-
-    request.onsuccess = () => {
-      const prefs = {};
-      (request.result || []).forEach(pref => {
-        prefs[pref.key] = pref.value;
+  try {
+    return await withStore(initDB, 'userPreferences', 'readonly', (store) => {
+      return requestToPromise(store.getAll(), (result) => {
+        const prefs = {};
+        (result || []).forEach(pref => {
+          prefs[pref.key] = pref.value;
+        });
+        return prefs;
       });
-      resolve(prefs);
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error getting all preferences:', request.error);
-      reject(request.error);
-    };
-  });
+    });
+  } catch (error) {
+    console.error('[IDB] Error getting all preferences:', error);
+    throw error;
+  }
 }
 
 /**
  * Delete a preference
  */
 async function deletePreference(key) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('userPreferences', 'readwrite');
-    const store = transaction.objectStore('userPreferences');
-    const request = store.delete(key);
-
-    request.onsuccess = () => {
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error deleting preference:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'userPreferences', 'readwrite', (store) => {
+      store.delete(key);
+    });
+  } catch (error) {
+    console.error('[IDB] Error deleting preference:', error);
+    throw error;
+  }
 }
 
 /**
  * Clear all preferences
  */
 async function clearAllPreferences() {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('userPreferences', 'readwrite');
-    const store = transaction.objectStore('userPreferences');
-    const request = store.clear();
-
-    request.onsuccess = () => {
-      console.log('[IDB] All preferences cleared');
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error clearing preferences:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'userPreferences', 'readwrite', (store) => {
+      store.clear();
+    });
+    console.log('[IDB] All preferences cleared');
+  } catch (error) {
+    console.error('[IDB] Error clearing preferences:', error);
+    throw error;
+  }
 }
 
 /**
  * Save an audio blob for a song
  */
 async function saveAudioBlob(songId, blob) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('audioCache', 'readwrite');
-    const store = transaction.objectStore('audioCache');
-
-    const request = store.put({ songId, blob, timestamp: Date.now() });
-
-    request.onsuccess = () => {
-      console.log('[IDB] Audio blob saved for songId:', songId);
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error saving audio blob:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'audioCache', 'readwrite', (store) => {
+      store.put({ songId, blob, timestamp: Date.now() });
+    });
+    console.log('[IDB] Audio blob saved for songId:', songId);
+  } catch (error) {
+    console.error('[IDB] Error saving audio blob:', error);
+    throw error;
+  }
 }
 
 /**
  * Get a cached audio blob for a song
  */
 async function getAudioBlob(songId) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('audioCache', 'readonly');
-    const store = transaction.objectStore('audioCache');
-    const request = store.get(songId);
-
-    request.onsuccess = () => {
-      resolve(request.result?.blob || null);
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error getting audio blob:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    return await withStore(initDB, 'audioCache', 'readonly', (store) => {
+      return requestToPromise(store.get(songId), (result) => result?.blob || null);
+    });
+  } catch (error) {
+    console.error('[IDB] Error getting audio blob:', error);
+    throw error;
+  }
 }
 
 /**
  * Get all cached song IDs
  */
 async function getAllCachedSongIds() {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('audioCache', 'readonly');
-    const store = transaction.objectStore('audioCache');
-    const request = store.getAllKeys();
-
-    request.onsuccess = () => {
-      resolve(request.result || []);
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error getting cached song IDs:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    return await withStore(initDB, 'audioCache', 'readonly', (store) => {
+      return requestToPromise(store.getAllKeys(), (result) => result || []);
+    });
+  } catch (error) {
+    console.error('[IDB] Error getting cached song IDs:', error);
+    throw error;
+  }
 }
 
 /**
  * Delete a cached audio blob
  */
 async function deleteAudioBlob(songId) {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('audioCache', 'readwrite');
-    const store = transaction.objectStore('audioCache');
-    const request = store.delete(songId);
-
-    request.onsuccess = () => {
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error deleting audio blob:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'audioCache', 'readwrite', (store) => {
+      store.delete(songId);
+    });
+  } catch (error) {
+    console.error('[IDB] Error deleting audio blob:', error);
+    throw error;
+  }
 }
 
 /**
  * Clear all cached audio blobs
  */
 async function clearAllAudioBlobs() {
-  const db = await initDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction('audioCache', 'readwrite');
-    const store = transaction.objectStore('audioCache');
-    const request = store.clear();
-
-    request.onsuccess = () => {
-      console.log('[IDB] All audio blobs cleared');
-      resolve();
-    };
-
-    request.onerror = () => {
-      console.error('[IDB] Error clearing audio blobs:', request.error);
-      reject(request.error);
-    };
-  });
+  try {
+    await withStore(initDB, 'audioCache', 'readwrite', (store) => {
+      store.clear();
+    });
+    console.log('[IDB] All audio blobs cleared');
+  } catch (error) {
+    console.error('[IDB] Error clearing audio blobs:', error);
+    throw error;
+  }
 }
 
 // ES6 exports for use in background.js and other modules
