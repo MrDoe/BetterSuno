@@ -256,6 +256,37 @@
         return false;
     }
 
+    function getSongDisplayTitle(song) {
+        return song?.custom_title ? String(song.custom_title) : (song?.title ? String(song.title) : 'Untitled');
+    }
+
+    function applyCustomSongTitle(songId, newTitle) {
+        if (!songId || !newTitle) return;
+
+        const updateTitle = (collection) => {
+            if (!Array.isArray(collection)) return;
+            const item = collection.find(s => s.id === songId);
+            if (item) {
+                item.custom_title = newTitle;
+            }
+        };
+
+        updateTitle(allSongs);
+        updateTitle(playlistSongs);
+
+        if (currentPlayingSongId === songId) {
+            const song = getActiveSongs().find(s => s.id === songId);
+            if (song && playerTitle) {
+                playerTitle.textContent = getSongDisplayTitle(song);
+            }
+        }
+
+        // Force the current song element to recreate (not stale) and persist to IndexedDB.
+        songItemCache.delete(songId);
+        applyFilter({ preserveScroll: true, minimumRenderCount: renderedSongCount });
+        void saveToStorage();
+    }
+
     function initSunoUserId() {
         if (!sunoUserId && allSongs.length > 0) {
             sunoUserId = allSongs[0].owner_user_id || null;
@@ -2856,8 +2887,8 @@
 
         const titleDiv = document.createElement("div");
         titleDiv.className = "song-title";
-        titleDiv.title = song.title;
-        titleDiv.textContent = song.title;
+        titleDiv.title = song.title || 'Untitled';
+        titleDiv.textContent = getSongDisplayTitle(song);
 
         const metaDiv = document.createElement("div");
         metaDiv.className = "song-meta";
@@ -2967,6 +2998,48 @@
             }
         });
 
+        let renameBtn;
+        if (!isSongFromOtherArtist(song)) {
+            renameBtn = document.createElement("button");
+            renameBtn.className = "song-action-btn rename-btn";
+            renameBtn.textContent = '✏️';
+            renameBtn.title = 'Rename this song';
+            renameBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                const oldTitle = getSongDisplayTitle(song);
+                const userTitle = prompt('Enter a new name for your song:', oldTitle);
+                if (userTitle === null) return;
+                const newTitle = userTitle.trim();
+                if (!newTitle) {
+                    statusDiv.innerText = 'Song title cannot be empty.';
+                    return;
+                }
+                if (newTitle === oldTitle) {
+                    return;
+                }
+
+                statusDiv.innerText = 'Updating title on Suno...';
+                try {
+                    const response = await api.runtime.sendMessage({
+                        action: 'set_song_metadata',
+                        songId: song.id,
+                        title: newTitle
+                    });
+
+                    if (!response || !response.ok) {
+                        statusDiv.innerText = `Failed to update title on Suno: ${response?.error || 'unknown'}`;
+                        return;
+                    }
+
+                    applyCustomSongTitle(song.id, newTitle);
+                    statusDiv.innerText = `Renamed song to "${newTitle}".`;
+                } catch (err) {
+                    console.debug('[Downloader] set_song_metadata failed', err);
+                    statusDiv.innerText = `Failed to update title on Suno.`;
+                }
+            });
+        }
+
         const gotoBtn = document.createElement("button");
         gotoBtn.className = "song-action-btn goto-btn";
         gotoBtn.title = "Go to Song";
@@ -2978,6 +3051,9 @@
 
         actionsDiv.appendChild(likeBtn);
         actionsDiv.appendChild(copyLinkBtn);
+        if (renameBtn) {
+            actionsDiv.appendChild(renameBtn);
+        }
         if (dislikeBtn) {
             actionsDiv.appendChild(dislikeBtn);
         }

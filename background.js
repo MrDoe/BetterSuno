@@ -1782,6 +1782,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "set_song_metadata") {
+    (async () => {
+      try {
+        const songId = typeof msg.songId === 'string' ? msg.songId.trim() : '';
+        const title = typeof msg.title === 'string' ? msg.title.trim() : '';
+
+        if (!songId || !title) {
+          sendResponse({ ok: false, error: 'Missing songId or title' });
+          return;
+        }
+
+        const token = await getApiTokenWithFallback('set_song_metadata');
+        if (!token) {
+          sendResponse({ ok: false, error: 'No auth token' });
+          return;
+        }
+
+        const url = `https://studio-api.prod.suno.com/api/gen/${encodeURIComponent(songId)}/set_metadata/`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ title })
+        });
+
+        let responseBody = null;
+        try {
+          responseBody = await response.json();
+        } catch (error) {
+          responseBody = null;
+        }
+
+        sendResponse({ ok: response.ok, status: response.status, data: responseBody });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "fetch_songs") {
     log("[MSG] fetch_songs received - isPublicOnly:", msg.isPublicOnly, "maxPages:", msg.maxPages, "checkNewOnly:", msg.checkNewOnly, "knownIds count:", msg.knownIds?.length || 0);
     stopFetchRequested = false;
@@ -3415,14 +3457,10 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
       break;
     }
 
-    const title = song.title || `Untitled_${song.id}`;
+    const title = song.custom_title || song.title || `Untitled_${song.id}`;
     const safeTitle = sanitizeFilename(title);
-
     try {
-      let downloadedSomething = false;
-
-      // 1. Download Music
-      if (shouldDownloadMusic) {
+    if (shouldDownloadMusic) {
         if (!song.audio_url) {
           throw new Error('No audio URL available');
         }
