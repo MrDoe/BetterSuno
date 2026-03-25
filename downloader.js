@@ -949,34 +949,6 @@
         }
     }
 
-    function formatRelativeTime(value) {
-        if (!value) {
-            return 'never';
-        }
-
-        const ts = typeof value === 'number' ? value : Date.parse(value);
-        if (!Number.isFinite(ts)) {
-            return 'unknown';
-        }
-
-        const diffMs = Date.now() - ts;
-        const diffMinutes = Math.round(diffMs / 60000);
-        if (diffMinutes <= 1) return 'just now';
-        if (diffMinutes < 60) return `${diffMinutes}m ago`;
-
-        const diffHours = Math.round(diffMinutes / 60);
-        if (diffHours < 24) return `${diffHours}h ago`;
-
-        const diffDays = Math.round(diffHours / 24);
-        if (diffDays < 7) return `${diffDays}d ago`;
-
-        try {
-            return new Date(ts).toLocaleDateString();
-        } catch {
-            return 'unknown';
-        }
-    }
-
     async function refreshDbUsageDisplay() {
         if (!dbUsageValue) {
             return;
