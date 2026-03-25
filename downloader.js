@@ -18,6 +18,10 @@
     let songListSentinel = null;
     let songListObserver = null;
     const songItemCache = new Map(); // songId → DOM element; reused on re-renders to prevent image reload
+    let metadataRefreshInFlight = false;
+    const pendingMetadataRefreshIds = new Set();
+    let songListVisibleRefreshTimer = null;
+    const VISIBLE_SONG_REFRESH_DEBOUNCE_MS = 120;
     const SYNC_META_KEY = 'sunoSyncMeta';
     const PLAYLISTS_KEY = 'sunoPlaylists';
     const SELECTED_PLAYLIST_KEY = 'sunoSelectedPlaylist';
@@ -52,6 +56,9 @@
 
     let currentFetchMode = 'idle';
     let currentMetadataRefreshRequested = false;
+    const METADATA_REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+    const metadataRefreshTimestamps = new Map();
+    metadataRefreshInFlight = false;
     let syncMeta = createDefaultSyncMeta();
     let playlistSongs = null; // Active playlist songs when a playlist is selected, else null
     let sunoUserId = null; // Set from the first own song when My Songs are loaded
@@ -1144,6 +1151,41 @@
     const songList = document.getElementById("songList");
     const songCount = document.getElementById("songCount");
     const songListContainer = document.getElementById("songListContainer");
+
+    function getVisibleSongIds() {
+        if (!songList) {
+            return [];
+        }
+
+        const containerRect = songList.getBoundingClientRect();
+        const bufferedTop = containerRect.top - 80;
+        const bufferedBottom = containerRect.bottom + 80;
+
+        return Array.from(songList.querySelectorAll('.song-item[data-song-id]'))
+            .filter(item => {
+                const r = item.getBoundingClientRect();
+                return r.bottom >= bufferedTop && r.top <= bufferedBottom;
+            })
+            .map(item => item.dataset.songId)
+            .filter(Boolean);
+    }
+
+    function scheduleVisibleSongRefresh() {
+        if (songListVisibleRefreshTimer) {
+            clearTimeout(songListVisibleRefreshTimer);
+        }
+        songListVisibleRefreshTimer = setTimeout(() => {
+            const visibleIds = getVisibleSongIds();
+            if (visibleIds.length > 0) {
+                void refreshVisibleSongsMetadata(visibleIds);
+            }
+        }, VISIBLE_SONG_REFRESH_DEBOUNCE_MS);
+    }
+
+    if (songList) {
+        songList.addEventListener('scroll', scheduleVisibleSongRefresh);
+        window.addEventListener('resize', scheduleVisibleSongRefresh);
+    }
     const versionFooter = document.getElementById("versionFooter");
 
     // hide stop-fetch button initially
@@ -1469,6 +1511,12 @@
                 filterInput.value = "";
                 await loadFilterPreferences();
                 applyFilter();
+
+                // Refresh metadata for currently visible tracks on initial load
+                const initialVisibleIds = sortedFilteredSongs.slice(0, Math.min(sortedFilteredSongs.length, SONG_RENDER_BATCH_SIZE))
+                    .map(song => song.id).filter(Boolean);
+                void refreshVisibleSongsMetadata(initialVisibleIds);
+
                 statusDiv.innerText = `${allSongs.length} cached songs. Checking for new...`;
 
                 // Load playlists in background (non-blocking)
@@ -1625,6 +1673,71 @@
             addedCount: addedSongs.length,
             metadataUpdateCount
         };
+    }
+
+    function shouldRefreshMetadataForSong(song) {
+        if (!song || !song.id) return false;
+
+        const lastRefreshed = metadataRefreshTimestamps.get(song.id);
+        if (!lastRefreshed) return true;
+        if (Date.now() - lastRefreshed > METADATA_REFRESH_INTERVAL_MS) return true;
+
+        // If any primary fields are missing, refresh immediately.
+        if (!song.title || !song.audio_url || song.upvote_count === undefined || song.is_public === undefined) {
+            return true;
+        }
+
+        return false;
+    }
+
+    async function refreshVisibleSongsMetadata(songIds) {
+        if (!Array.isArray(songIds) || songIds.length === 0) return;
+
+        const normalizedIds = songIds
+            .filter(id => typeof id === 'string' && id.trim())
+            .map(id => id.trim());
+
+        normalizedIds.forEach(id => pendingMetadataRefreshIds.add(id));
+
+        if (metadataRefreshInFlight) {
+            return;
+        }
+
+        while (pendingMetadataRefreshIds.size > 0) {
+            const idsToCheck = Array.from(pendingMetadataRefreshIds);
+            pendingMetadataRefreshIds.clear();
+
+            const idsToRefresh = idsToCheck
+                .map(id => getActiveSongs().find(song => song.id === id) || allSongs.find(song => song.id === id))
+                .filter(Boolean)
+                .filter(shouldRefreshMetadataForSong)
+                .map(song => song.id);
+
+            if (idsToRefresh.length === 0) {
+                continue;
+            }
+
+            metadataRefreshInFlight = true;
+            try {
+                const response = await sendMessageWithRetry({ action: 'fetch_songs_by_ids', songIds: idsToRefresh });
+                if (!response?.ok || !response?.data?.clips || !Array.isArray(response.data.clips)) {
+                    continue;
+                }
+
+                const updatedSongs = response.data.clips
+                    .map(normalizeSongClip)
+                    .filter(song => song.id);
+
+                if (updatedSongs.length > 0) {
+                    mergeSongs(updatedSongs);
+                    updatedSongs.forEach(song => metadataRefreshTimestamps.set(song.id, Date.now()));
+                }
+            } catch (e) {
+                console.debug('[Downloader] metadata refresh by visible items failed:', e);
+            } finally {
+                metadataRefreshInFlight = false;
+            }
+        }
     }
 
     async function clearStorage() {
@@ -2546,7 +2659,7 @@
             thumbnailImage.className = "song-thumbnail-image";
             thumbnailImage.src = src;
             thumbnailImage.alt = song.title ? `${song.title} cover art` : 'Song cover art';
-            thumbnailImage.loading = 'lazy';
+            thumbnailImage.loading = 'eager';
             thumbnailImage.decoding = 'async';
             thumbnailImage.addEventListener('error', () => {
                 thumbnail.classList.add('is-fallback');
@@ -2753,6 +2866,10 @@
         renderedSongCount = end;
         updateSongListSentinelState();
         updateSelectedCount();
+
+        // Update metadata only for songs that are visible now.
+        const visibleSongIds = sortedFilteredSongs.slice(start, end).map(song => song.id).filter(Boolean);
+        void refreshVisibleSongsMetadata(visibleSongIds);
     }
 
     function refreshVisibleSongSelectionState() {
@@ -2864,6 +2981,12 @@
 
         while (renderedSongCount < Math.min(minimumRenderCount, sortedFilteredSongs.length)) {
             renderSongListChunk();
+        }
+
+        // When song list is populated from storage/fetch, refresh visible metadata.
+        if (renderedSongCount > 0) {
+            const visibleSongIds = sortedFilteredSongs.slice(0, renderedSongCount).map(song => song.id).filter(Boolean);
+            void refreshVisibleSongsMetadata(visibleSongIds);
         }
 
         if (preserveScroll) {
