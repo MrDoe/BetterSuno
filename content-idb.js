@@ -35,8 +35,10 @@
         return result;
     }
 
-    async function getDB() {
+    async function getDB(retryCount = 0) {
         if (dbInstance) return dbInstance;
+
+        const MAX_RETRIES = 10;
 
         return new Promise((resolve, reject) => {
             const request = indexedDB.open(IDB_NAME, IDB_VERSION);
@@ -45,12 +47,18 @@
 
             request.onblocked = () => {
                 // Another connection (e.g. service worker) is open at a lower version.
-                // Retry after a short delay to allow it to close.
-                console.warn('[IDB] Database upgrade blocked; retrying after delay...');
+                // Retry after a short delay (exponential backoff) to allow it to close.
+                if (retryCount >= MAX_RETRIES) {
+                    console.error('[IDB] Database upgrade still blocked after ' + MAX_RETRIES + ' retries; giving up.');
+                    reject(new Error('IndexedDB upgrade blocked by another open connection'));
+                    return;
+                }
+                const attempt = retryCount + 1;
+                console.warn('[IDB] Database upgrade blocked; retrying (' + attempt + '/' + MAX_RETRIES + ')...');
                 setTimeout(() => {
                     dbInstance = null;
-                    getDB().then(resolve, reject);
-                }, 500);
+                    getDB(attempt).then(resolve, reject);
+                }, 500 * attempt);
             };
 
             request.onsuccess = () => {

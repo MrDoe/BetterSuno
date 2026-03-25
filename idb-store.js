@@ -23,12 +23,12 @@ async function initDB() {
       reject(request.error);
     };
 
-    request.onblocked = () => {
-      // Another connection (e.g., content script) is open at a lower version.
-      // We cannot proceed until it closes; reject so callers can retry later.
-      console.warn('[IDB] Database upgrade blocked by another connection');
-      reject(new Error('IDB upgrade blocked'));
-    };
+            request.onblocked = () => {
+                // Another connection (e.g. service worker) is open at a lower version.
+                // We cannot proceed until it closes; reject so callers can retry later.
+                console.warn('[IDB] Database upgrade blocked by another open connection. Please close other tabs or wait for connections to close.');
+                reject(new Error('IndexedDB upgrade blocked by another open connection'));
+            };
 
     request.onsuccess = () => {
       dbInstance = request.result;
