@@ -58,16 +58,17 @@
     }
 
     function normalizePlaylistMetadata(playlist) {
+        const candidateId = playlist?.id || playlist?.playlist_id || playlist?.playlistId || playlist?.song_id || playlist?.id?.toString?.() || '';
         return {
-            id: playlist?.id || '',
-            name: playlist?.name || 'Unnamed Playlist',
-            song_count: playlist?.song_count ?? playlist?.num_total_results ?? null,
-            num_total_results: playlist?.num_total_results ?? null,
+            id: candidateId,
+            name: playlist?.name || playlist?.title || 'Unnamed Playlist',
+            song_count: playlist?.song_count ?? playlist?.num_total_results ?? playlist?.total ?? playlist?.total_results ?? null,
+            num_total_results: playlist?.num_total_results ?? playlist?.total ?? playlist?.total_results ?? null,
             is_public: playlist?.is_public,
             is_owned: playlist?.is_owned,
             is_owned_by_current_user: playlist?.is_owned_by_current_user,
-            image_url: playlist?.image_url || null,
-            description: playlist?.description || '',
+            image_url: playlist?.image_url || playlist?.cover_image_url || null,
+            description: playlist?.description || playlist?.short_description || '',
             owner_user_id: playlist?.owner_user_id || playlist?.user_id || playlist?.creator_user_id || playlist?.author_user_id || null,
             owner_handle: playlist?.owner_handle || playlist?.user_handle || playlist?.creator_handle || playlist?.author_handle || null,
             owner_display_name: playlist?.owner_display_name || playlist?.user_display_name || playlist?.creator_display_name || playlist?.author_display_name || playlist?.name || null
@@ -76,6 +77,15 @@
 
     function isPlaylistOtherArtist(playlist) {
         return playlist?.is_owned_by_current_user === false || playlist?.is_owned === false;
+    }
+
+    function normalizePlaylistId(raw) {
+        if (!raw || typeof raw !== 'string') return '';
+        const trimmed = raw.trim();
+        const urlMatch = trimmed.match(/playlist\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)
+            || trimmed.match(/playlist\/([0-9a-f-]{30,36})/i);
+        if (urlMatch) return urlMatch[1];
+        return trimmed;
     }
 
     function mergePlaylistsById(...collections) {
@@ -263,6 +273,30 @@
         return extractFirstMatchingValue(source, paths, extractUrl);
     }
 
+    function extractSongIdFromClipItem(rawClip) {
+        const candidates = [
+            rawClip?.clip?.id,
+            rawClip?.song?.id,
+            rawClip?.item?.id,
+            rawClip?.id,
+            rawClip?.clip_id,
+            rawClip?.clipId,
+            rawClip?.song_id,
+            rawClip?.songId,
+            rawClip?.gen_id,
+            rawClip?.clip?.clip_id,
+            rawClip?.song?.song_id
+        ];
+
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.trim()) {
+                return candidate.trim();
+            }
+        }
+
+        return null;
+    }
+
     function getSongThumbnailUrl(song) {
         return song?.image_url || song?.thumbnail_url || song?.cover_image_url || song?.artwork_url || null;
     }
@@ -305,38 +339,121 @@
     }
 
     function normalizeSongClip(rawClip) {
-        const clip = rawClip?.clip || rawClip || {};
+        const clip = rawClip?.clip || rawClip?.song || rawClip?.item || rawClip || {};
+        const songId = extractSongIdFromClipItem(rawClip);
         return {
-            id: clip.id,
-            title: clip.title || `Untitled_${clip.id || 'song'}`,
-            audio_url: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.audio, value => value || null),
-            video_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.video),
-            image_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.image),
-            lyrics: extractTextFromPaths(clip, SONG_CLIP_FIELD_PATHS.lyrics),
-            is_public: clip.is_public !== false,
+            id: songId,
+            title: clip.title || rawClip?.title || `Untitled_${songId || 'song'}`,
+            audio_url: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.audio, value => value || null)
+                || extractFirstMatchingValue(rawClip, SONG_CLIP_FIELD_PATHS.audio, value => value || null),
+            video_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.video)
+                || extractUrlFromPaths(rawClip, SONG_CLIP_FIELD_PATHS.video),
+            image_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.image)
+                || extractUrlFromPaths(rawClip, SONG_CLIP_FIELD_PATHS.image),
+            lyrics: extractTextFromPaths(clip, SONG_CLIP_FIELD_PATHS.lyrics)
+                || extractTextFromPaths(rawClip, SONG_CLIP_FIELD_PATHS.lyrics),
+            is_public: (clip.is_public ?? rawClip?.is_public) !== false,
             created_at: clip.created_at || clip.createdAt || rawClip?.created_at || null,
-            is_liked: clip.is_liked || false,
+            is_liked: clip.is_liked || rawClip?.is_liked || false,
             is_stem: isStemClip(clip),
-            upvote_count: clip.upvote_count || 0,
-            owner_user_id: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null),
-            owner_handle: extractFirstMatchingValue(clip, ['handle', 'user_handle', 'owner_handle', 'creator_handle', 'author_handle', 'username'], value => (typeof value === 'string' ? value.trim() : null)),
-            owner_display_name: extractFirstMatchingValue(clip, ['display_name', 'user_display_name', 'owner_display_name', 'creator_display_name', 'author_display_name', 'name'], value => (typeof value === 'string' ? value.trim() : null)),
-            is_owned_by_current_user: clip.is_owned_by_current_user
+            upvote_count: clip.upvote_count || rawClip?.upvote_count || 0,
+            owner_user_id: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null)
+                || extractFirstMatchingValue(rawClip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null),
+            owner_handle: extractFirstMatchingValue(clip, ['handle', 'user_handle', 'owner_handle', 'creator_handle', 'author_handle', 'username'], value => (typeof value === 'string' ? value.trim() : null))
+                || extractFirstMatchingValue(rawClip, ['handle', 'user_handle', 'owner_handle', 'creator_handle', 'author_handle', 'username'], value => (typeof value === 'string' ? value.trim() : null)),
+            owner_display_name: extractFirstMatchingValue(clip, ['display_name', 'user_display_name', 'owner_display_name', 'creator_display_name', 'author_display_name', 'name'], value => (typeof value === 'string' ? value.trim() : null))
+                || extractFirstMatchingValue(rawClip, ['display_name', 'user_display_name', 'owner_display_name', 'creator_display_name', 'author_display_name', 'name'], value => (typeof value === 'string' ? value.trim() : null)),
+            is_owned_by_current_user: clip.is_owned_by_current_user ?? rawClip?.is_owned_by_current_user
         };
     }
 
     function extractPlaylistClipItems(data) {
         if (!data || typeof data !== 'object') return [];
+        if (Array.isArray(data) && data.length > 0) return data;
 
         const collections = [
             data.playlist_clips,
+            data.playlist_songs,
+            data.songs,
+            data.tracks,
+            data.entries,
             data.clips,
             data.results,
             data.items,
+            data.playlist?.playlist_clips,
+            data.playlist?.playlist_songs,
+            data.playlist?.songs,
+            data.playlist?.tracks,
+            data.playlist?.entries,
+            data.playlist?.clips,
+            data.playlist?.results,
+            data.playlist?.items,
             data.data?.playlist_clips,
+            data.data?.playlist_songs,
+            data.data?.songs,
+            data.data?.tracks,
+            data.data?.entries,
             data.data?.clips,
             data.data?.results,
-            data.data?.items
+            data.data?.items,
+            data.data?.playlist?.playlist_clips,
+            data.data?.playlist?.playlist_songs,
+            data.data?.playlist?.songs,
+            data.data?.playlist?.tracks,
+            data.data?.playlist?.entries,
+            data.data?.playlist?.clips,
+            data.data?.playlist?.results,
+            data.data?.playlist?.items
+        ];
+
+        for (const collection of collections) {
+            if (Array.isArray(collection) && collection.length > 0) {
+                return collection;
+            }
+        }
+
+        // Deep fallback: recursively search for any array of clip-like objects
+        const looksLikeClip = (item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+            return !!(item.id || item.clip_id || item.song_id || item.clip?.id || item.song?.id);
+        };
+        const searched = new Set();
+        const search = (node, depth) => {
+            if (!node || typeof node !== 'object' || depth > 4 || searched.has(node)) return null;
+            searched.add(node);
+            if (Array.isArray(node)) {
+                return (node.length > 0 && node.some(looksLikeClip)) ? node : null;
+            }
+            for (const value of Object.values(node)) {
+                if (Array.isArray(value) && value.length > 0 && value.some(looksLikeClip)) {
+                    return value;
+                }
+            }
+            for (const value of Object.values(node)) {
+                if (value && typeof value === 'object' && !Array.isArray(value)) {
+                    const found = search(value, depth + 1);
+                    if (found) return found;
+                }
+            }
+            return null;
+        };
+        return search(data, 0) || [];
+    }
+
+    function extractPlaylistItems(data) {
+        if (Array.isArray(data)) return data;
+        if (!data || typeof data !== 'object') return [];
+
+        const collections = [
+            data.playlists,
+            data.results,
+            data.items,
+            data.data?.playlists,
+            data.data?.results,
+            data.data?.items,
+            data.collection?.playlists,
+            data.collection?.results,
+            data.collection?.items
         ];
 
         for (const collection of collections) {
@@ -346,6 +463,81 @@
         }
 
         return [];
+    }
+
+    function extractPlaylistTotal(data, fallbackCount = 0) {
+        if (!data || typeof data !== 'object') return fallbackCount;
+
+        const candidates = [
+            data.num_total_results,
+            data.total,
+            data.total_results,
+            data.total_count,
+            data.count,
+            data.data?.num_total_results,
+            data.data?.total,
+            data.data?.total_results,
+            data.data?.total_count,
+            data.data?.count,
+            data.playlist?.num_total_results,
+            data.playlist?.total,
+            data.playlist?.total_results,
+            data.playlist?.total_count,
+            data.playlist?.count,
+            data.data?.playlist?.num_total_results,
+            data.data?.playlist?.total,
+            data.data?.playlist?.total_results,
+            data.data?.playlist?.total_count,
+            data.data?.playlist?.count,
+            data.playlist_songs?.total,
+            data.playlist_songs?.total_results,
+            data.playlist_songs?.count,
+            data.playlist_songs?.num_total_results,
+            data.playlist?.playlist_songs?.total,
+            data.playlist?.playlist_songs?.total_results,
+            data.playlist?.playlist_songs?.count,
+            data.playlist?.playlist_songs?.num_total_results,
+            data.data?.playlist_songs?.total,
+            data.data?.playlist_songs?.total_results,
+            data.data?.playlist_songs?.count,
+            data.data?.playlist_songs?.num_total_results
+        ];
+
+        for (const value of candidates) {
+            if (typeof value === 'number' && Number.isFinite(value)) {
+                return value;
+            }
+        }
+
+        return fallbackCount;
+    }
+
+    async function hydratePlaylistSongsById(songIds) {
+        if (!Array.isArray(songIds) || songIds.length === 0) {
+            return [];
+        }
+
+        try {
+            const response = await api.runtime.sendMessage({
+                action: 'fetch_songs_by_ids',
+                songIds
+            });
+
+            if (!response?.ok || !response.data) {
+                return [];
+            }
+
+            const clips = Array.isArray(response.data.clips)
+                ? response.data.clips
+                : extractPlaylistClipItems(response.data);
+
+            return clips
+                .map(normalizeSongClip)
+                .filter(song => !!song.id);
+        } catch (e) {
+            console.debug('[Downloader] Failed to hydrate playlist songs by id:', e);
+            return [];
+        }
     }
 
     // ========================================================================
@@ -1630,11 +1822,11 @@
                     return;
                 }
                 const data = response.data;
-                const batch = data.playlists;
+                const batch = extractPlaylistItems(data);
                 if (!Array.isArray(batch) || batch.length === 0) break;
                 allPlaylists.push(...batch);
                 // Stop if we have fetched all
-                const total = data.num_total_results || 0;
+                const total = extractPlaylistTotal(data, allPlaylists.length);
                 if (allPlaylists.length >= total) break;
                 page++;
             }
@@ -1666,14 +1858,15 @@
     }
 
     async function selectPlaylist(playlistId) {
+        const selectedPlaylistId = normalizePlaylistId(playlistId);
         const wasPlaylistMode = Array.isArray(playlistSongs);
         playlistSongs = null;
-        await savePreferenceToIDB(SELECTED_PLAYLIST_KEY, playlistId || '');
+        await savePreferenceToIDB(SELECTED_PLAYLIST_KEY, selectedPlaylistId || '');
 
-        if (playlistId) {
+        if (selectedPlaylistId) {
             statusDiv.innerText = 'Loading playlist songs...';
             playlistSongs = [];
-            const cachedSongs = await loadPreferenceFromIDB(getPlaylistSongsCacheKey(playlistId));
+            const cachedSongs = await loadPreferenceFromIDB(getPlaylistSongsCacheKey(selectedPlaylistId));
             if (Array.isArray(cachedSongs) && cachedSongs.length > 0) {
                 playlistSongs = cachedSongs;
                 applyFilter();
@@ -1684,31 +1877,50 @@
             }
 
             const playlistClipMap = new Map();
+            const discoveredSongIds = new Set();
             let page = 1;
+            let lastDiagnostics = null;
             while (true) {
                 try {
                     const response = await api.runtime.sendMessage({
                         action: 'fetch_playlist_songs',
-                        playlistId,
+                        playlistId: selectedPlaylistId,
                         page
                     });
                     console.debug('[Downloader] Playlist API response:', { playlistId, page, response });
+                    if (response?.diagnostics) lastDiagnostics = response.diagnostics;
                     if (!response?.ok || !response.data) {
                         const errorMsg = response?.error || response?.status || 'unknown error';
-                        console.debug('[Downloader] Playlist load failed:', errorMsg);
-                        statusDiv.innerText = `Playlist load failed: ${errorMsg}`;
+                        const diagSummary = lastDiagnostics
+                            ? lastDiagnostics.map(d => `${d.source}:${d.status}(${d.clipCount})`).join(', ')
+                            : '';
+                        console.debug('[Downloader] Playlist load failed:', errorMsg, diagSummary);
+                        statusDiv.innerText = `Playlist load failed: ${errorMsg}` + (diagSummary ? ` [${diagSummary}]` : '');
                         break;
                     }
                     const data = response.data;
-                    const clips = extractPlaylistClipItems(data);
-                    console.debug('[Downloader] Extracted clips:', { clipsCount: clips.length, sample: clips[0] });
+                    let clips = extractPlaylistClipItems(data);
+                    clips = clips.map(item => {
+                        if (typeof item === 'string' && item.trim()) {
+                            return { song_id: item.trim() };
+                        }
+                        if (typeof item === 'number') {
+                            return { song_id: String(item) };
+                        }
+                        return item;
+                    });
+                    console.debug('[Downloader] Extracted clips:', { clipsCount: clips.length, sample: clips[0], dataKeys: data ? Object.keys(data) : null });
                     for (const c of clips) {
+                        const rawSongId = extractSongIdFromClipItem(c);
+                        if (rawSongId) {
+                            discoveredSongIds.add(rawSongId);
+                        }
                         const song = normalizeSongClip(c);
                         if (song.id) {
                             playlistClipMap.set(song.id, song);
                         }
                     }
-                    const total = data.num_total_results ?? data.total ?? 0;
+                    const total = extractPlaylistTotal(data, playlistClipMap.size);
                     if (!clips.length || playlistClipMap.size >= total) break;
                     page++;
                 } catch (e) {
@@ -1716,16 +1928,33 @@
                     break;
                 }
             }
+
+            const missingSongIds = Array.from(discoveredSongIds).filter(songId => {
+                const existingSong = playlistClipMap.get(songId);
+                return !existingSong || !existingSong.audio_url;
+            });
+
+            if (missingSongIds.length > 0) {
+                const hydratedSongs = await hydratePlaylistSongsById(missingSongIds);
+                hydratedSongs.forEach(song => {
+                    const existingSong = playlistClipMap.get(song.id);
+                    playlistClipMap.set(song.id, existingSong ? mergeSongMetadata(existingSong, song) : song);
+                });
+            }
+
             const fetchedPlaylistSongs = Array.from(playlistClipMap.values());
             if (fetchedPlaylistSongs.length > 0) {
                 playlistSongs = fetchedPlaylistSongs;
-                await savePreferenceToIDB(getPlaylistSongsCacheKey(playlistId), playlistSongs);
+                await savePreferenceToIDB(getPlaylistSongsCacheKey(selectedPlaylistId), playlistSongs);
                 statusDiv.innerText = `Playlist: loaded ${playlistSongs.length} song(s).`;
             } else if (Array.isArray(cachedSongs) && cachedSongs.length > 0) {
                 statusDiv.innerText = `Playlist API returned no songs; showing ${cachedSongs.length} cached song(s).`;
             } else {
                 playlistSongs = [];
-                statusDiv.innerText = 'Playlist returned no songs from the current API response.';
+                const diagSummary = lastDiagnostics
+                    ? lastDiagnostics.map(d => `${d.source}:${d.status}(${d.clipCount})`).join(', ')
+                    : '';
+                statusDiv.innerText = 'Playlist returned no songs.' + (diagSummary ? ` [${diagSummary}]` : '');
             }
 
             applyFilter();

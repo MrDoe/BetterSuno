@@ -1416,6 +1416,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!playlistId) { sendResponse({ ok: false, error: "No playlist ID" }); return; }
         const headers = { Authorization: `Bearer ${token}` };
         const enc = encodeURIComponent(playlistId);
+        const extractPlaylistPayload = (data) => {
+          if (!data || typeof data !== 'object') return null;
+          return data.playlist || data.data?.playlist || data.data || data;
+        };
         for (const url of [
           `https://studio-api.prod.suno.com/api/playlist/v2/${enc}?page=1&page_size=1`,
           `https://studio-api.prod.suno.com/api/playlist/${enc}?page=1&page_size=1`
@@ -1425,16 +1429,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           let data = null;
           try { data = await res.json(); } catch (e) {}
           if (!data) continue;
+          const playlist = extractPlaylistPayload(data);
+          if (!playlist) continue;
           sendResponse({
             ok: true,
             playlist: {
-              id: data.id || playlistId,
-              name: data.name || data.title || null,
-              image_url: data.image_url || null,
-              song_count: data.num_total_results ?? data.total ?? null,
-              is_public: data.is_public,
-              is_owned: data.is_owned,
-              is_owned_by_current_user: data.is_owned_by_current_user
+              id: playlist.id || playlistId,
+              name: playlist.name || playlist.title || null,
+              image_url: playlist.image_url || null,
+              song_count: playlist.num_total_results ?? playlist.total ?? playlist.total_results ?? playlist.total_count ?? null,
+              is_public: playlist.is_public,
+              is_owned: playlist.is_owned,
+              is_owned_by_current_user: playlist.is_owned_by_current_user
             }
           });
           return;
@@ -1483,31 +1489,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const token = await getApiTokenWithFallback('fetch_playlist_songs');
         if (!token) { sendResponse({ ok: false, error: "No auth token" }); return; }
-        const { playlistId, page = 1 } = msg;
-        if (!playlistId) { sendResponse({ ok: false, error: "No playlist ID" }); return; }
+        const { playlistId: rawPlaylistId, page = 1 } = msg;
+        if (!rawPlaylistId) { sendResponse({ ok: false, error: "No playlist ID" }); return; }
 
-        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+        const normalizePlaylistId = (raw) => {
+          if (!raw || typeof raw !== 'string') return '';
+          const trimmed = raw.trim();
+          const urlMatch = trimmed.match(/playlist\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)
+            || trimmed.match(/playlist\/([0-9a-f-]{30,36})/i);
+          if (urlMatch) return urlMatch[1];
+          return trimmed;
+        };
+
+        const playlistId = normalizePlaylistId(rawPlaylistId);
+        if (!playlistId) { sendResponse({ ok: false, error: "Invalid playlist ID" }); return; }
+
+        const headers = { 'Authorization': `Bearer ${token}` };
+        const jsonHeaders = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
         const playlistIdEncoded = encodeURIComponent(playlistId);
         const candidates = [
           {
             label: 'playlist-v2-detail',
             method: 'GET',
-            url: `https://studio-api.prod.suno.com/api/playlist/v2/${playlistIdEncoded}?page=${page}&page_size=50`
+            url: `https://studio-api.prod.suno.com/api/playlist/v2/${playlistIdEncoded}?page=${page}&page_size=50`,
+            headers
           },
           {
             label: 'playlist-detail',
             method: 'GET',
-            url: `https://studio-api.prod.suno.com/api/playlist/${playlistIdEncoded}?page=${page}&page_size=50`
+            url: `https://studio-api.prod.suno.com/api/playlist/${playlistIdEncoded}?page=${page}&page_size=50`,
+            headers
           },
           {
             label: 'playlist-clips',
             method: 'GET',
-            url: `https://studio-api.prod.suno.com/api/playlist/${playlistIdEncoded}/clips?page=${page}&page_size=50`
+            url: `https://studio-api.prod.suno.com/api/playlist/${playlistIdEncoded}/clips?page=${page}&page_size=50`,
+            headers
           },
           {
             label: 'feed-v3-playlist-filter',
             method: 'POST',
             url: 'https://studio-api.prod.suno.com/api/feed/v3',
+            headers: jsonHeaders,
             body: {
               limit: 50,
               cursor: null,
@@ -1530,69 +1553,151 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return data;
         };
 
-        const extractCount = (data) => {
-          if (!data || typeof data !== 'object') return 0;
-          const clipCollections = [
+        // Find any array of clip-like objects in the response, using known field names
+        // then falling back to a shallow recursive search.
+        const findClipArray = (data) => {
+          if (!data || typeof data !== 'object') return null;
+          if (Array.isArray(data) && data.length > 0) return data;
+
+          const knownPaths = [
             data.playlist_clips,
+            data.playlist_songs,
+            data.songs,
+            data.tracks,
+            data.entries,
             data.clips,
             data.results,
             data.items,
+            data.playlist?.playlist_clips,
+            data.playlist?.playlist_songs,
+            data.playlist?.songs,
+            data.playlist?.tracks,
+            data.playlist?.entries,
+            data.playlist?.clips,
+            data.playlist?.results,
+            data.playlist?.items,
             data.data?.playlist_clips,
+            data.data?.playlist_songs,
+            data.data?.songs,
+            data.data?.tracks,
+            data.data?.entries,
             data.data?.clips,
             data.data?.results,
-            data.data?.items
+            data.data?.items,
+            data.data?.playlist?.playlist_clips,
+            data.data?.playlist?.playlist_songs,
+            data.data?.playlist?.songs,
+            data.data?.playlist?.tracks,
+            data.data?.playlist?.entries,
+            data.data?.playlist?.clips,
+            data.data?.playlist?.results,
+            data.data?.playlist?.items
           ];
-          for (const collection of clipCollections) {
-            if (Array.isArray(collection)) {
-              return collection.length;
+          for (const collection of knownPaths) {
+            if (Array.isArray(collection) && collection.length > 0) {
+              return collection;
             }
           }
-          return 0;
+          // Deep fallback: search for ANY array of objects that look like clips
+          // (objects with an id or clip_id or song_id field)
+          const looksLikeClip = (item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+            return !!(item.id || item.clip_id || item.song_id || item.clip?.id || item.song?.id);
+          };
+          const searched = new Set();
+          const search = (node, depth) => {
+            if (!node || typeof node !== 'object' || depth > 4 || searched.has(node)) return null;
+            searched.add(node);
+            if (Array.isArray(node)) {
+              if (node.length > 0 && node.some(looksLikeClip)) return node;
+              return null;
+            }
+            for (const value of Object.values(node)) {
+              if (Array.isArray(value) && value.length > 0 && value.some(looksLikeClip)) {
+                return value;
+              }
+            }
+            for (const value of Object.values(node)) {
+              if (value && typeof value === 'object' && !Array.isArray(value)) {
+                const found = search(value, depth + 1);
+                if (found) return found;
+              }
+            }
+            return null;
+          };
+          return search(data, 0);
         };
 
+        const diagnostics = [];
         let lastResult = { ok: false, status: 0, data: null, source: null };
 
         for (const candidate of candidates) {
-          const response = await fetch(candidate.url, {
-            method: candidate.method,
-            headers,
-            body: candidate.body ? JSON.stringify(candidate.body) : undefined
-          });
+          let status = 0;
+          let ok = false;
+          let data = null;
+          let clipCount = 0;
+          let dataKeys = null;
+          let error = null;
 
-          const data = await tryParse(response);
-          const clipCount = extractCount(data);
-          console.debug('[BG] Playlist API attempt:', { 
-            source: candidate.label, 
-            status: response.status, 
-            ok: response.ok, 
-            clipCount,
-            dataKeys: data ? Object.keys(data) : null
-          });
-          
-          lastResult = {
-            ok: response.ok,
-            status: response.status,
-            data,
-            source: candidate.label
-          };
-
-          if (!response.ok) {
-            continue;
+          try {
+            const response = await fetch(candidate.url, {
+              method: candidate.method,
+              headers: candidate.headers,
+              body: candidate.body ? JSON.stringify(candidate.body) : undefined
+            });
+            status = response.status;
+            ok = response.ok;
+            data = await tryParse(response);
+            dataKeys = data ? (Array.isArray(data) ? `[array:${data.length}]` : Object.keys(data).join(',')) : null;
+            const clipArr = findClipArray(data);
+            clipCount = clipArr ? clipArr.length : 0;
+          } catch (e) {
+            error = e?.message || String(e);
           }
+
+          diagnostics.push({ source: candidate.label, status, ok, clipCount, dataKeys, error });
+          console.debug('[BG] Playlist API attempt:', diagnostics[diagnostics.length - 1]);
+
+          if (data) {
+            lastResult = { ok, status, data, source: candidate.label };
+          }
+
+          if (!ok || error) continue;
 
           if (clipCount > 0 || page > 1) {
             console.debug('[BG] Returning playlist response:', { source: candidate.label, clipCount });
-            sendResponse(lastResult);
+            sendResponse({ ...lastResult, diagnostics });
             return;
           }
         }
 
-        console.debug('[BG] No suitable playlist API endpoint worked, returning last result:', { 
-          ok: lastResult.ok, 
-          status: lastResult.status, 
-          dataKeys: lastResult.data ? Object.keys(lastResult.data) : null 
+        // HTML page fallback (page 1 only)
+        if (page === 1) {
+          try {
+            const pageFallback = await fetchPlaylistSongsFromPageHtml(playlistId);
+            if (pageFallback?.ok && pageFallback.data) {
+              const clipArr = findClipArray(pageFallback.data);
+              const clipCount = clipArr ? clipArr.length : 0;
+              console.debug('[BG] Returning playlist page fallback response:', {
+                source: pageFallback.source, clipCount
+              });
+              if (clipCount > 0) {
+                sendResponse({ ...pageFallback, diagnostics });
+                return;
+              }
+            }
+          } catch (pageError) {
+            console.debug('[BG] Playlist page fallback failed:', pageError?.message || String(pageError));
+          }
+        }
+
+        // Return the last fetched result with diagnostics (old behavior from ee6333)
+        console.debug('[BG] No playlist clips found, returning last result with diagnostics:', {
+          ok: lastResult.ok, status: lastResult.status, source: lastResult.source,
+          dataKeys: lastResult.data ? Object.keys(lastResult.data) : null,
+          diagnostics
         });
-        sendResponse(lastResult);
+        sendResponse({ ...lastResult, diagnostics });
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });
       }
@@ -2760,6 +2865,174 @@ function extractFirstVideoUrlFromHtml(html, songId = '') {
   return urls[0] || null;
 }
 
+function extractSongIdFromPlaylistEntry(entry) {
+  const candidates = [
+    entry?.clip?.id,
+    entry?.song?.id,
+    entry?.item?.id,
+    entry?.id,
+    entry?.clip_id,
+    entry?.clipId,
+    entry?.song_id,
+    entry?.songId,
+    entry?.gen_id
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+function extractJsonPayloadsFromHtml(html) {
+  const payloads = [];
+  const patterns = [
+    /<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/gi,
+    /<script[^>]*type=["']application\/(?:json|ld\+json)["'][^>]*>([\s\S]*?)<\/script>/gi
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      const raw = match[1]?.trim();
+      if (!raw) continue;
+
+      try {
+        payloads.push(JSON.parse(raw));
+      } catch (e) {
+        // ignore invalid JSON blobs embedded in HTML
+      }
+    }
+  }
+
+  return payloads;
+}
+
+function extractPlaylistEntriesFromJsonPayloads(payloads, playlistId) {
+  const trackCollectionKeys = new Set([
+    'playlist_clips',
+    'playlist_songs',
+    'songs',
+    'tracks',
+    'entries',
+    'clips',
+    'results',
+    'items'
+  ]);
+  const collected = [];
+  const seenIds = new Set();
+
+  const visit = (node, inPlaylistContext = false, path = []) => {
+    if (!node || typeof node !== 'object') return;
+
+    const playlistMatch = inPlaylistContext
+      || node.id === playlistId
+      || node.playlist_id === playlistId
+      || node.playlistId === playlistId
+      || (typeof node.url === 'string' && node.url.includes(`/playlist/${playlistId}`));
+
+    if (Array.isArray(node)) {
+      node.forEach(item => visit(item, playlistMatch, path));
+      return;
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      const loweredKey = String(key || '').toLowerCase();
+      const nextPath = path.concat(loweredKey);
+
+      if (Array.isArray(value)) {
+        const keyHintsPlaylist = loweredKey.includes('playlist') || nextPath.some(segment => segment.includes('playlist'));
+        if (trackCollectionKeys.has(loweredKey) && (playlistMatch || keyHintsPlaylist)) {
+          value.forEach(item => {
+            const songId = extractSongIdFromPlaylistEntry(item);
+            if (!songId || seenIds.has(songId)) return;
+            seenIds.add(songId);
+            collected.push(item);
+          });
+        }
+
+        value.forEach(item => visit(item, playlistMatch || keyHintsPlaylist, nextPath));
+        continue;
+      }
+
+      if (value && typeof value === 'object') {
+        visit(value, playlistMatch, nextPath);
+      }
+    }
+  };
+
+  payloads.forEach(payload => visit(payload, false, []));
+  return collected;
+}
+
+function extractPlaylistSongIdsFromHtml(html) {
+  if (typeof html !== 'string' || !html.trim()) return [];
+
+  const seen = new Set();
+  const songIds = [];
+  const patterns = [
+    /\/song\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi,
+    /["'](?:song_id|songId|clip_id|clipId|gen_id)["']\s*:\s*["']([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["']/gi
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      const songId = match[1];
+      if (!songId || seen.has(songId)) continue;
+      seen.add(songId);
+      songIds.push(songId);
+    }
+  }
+
+  return songIds;
+}
+
+async function fetchPlaylistSongsFromPageHtml(playlistId) {
+  const playlistUrl = `https://suno.com/playlist/${encodeURIComponent(playlistId)}`;
+  const response = await fetch(playlistUrl, {
+    method: 'GET',
+    credentials: 'include'
+  });
+
+  if (!response.ok) {
+    return { ok: false, status: response.status, error: `Playlist page request failed (${response.status})` };
+  }
+
+  const html = await response.text();
+  const payloads = extractJsonPayloadsFromHtml(html);
+  const playlistEntries = extractPlaylistEntriesFromJsonPayloads(payloads, playlistId);
+
+  if (playlistEntries.length > 0) {
+    return {
+      ok: true,
+      status: response.status,
+      data: {
+        playlist_clips: playlistEntries,
+        num_total_results: playlistEntries.length
+      },
+      source: 'playlist-page-html-json'
+    };
+  }
+
+  const songIds = extractPlaylistSongIdsFromHtml(html);
+  if (songIds.length > 0) {
+    return {
+      ok: true,
+      status: response.status,
+      data: {
+        playlist_clips: songIds.map(songId => ({ song_id: songId })),
+        num_total_results: songIds.length
+      },
+      source: 'playlist-page-html-ids'
+    };
+  }
+
+  return { ok: false, status: response.status, error: 'No playlist songs found on playlist page' };
+}
 // Fallback download for platforms without chrome.downloads (e.g. Firefox Android).
 // Fetches the resource in the background service worker (avoids CORS), converts to a
 // base64 data-URL, then injects a one-shot anchor-click into the active Suno tab.
