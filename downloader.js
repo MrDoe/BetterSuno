@@ -17,6 +17,7 @@
     let renderedSongCount = 0;
     let songListSentinel = null;
     let songListObserver = null;
+    let songItemObserver = null;
     const songItemCache = new Map(); // songId → DOM element; reused on re-renders to prevent image reload
     let metadataRefreshInFlight = false;
     const pendingMetadataRefreshIds = new Set();
@@ -324,8 +325,43 @@
         return null;
     }
 
-    function getSongThumbnailUrl(song) {
-        return song?.image_url || song?.thumbnail_url || song?.cover_image_url || song?.artwork_url || null;
+    function getSongThumbnailSource(song) {
+        if (!song || typeof song !== 'object') {
+            return null;
+        }
+
+        const imageUrl = song?.image_url ?? song?.thumbnail_url ?? song?.cover_image_url ?? song?.artwork_url ?? null;
+        if (imageUrl && typeof imageUrl === 'string' && imageUrl.trim()) {
+            return { url: getSunoThumbnailUrl(imageUrl.trim()), type: 'image' };
+        }
+
+        const webmUrl = song?.cover_video_url ?? song?.video_url ?? song?.video_cdn_url ?? song?.mp4_url ?? null;
+        if (webmUrl && typeof webmUrl === 'string' && webmUrl.trim()) {
+            const lower = webmUrl.split('?')[0].toLowerCase();
+            if (lower.endsWith('.webm') || lower.endsWith('.mp4')) {
+                return { url: webmUrl.trim(), type: 'video' };
+            }
+        }
+
+        return null;
+    }
+
+    function getSunoThumbnailUrl(url) {
+        if (typeof url !== 'string' || !url.trim()) {
+            return url;
+        }
+
+        try {
+            const parsed = new URL(url, window.location.href);
+            if (!parsed.hostname.endsWith('suno.ai')) {
+                return url;
+            }
+
+            parsed.searchParams.set('width', '100');
+            return parsed.toString();
+        } catch {
+            return url;
+        }
     }
 
     function areSongDetailsEqual(leftSong, rightSong) {
@@ -2545,6 +2581,32 @@
         });
     }
 
+    function ensureSongItemObserver() {
+        if (songItemObserver || !songList) {
+            return;
+        }
+
+        songItemObserver = new IntersectionObserver((entries) => {
+            const visibleIds = [];
+            entries.forEach(entry => {
+                if (entry.isIntersecting && entry.target instanceof HTMLElement) {
+                    const songId = entry.target.dataset.songId;
+                    if (songId) {
+                        visibleIds.push(songId);
+                        songItemObserver.unobserve(entry.target);
+                    }
+                }
+            });
+            if (visibleIds.length > 0) {
+                void refreshVisibleSongsMetadata(visibleIds);
+            }
+        }, {
+            root: songList,
+            rootMargin: '180px 0px 180px 0px',
+            threshold: 0.01
+        });
+    }
+
     function updateSongListSentinelState() {
         if (!songListSentinel) {
             return;
@@ -2632,7 +2694,7 @@
             item.classList.add('playing');
         }
 
-        const thumbnailUrl = getSongThumbnailUrl(song);
+        const thumbnailSource = getSongThumbnailSource(song);
 
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
@@ -2654,43 +2716,89 @@
             togglePlay(song);
         });
 
-        function attachThumbnailImage(src) {
+        function attachThumbnail(src, type) {
+            if (!src) return;
+            
+            thumbnail.classList.remove('is-fallback');
+            thumbnail.textContent = '';
+            thumbnail.innerHTML = '';
+
+            if (type === 'video') {
+                const videoEl = document.createElement('video');
+                videoEl.className = 'song-thumbnail-image';
+                videoEl.src = src;
+                videoEl.autoplay = true;
+                videoEl.loop = true;
+                videoEl.muted = true;
+                videoEl.playsInline = true;
+                videoEl.preload = 'metadata';
+                videoEl.style.display = 'block';
+                videoEl.style.width = '100%';
+                videoEl.style.height = '100%';
+                videoEl.style.objectFit = 'cover';
+                videoEl.addEventListener('error', () => {
+                    videoEl.remove();
+                    thumbnail.classList.add('is-fallback');
+                    thumbnail.textContent = '♪';
+                }, { once: true });
+                videoEl.addEventListener('loadedmetadata', () => {
+                    thumbnail.classList.remove('is-fallback');
+                }, { once: true });
+                thumbnail.appendChild(videoEl);
+                return;
+            }
+
             const thumbnailImage = document.createElement("img");
             thumbnailImage.className = "song-thumbnail-image";
             thumbnailImage.src = src;
             thumbnailImage.alt = song.title ? `${song.title} cover art` : 'Song cover art';
             thumbnailImage.loading = 'eager';
             thumbnailImage.decoding = 'async';
+            thumbnailImage.style.display = 'block';
+            thumbnailImage.style.width = '100%';
+            thumbnailImage.style.height = '100%';
+            thumbnailImage.addEventListener('load', () => {
+                thumbnail.classList.remove('is-fallback');
+                thumbnail.textContent = '';
+                thumbnail.innerHTML = '';
+                if (thumbnail.querySelector('img') !== thumbnailImage) {
+                    thumbnail.innerHTML = '';
+                    thumbnail.appendChild(thumbnailImage);
+                }
+            }, { once: true });
             thumbnailImage.addEventListener('error', () => {
                 thumbnail.classList.add('is-fallback');
-                thumbnailImage.remove();
-                if (!thumbnail.textContent) {
-                    thumbnail.textContent = '♪';
-                }
+                thumbnail.innerHTML = '';
+                thumbnail.textContent = '♪';
             }, { once: true });
             thumbnail.appendChild(thumbnailImage);
         }
 
-        if (cachedSongIds.has(song.id) && !song.image_cache_bust) {
-            // Try to load from the local imageCache first; fall back to CDN URL
+        const isCachedSong = cachedSongIds.has(song.id) && !song.image_cache_bust;
+
+        const attachSource = (source) => {
+            if (!source || !source.url) {
+                thumbnail.classList.add('is-fallback');
+                thumbnail.textContent = '♪';
+                return;
+            }
+            attachThumbnail(source.url, source.type);
+        };
+
+        if (isCachedSong) {
             getImageBlobFromIDB(song.id).then(imgBlob => {
                 if (imgBlob) {
                     const objUrl = URL.createObjectURL(imgBlob);
-                    attachThumbnailImage(objUrl);
-                    // Revoke the object URL once the image has loaded to free memory
+                    attachThumbnail(objUrl, 'image');
                     thumbnail.querySelector('img')?.addEventListener('load', () => URL.revokeObjectURL(objUrl), { once: true });
-                } else if (thumbnailUrl) {
-                    attachThumbnailImage(thumbnailUrl);
                 } else {
-                    thumbnail.classList.add('is-fallback');
-                    thumbnail.textContent = '♪';
+                    attachSource(thumbnailSource);
                 }
+            }).catch(() => {
+                attachSource(thumbnailSource);
             });
-        } else if (thumbnailUrl) {
-            attachThumbnailImage(thumbnailUrl);
         } else {
-            thumbnail.classList.add('is-fallback');
-            thumbnail.textContent = '♪';
+            attachSource(thumbnailSource);
         }
 
         const songInfo = document.createElement("div");
@@ -2833,6 +2941,12 @@
         item.appendChild(thumbnail);
         item.appendChild(songInfo);
         item.appendChild(actionsDiv);
+
+        ensureSongItemObserver();
+        if (songItemObserver) {
+            songItemObserver.observe(item);
+        }
+
         return item;
     }
 
