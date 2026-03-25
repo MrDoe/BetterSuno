@@ -59,11 +59,17 @@ function buildManifest(browser) {
 
   if (browser === 'chrome') {
     // Chrome: use service_worker, remove scripts, keep offscreen permission
-    delete manifest.background.scripts;
+    if (manifest.background) {
+      manifest.background.service_worker = 'background.js';
+      delete manifest.background.scripts;
+    }
     delete manifest.browser_specific_settings;
   } else {
     // Firefox: use scripts, remove service_worker, remove offscreen permission
-    delete manifest.background.service_worker;
+    if (manifest.background) {
+      delete manifest.background.service_worker;
+      manifest.background.scripts = ['background.js'];
+    }
     manifest.permissions = manifest.permissions.filter(p => p !== 'offscreen');
   }
 

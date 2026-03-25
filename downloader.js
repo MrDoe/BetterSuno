@@ -30,6 +30,26 @@
         lyrics: ['lyrics', 'display_lyrics', 'full_lyrics', 'raw_lyrics', 'prompt', 'metadata.lyrics', 'metadata.prompt', 'meta.lyrics'],
         ownerUserId: ['user_id', 'owner_user_id', 'user.id', 'user.user_id']
     };
+
+    async function sendMessageWithRetry(message, { retries = 10, initialDelayMs = 150 } = {}) {
+        let lastError = null;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+                return await api.runtime.sendMessage(message);
+            } catch (e) {
+                lastError = e;
+                const msg = e?.message || String(e);
+                if (!msg.includes('Could not establish connection') && !msg.includes('Receiving end does not exist')) {
+                    throw e;
+                }
+                if (attempt === retries) break;
+                const delay = initialDelayMs * Math.min(10, attempt + 1);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+        throw lastError;
+    }
+
     let currentFetchMode = 'idle';
     let currentMetadataRefreshRequested = false;
     let syncMeta = createDefaultSyncMeta();
@@ -1288,7 +1308,7 @@
         startFullRefresh({ confirmUser: true });
     }
 
-    function startFullRefresh(options = {}) {
+    async function startFullRefresh(options = {}) {
         const { confirmUser = true } = options;
         if (currentFetchMode !== 'idle') {
             return;
@@ -1315,30 +1335,26 @@
         statusDiv.innerText = "Refreshing full library...";
         console.log('[Downloader] Starting full refresh...');
         try {
-            api.runtime.sendMessage({
+            const response = await sendMessageWithRetry({
                 action: "fetch_songs",
                 isPublicOnly: isPublicOnly,
                 maxPages: maxPages
-            }, (response) => {
-                if (chrome.runtime.lastError) {
-                    console.debug('[Downloader] Message error:', chrome.runtime.lastError);
-                    statusDiv.innerText = "Fetching songs in background...";
-                } else if (response && response.error) {
-                    console.error('[Downloader] Fetch songs error:', response.error);
-                    statusDiv.innerText = response.error;
-                } else {
-                    console.log('[Downloader] Fetch request sent successfully');
-                }
             });
+            if (response?.error) {
+                console.error('[Downloader] Fetch songs error:', response.error);
+                statusDiv.innerText = response.error;
+            } else {
+                console.log('[Downloader] Fetch request sent successfully');
+            }
         } catch (e) {
-            console.debug('[Downloader] Could not send fetch request:', e.message);
+            console.debug('[Downloader] Could not send fetch request:', e);
             statusDiv.innerText = "Fetching songs in background...";
             currentFetchMode = 'idle';
             setFetchUiState(false);
         }
     }
 
-    function startIncrementalSync(options = {}) {
+    async function startIncrementalSync(options = {}) {
         const { automatic = false } = options;
 
         if (currentFetchMode !== 'idle') {
@@ -1366,31 +1382,28 @@
         statusDiv.innerText = automatic ? "Checking for new songs..." : "Refreshing songs and metadata...";
 
         try {
-            api.runtime.sendMessage({
+            const response = await sendMessageWithRetry({
                 action: "fetch_songs",
                 isPublicOnly: false,
                 maxPages: 0,
                 checkNewOnly: true,
                 knownIds: allSongs.map(song => song.id),
                 metadataRefreshIds
-            }, (response) => {
-                if (chrome.runtime.lastError) {
-                    console.debug('[Downloader] Incremental refresh error:', chrome.runtime.lastError);
-                } else if (response && response.error) {
-                    console.log('[Downloader] Incremental refresh error:', response.error);
-                } else {
-                    console.log('[Downloader] Incremental refresh request sent');
-                }
             });
+            if (response?.error) {
+                console.log('[Downloader] Incremental refresh error:', response.error);
+            } else {
+                console.log('[Downloader] Incremental refresh request sent');
+            }
         } catch (e) {
-            console.debug('[Downloader] Could not refresh:', e.message);
+            console.debug('[Downloader] Could not refresh:', e);
             currentFetchMode = 'idle';
             currentMetadataRefreshRequested = false;
             setFetchUiState(false);
-            statusDiv.innerText = "Refresh failed: " + e.message;
+            statusDiv.innerText = "Refresh failed: " + (e?.message || String(e));
             void saveSyncMeta({
                 syncStatus: 'error',
-                lastError: e.message
+                lastError: e?.message || String(e)
             });
         }
     }
@@ -1813,7 +1826,16 @@
             const allPlaylists = [];
             let page = 1;
             while (true) {
-                const response = await api.runtime.sendMessage({ action: 'fetch_user_playlists', page });
+                let response;
+                try {
+                    response = await sendMessageWithRetry({ action: 'fetch_user_playlists', page });
+                } catch (e) {
+                    const reason = e?.message || String(e);
+                    statusDiv.innerText = Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0
+                        ? `Loaded cached playlists. Refresh failed: ${reason}`
+                        : `Playlist load failed: ${reason}`;
+                    return;
+                }
                 if (!response?.ok || !response.data) {
                     const reason = response?.error || `HTTP ${response?.status || 'unknown'}`;
                     statusDiv.innerText = Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0
@@ -1882,12 +1904,20 @@
             let lastDiagnostics = null;
             while (true) {
                 try {
-                    const response = await api.runtime.sendMessage({
-                        action: 'fetch_playlist_songs',
-                        playlistId: selectedPlaylistId,
-                        page
-                    });
-                    console.debug('[Downloader] Playlist API response:', { playlistId, page, response });
+                    let response;
+                    try {
+                        response = await sendMessageWithRetry({
+                            action: 'fetch_playlist_songs',
+                            playlistId: selectedPlaylistId,
+                            page
+                        });
+                    } catch (e) {
+                        console.debug('[Downloader] Failed to fetch playlist songs page', page, e);
+                        const reason = e?.message || String(e);
+                        statusDiv.innerText = `Playlist load failed: ${reason}`;
+                        break;
+                    }
+                    console.debug('[Downloader] Playlist API response:', { playlistId: selectedPlaylistId, page, response });
                     if (response?.diagnostics) lastDiagnostics = response.diagnostics;
                     if (!response?.ok || !response.data) {
                         const errorMsg = response?.error || response?.status || 'unknown error';
@@ -2072,7 +2102,7 @@
             playlistSearchBtn.textContent = '…';
         }
         try {
-            const response = await api.runtime.sendMessage({ action: 'fetch_playlist_info', playlistId });
+            const response = await sendMessageWithRetry({ action: 'fetch_playlist_info', playlistId });
             if (response?.ok && response.playlist) {
                 await savePlaylistToDropdown(response.playlist, response.playlist.id);
                 renderPlaylistSearchResults([response.playlist]);
