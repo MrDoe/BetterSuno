@@ -68,9 +68,9 @@
     async function saveSongsToIDB(songs) {
         try {
             await withObjectStore('songsList', 'readwrite', (store) => {
-                store.clear();
+                // Keep existing songs by updating/inserting only; do not clear the song database.
                 songs.forEach(song => {
-                    store.add({ ...song, timestamp: Date.now() });
+                    store.put({ ...song, timestamp: Date.now() });
                 });
             });
         } catch (e) {

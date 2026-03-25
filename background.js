@@ -1560,6 +1560,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
 
           const data = await tryParse(response);
+          const clipCount = extractCount(data);
+          console.debug('[BG] Playlist API attempt:', { 
+            source: candidate.label, 
+            status: response.status, 
+            ok: response.ok, 
+            clipCount,
+            dataKeys: data ? Object.keys(data) : null
+          });
+          
           lastResult = {
             ok: response.ok,
             status: response.status,
@@ -1571,12 +1580,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             continue;
           }
 
-          if (extractCount(data) > 0 || page > 1) {
+          if (clipCount > 0 || page > 1) {
+            console.debug('[BG] Returning playlist response:', { source: candidate.label, clipCount });
             sendResponse(lastResult);
             return;
           }
         }
 
+        console.debug('[BG] No suitable playlist API endpoint worked, returning last result:', { 
+          ok: lastResult.ok, 
+          status: lastResult.status, 
+          dataKeys: lastResult.data ? Object.keys(lastResult.data) : null 
+        });
         sendResponse(lastResult);
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });

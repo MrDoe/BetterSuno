@@ -940,12 +940,58 @@
     }
 
     function setFetchUiState(active) {
-        if (stopFetchBtn) {
-            stopFetchBtn.style.display = active ? 'inline-block' : 'none';
-        }
         if (syncNewBtn) {
-            syncNewBtn.disabled = active;
-            syncNewBtn.textContent = active && currentFetchMode === 'incremental' ? 'Refreshing...' : 'Refresh';
+            syncNewBtn.disabled = false;
+            syncNewBtn.textContent = active ? 'Stop' : 'Refresh';
+            syncNewBtn.classList.toggle('btn-stop', active);
+        }
+        if (stopFetchBtn) {
+            stopFetchBtn.style.display = 'none';
+        }
+    }
+
+    function stopCurrentFetch() {
+        if (currentFetchMode === 'idle') {
+            return;
+        }
+
+        statusDiv.innerText = 'Stopping refresh...';
+        currentFetchMode = 'idle';
+        currentMetadataRefreshRequested = false;
+        setFetchUiState(false);
+
+        try {
+            api.runtime.sendMessage({ action: 'stop_fetch' });
+        } catch (e) {
+            console.debug('[Downloader] Could not send stop fetch request:', e?.message || String(e));
+        }
+    }
+
+    function formatRelativeTime(value) {
+        if (!value) {
+            return 'never';
+        }
+
+        const ts = typeof value === 'number' ? value : Date.parse(value);
+        if (!Number.isFinite(ts)) {
+            return 'unknown';
+        }
+
+        const diffMs = Date.now() - ts;
+        const diffMinutes = Math.round(diffMs / 60000);
+        if (diffMinutes <= 1) return 'just now';
+        if (diffMinutes < 60) return `${diffMinutes}m ago`;
+
+        const diffHours = Math.round(diffMinutes / 60);
+        if (diffHours < 24) return `${diffHours}h ago`;
+
+        const diffDays = Math.round(diffHours / 24);
+        if (diffDays < 7) return `${diffDays}d ago`;
+
+        try {
+            return new Date(ts).toLocaleDateString();
+        } catch {
+            return 'unknown';
         }
     }
 
@@ -1356,7 +1402,9 @@
         }
 
         if (metadataUpdateCount > 0 || addedSongs.length > 0) {
-            filteredSongs = [...allSongs];
+            if (!Array.isArray(playlistSongs)) {
+                filteredSongs = [...allSongs];
+            }
             applyFilter({
                 preserveScroll: true,
                 minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
@@ -1545,7 +1593,11 @@
 
     if (syncNewBtn) {
         syncNewBtn.addEventListener("click", () => {
-            startIncrementalSync({ automatic: false });
+            if (currentFetchMode !== 'idle') {
+                stopCurrentFetch();
+            } else {
+                startIncrementalSync({ automatic: false });
+            }
         });
     }
 
@@ -1614,16 +1666,21 @@
     }
 
     async function selectPlaylist(playlistId) {
+        const wasPlaylistMode = Array.isArray(playlistSongs);
         playlistSongs = null;
         await savePreferenceToIDB(SELECTED_PLAYLIST_KEY, playlistId || '');
 
         if (playlistId) {
             statusDiv.innerText = 'Loading playlist songs...';
+            playlistSongs = [];
             const cachedSongs = await loadPreferenceFromIDB(getPlaylistSongsCacheKey(playlistId));
             if (Array.isArray(cachedSongs) && cachedSongs.length > 0) {
                 playlistSongs = cachedSongs;
                 applyFilter();
                 statusDiv.innerText = `Loaded ${cachedSongs.length} cached playlist song(s). Refreshing...`;
+            } else {
+                // No cached songs: render empty playlist immediately while we fetch.
+                applyFilter();
             }
 
             const playlistClipMap = new Map();
@@ -1635,12 +1692,16 @@
                         playlistId,
                         page
                     });
+                    console.debug('[Downloader] Playlist API response:', { playlistId, page, response });
                     if (!response?.ok || !response.data) {
-                        statusDiv.innerText = `Playlist load failed: ${response?.error || response?.status || 'unknown error'}`;
+                        const errorMsg = response?.error || response?.status || 'unknown error';
+                        console.debug('[Downloader] Playlist load failed:', errorMsg);
+                        statusDiv.innerText = `Playlist load failed: ${errorMsg}`;
                         break;
                     }
                     const data = response.data;
                     const clips = extractPlaylistClipItems(data);
+                    console.debug('[Downloader] Extracted clips:', { clipsCount: clips.length, sample: clips[0] });
                     for (const c of clips) {
                         const song = normalizeSongClip(c);
                         if (song.id) {
@@ -1655,11 +1716,19 @@
                     break;
                 }
             }
-            playlistSongs = Array.from(playlistClipMap.values());
-            await savePreferenceToIDB(getPlaylistSongsCacheKey(playlistId), playlistSongs);
-            statusDiv.innerText = playlistSongs.length > 0
-                ? `Playlist: loaded ${playlistSongs.length} song(s).`
-                : 'Playlist returned no songs from the current API response.';
+            const fetchedPlaylistSongs = Array.from(playlistClipMap.values());
+            if (fetchedPlaylistSongs.length > 0) {
+                playlistSongs = fetchedPlaylistSongs;
+                await savePreferenceToIDB(getPlaylistSongsCacheKey(playlistId), playlistSongs);
+                statusDiv.innerText = `Playlist: loaded ${playlistSongs.length} song(s).`;
+            } else if (Array.isArray(cachedSongs) && cachedSongs.length > 0) {
+                statusDiv.innerText = `Playlist API returned no songs; showing ${cachedSongs.length} cached song(s).`;
+            } else {
+                playlistSongs = [];
+                statusDiv.innerText = 'Playlist returned no songs from the current API response.';
+            }
+
+            applyFilter();
         } else {
             statusDiv.innerText = 'Showing all songs.';
             if (libraryNeedsMetadataRefresh(allSongs)) {
@@ -1667,6 +1736,12 @@
                 setTimeout(() => startFullRefresh({ confirmUser: false }), 100);
             }
         }
+
+        const nowPlaylistMode = Array.isArray(playlistSongs);
+        if (wasPlaylistMode !== nowPlaylistMode) {
+            songItemCache.clear();
+        }
+
         applyFilter();
     }
 
@@ -1956,38 +2031,18 @@
             // start or continue fetching, ensure UI shows stop button
             setFetchUiState(true);
 
-            // Incremental page update
             const newSongs = message.songs || [];
             const wasCheckingNew = message.checkNewOnly && allSongs.length > 0;
 
-            if (wasCheckingNew) {
-                // Merge with existing songs
-                mergeSongs(newSongs);
+            // Always merge fetched data into existing song list, never replace list mid-load
+            const { addedCount, metadataUpdateCount } = mergeSongs(newSongs);
+
+            if (currentFetchMode === 'incremental' || wasCheckingNew) {
                 statusDiv.innerText = currentMetadataRefreshRequested
                     ? `Page ${message.pageNum}: scanned ${message.totalSongs} song(s)...`
                     : `Page ${message.pageNum}: ${message.totalSongs} new song(s) found...`;
             } else {
-                // Fresh fetch - replace all
-                allSongs = newSongs;
-                initSunoUserId();
-                filteredSongs = [...allSongs];
-
-                // Show song list immediately after first page
-                if (message.pageNum === 1) {
-                    songListContainer.style.display = "block";
-                    filterInput.value = "";
-                    loadFilterPreferences().then(() => {
-                        applyFilter();
-                    });
-                } else {
-                    // Just update the list
-                    applyFilter({
-                        preserveScroll: true,
-                        minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
-                    });
-                }
-                saveToStorage();
-                statusDiv.innerText = `Page ${message.pageNum}: ${allSongs.length} songs...`;
+                statusDiv.innerText = `Page ${message.pageNum}: ${allSongs.length} songs (added ${addedCount}, updated ${metadataUpdateCount}).`;
             }
         }
 
@@ -2029,10 +2084,13 @@
                     statusDiv.innerText = `${allSongs.length} songs (no new songs found).`;
                 }
             } else {
-                // Fresh fetch complete
-                allSongs = newSongs;
-                initSunoUserId();
-                filteredSongs = [...allSongs];
+                // Fresh fetch complete: merge new data into existing library rather than replacing.
+                const preMergeCount = allSongs.length;
+                const { addedCount, metadataUpdateCount } = mergeSongs(newSongs);
+
+                if (!sunoUserId) {
+                    initSunoUserId();
+                }
 
                 // Only show song list if not already visible (page updates already showed it)
                 if (songListContainer.style.display !== "block") {
@@ -2053,12 +2111,13 @@
                     lastSyncAt: completedAt,
                     lastFullSyncAt: completedAt,
                     lastSyncMode: 'full',
-                    lastAddedCount: allSongs.length,
+                    lastAddedCount: addedCount,
                     totalSongsAtLastSync: allSongs.length,
                     lastError: null,
                     syncStatus: 'complete'
                 });
-                statusDiv.innerText = `✅ Complete! Found ${allSongs.length} songs total.`;
+                const updatedPart = metadataUpdateCount > 0 ? `Updated ${metadataUpdateCount} existing song(s), ` : '';
+                statusDiv.innerText = `✅ Complete! ${updatedPart}Added ${addedCount} new song(s). Total: ${allSongs.length} (was ${preMergeCount}).`;
             }
             currentFetchMode = 'idle';
             currentMetadataRefreshRequested = false;
@@ -2341,14 +2400,45 @@
             sendSongReactionUpdate(song.id, targetValue ? 'LIKE' : 'DISLIKE');
         });
 
-        const dislikeBtn = document.createElement("button");
-        dislikeBtn.className = "song-action-btn dislike-btn";
-        dislikeBtn.textContent = '👎';
-        dislikeBtn.title = 'Dislike (remove like)';
-        dislikeBtn.addEventListener('click', (e) => {
+        let dislikeBtn;
+        if (!Array.isArray(playlistSongs)) {
+            dislikeBtn = document.createElement("button");
+            dislikeBtn.className = "song-action-btn dislike-btn";
+            dislikeBtn.textContent = '👎';
+            dislikeBtn.title = 'Dislike (remove like)';
+            dislikeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                updateSongLikeState(song.id, false);
+                sendSongReactionUpdate(song.id, 'DISLIKE');
+            });
+        }
+
+        const copyLinkBtn = document.createElement("button");
+        copyLinkBtn.className = "song-action-btn copy-link-btn";
+        copyLinkBtn.textContent = '🔗';
+        copyLinkBtn.title = 'Copy song link';
+        copyLinkBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            updateSongLikeState(song.id, false);
-            sendSongReactionUpdate(song.id, 'DISLIKE');
+            const songLink = `https://suno.com/song/${song.id}`;
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(songLink);
+                } else {
+                    const tempInput = document.createElement('textarea');
+                    tempInput.value = songLink;
+                    tempInput.style.position = 'fixed';
+                    tempInput.style.left = '-9999px';
+                    document.body.appendChild(tempInput);
+                    tempInput.focus();
+                    tempInput.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(tempInput);
+                }
+                statusDiv.innerText = 'Copied song link to clipboard.';
+            } catch (err) {
+                console.debug('[Downloader] Copy link failed', err);
+                statusDiv.innerText = 'Failed to copy song link.';
+            }
         });
 
         const gotoBtn = document.createElement("button");
@@ -2361,7 +2451,10 @@
         };
 
         actionsDiv.appendChild(likeBtn);
-        actionsDiv.appendChild(dislikeBtn);
+        actionsDiv.appendChild(copyLinkBtn);
+        if (dislikeBtn) {
+            actionsDiv.appendChild(dislikeBtn);
+        }
         actionsDiv.appendChild(gotoBtn);
 
         item.appendChild(checkbox);
