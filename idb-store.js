@@ -3,7 +3,7 @@
 import { requestToPromise, withStore } from './idb-helpers.js';
 
 const DB_NAME = 'BetterSunoicationsDB';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbInstance = null;
 
@@ -23,8 +23,21 @@ async function initDB() {
       reject(request.error);
     };
 
+    request.onblocked = () => {
+      // Another connection (e.g., content script) is open at a lower version.
+      // We cannot proceed until it closes; reject so callers can retry later.
+      console.warn('[IDB] Database upgrade blocked by another connection');
+      reject(new Error('IDB upgrade blocked'));
+    };
+
     request.onsuccess = () => {
       dbInstance = request.result;
+      // Close our connection if a newer version is requested by the content script
+      dbInstance.onversionchange = () => {
+        dbInstance.close();
+        dbInstance = null;
+        console.log('[IDB] Database connection closed due to version change');
+      };
       console.log('[IDB] Database initialized successfully');
       resolve(dbInstance);
     };
@@ -55,6 +68,11 @@ async function initDB() {
       if (!db.objectStoreNames.contains('audioCache')) {
         db.createObjectStore('audioCache', { keyPath: 'songId' });
         console.log('[IDB] Created audioCache store');
+      }
+
+      if (!db.objectStoreNames.contains('imageCache')) {
+        db.createObjectStore('imageCache', { keyPath: 'songId' });
+        console.log('[IDB] Created imageCache store');
       }
     };
   });

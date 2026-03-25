@@ -42,8 +42,24 @@
             const request = indexedDB.open(IDB_NAME, IDB_VERSION);
 
             request.onerror = () => reject(request.error);
+
+            request.onblocked = () => {
+                // Another connection (e.g. service worker) is open at a lower version.
+                // Retry after a short delay to allow it to close.
+                console.warn('[IDB] Database upgrade blocked; retrying after delay...');
+                setTimeout(() => {
+                    dbInstance = null;
+                    getDB().then(resolve, reject);
+                }, 500);
+            };
+
             request.onsuccess = () => {
                 dbInstance = request.result;
+                // Handle cases where a newer version is requested elsewhere
+                dbInstance.onversionchange = () => {
+                    dbInstance.close();
+                    dbInstance = null;
+                };
                 resolve(dbInstance);
             };
 
