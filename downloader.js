@@ -788,13 +788,14 @@
                 updatePlayerProgressUi();
             }
 
-            // Use cached audio if available, otherwise stream online
+            // Use cached audio if available, otherwise stream online (respect requested format if available)
             const cachedBlob = await getAudioBlobFromIDB(song.id);
             if (cachedBlob) {
                 currentBlobUrl = URL.createObjectURL(cachedBlob);
                 audioElement.src = currentBlobUrl;
             } else {
-                audioElement.src = song.audio_url;
+                const desiredFormat = getSelectedFormat();
+                audioElement.src = getAudioUrlForFormat(song, desiredFormat) || song.audio_url;
             }
 
             audioElement.currentTime = 0;
@@ -1158,8 +1159,51 @@
     const folderInput = document.getElementById("folder");
     function getSelectedFormat() {
         const el = document.querySelector('input[name="format"]:checked');
-        return el ? el.value : 'mp3';
+        return el ? el.value : 'm4a';
     }
+
+    function getAudioUrlForFormat(song, format) {
+        if (!song || !song.audio_url) return null;
+        const requested = String(format || '').trim().toLowerCase();
+        const originalUrl = String(song.audio_url || '').trim();
+
+        if (!requested || !originalUrl) return originalUrl;
+
+        const urlCandidates = [
+            song.audio_url,
+            song.stream_audio_url,
+            song.song_path,
+            song.metadata?.audio_url,
+            song.metadata?.stream_audio_url,
+            song.metadata?.song_path,
+            song.meta?.audio_url,
+            song.meta?.stream_audio_url,
+            song.meta?.song_path
+        ].filter(Boolean);
+
+        for (const candidate of urlCandidates) {
+            const normalized = String(candidate || '').toLowerCase();
+            if (requested === 'm4a' && normalized.includes('.m4a')) return candidate;
+            if (requested === 'wav' && normalized.includes('.wav')) return candidate;
+            if (requested === 'mp3' && normalized.includes('.mp3')) return candidate;
+        }
+
+        const queryIndex = originalUrl.indexOf('?');
+        const base = queryIndex >= 0 ? originalUrl.slice(0, queryIndex) : originalUrl;
+        const query = queryIndex >= 0 ? originalUrl.slice(queryIndex) : '';
+        const converted = base.replace(/\.([a-z0-9]{2,5})$/i, `.${requested}`);
+
+        if (converted !== base) {
+            return converted + query;
+        }
+
+        if (!/\bformat=/i.test(originalUrl)) {
+            return originalUrl + (originalUrl.includes('?') ? '&' : '?') + `format=${encodeURIComponent(requested)}`;
+        }
+
+        return originalUrl;
+    }
+
     const formatRadios = document.querySelectorAll('input[name="format"]');
     
     // Default settings (no longer in UI)
@@ -1819,7 +1863,9 @@
             statusDiv.innerText = `💾 Saving to DB ${cached + failed + 1}/${total}: ${song.title || 'Untitled'}...`;
 
             try {
-                const response = await fetch(song.audio_url);
+                const desiredFormat = getSelectedFormat();
+                const audioUrl = getAudioUrlForFormat(song, desiredFormat) || song.audio_url;
+                const response = await fetch(audioUrl);
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const blob = await response.blob();
                 await saveAudioBlobToIDB(song.id, blob);

@@ -1851,7 +1851,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     downloadSelectedSongs(
       msg.folderName,
       msg.songs,
-      msg.format || 'mp3',
+      msg.format || 'm4a',
       currentDownloadJobId,
       normalizeDownloadOptions(msg.downloadOptions)
     );
@@ -2206,6 +2206,49 @@ function extractAudioUrlFromClip(clip) {
   }
 
   return null;
+}
+
+function getAudioUrlForFormat(song, format) {
+  if (!song || !song.audio_url) return null;
+  const requested = String(format || '').trim().toLowerCase();
+  const originalUrl = String(song.audio_url || '').trim();
+  if (!requested || !originalUrl) return originalUrl;
+
+  const urlCandidates = [
+    song.audio_url,
+    song.stream_audio_url,
+    song.song_path,
+    song.metadata?.audio_url,
+    song.metadata?.stream_audio_url,
+    song.metadata?.song_path,
+    song.meta?.audio_url,
+    song.meta?.stream_audio_url,
+    song.meta?.song_path
+  ].filter(Boolean);
+
+  for (const candidate of urlCandidates) {
+    const normalized = String(candidate || '').toLowerCase();
+    if (requested === 'm4a' && normalized.includes('.m4a')) return candidate;
+    if (requested === 'wav' && normalized.includes('.wav')) return candidate;
+    if (requested === 'mp3' && normalized.includes('.mp3')) return candidate;
+  }
+
+  // Fallback: replace the extension in the main audio URL if present.
+  const queryIndex = originalUrl.indexOf('?');
+  const base = queryIndex >= 0 ? originalUrl.slice(0, queryIndex) : originalUrl;
+  const query = queryIndex >= 0 ? originalUrl.slice(queryIndex) : '';
+
+  const converted = base.replace(/\.([a-z0-9]{2,5})$/i, `.${requested}`);
+  if (converted !== base) {
+    return converted + query;
+  }
+
+  // Last resort: try adding format query param if not present.
+  if (!/format=/i.test(originalUrl)) {
+    return originalUrl + (originalUrl.includes('?') ? '&' : '?') + `format=${encodeURIComponent(requested)}`;
+  }
+
+  return originalUrl;
 }
 
 function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
@@ -3090,7 +3133,7 @@ function replaceFilenameExtension(filename, nextExtension) {
   return filename.replace(/\.[^.\/]+$/, `.${cleanExtension}`);
 }
 
-function inferAudioExtension(url, contentType, fallbackExtension = 'mp3') {
+function inferAudioExtension(url, contentType, fallbackExtension = 'm4a') {
   const normalizedType = String(contentType || '').toLowerCase();
   if (normalizedType.includes('audio/wav') || normalizedType.includes('audio/x-wav') || normalizedType.includes('audio/wave')) {
     return 'wav';
@@ -3111,7 +3154,7 @@ function inferAudioExtension(url, contentType, fallbackExtension = 'mp3') {
     return extensionMatch[1].toLowerCase();
   }
 
-  return String(fallbackExtension || 'mp3').toLowerCase();
+  return String(fallbackExtension || 'm4a').toLowerCase();
 }
 
 async function fetchResourceBlob(url, token) {
@@ -3165,7 +3208,7 @@ async function downloadBlobFile(blob, filename) {
   }
 }
 
-async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 0, downloadOptions = { music: true, lyrics: true, image: true }) {
+async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 0, downloadOptions = { music: true, lyrics: true, image: true }) {
   const cleanFolder = String(folderName || '').replace(/[^a-zA-Z0-9_-]/g, "");
 
   function notifyDownloadUi(message) {
@@ -3385,11 +3428,12 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
         }
 
         const requestedExt = format.toLowerCase();
+        const audioUrl = getAudioUrlForFormat(song, requestedExt) || song.audio_url;
         const baseName = `${safeTitle}_${song.id.slice(-4)}.${requestedExt}`;
         const directFilename = buildDownloadFilename(baseName);
 
         try {
-          await downloadOneFile(song.audio_url, directFilename);
+          await downloadOneFile(audioUrl, directFilename);
           downloadedSomething = true;
           downloadedFileCount += 1;
         } catch (directError) {
@@ -3399,7 +3443,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'mp3', jobId = 
           });
 
           let fallbackFilename = directFilename;
-          const audioFile = await fetchResourceBlob(song.audio_url, token);
+          const audioFile = await fetchResourceBlob(audioUrl, token);
           const actualExt = inferAudioExtension(audioFile.finalUrl, audioFile.contentType, requestedExt);
 
           if (actualExt && actualExt !== requestedExt) {

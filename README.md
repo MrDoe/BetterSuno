@@ -7,7 +7,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 ### 🧭 Updated Panel UI
 - **Top-left bell launcher** - BetterSuno now opens from a fixed bell in the top-left corner
 - **Song Library first** - The Song Library tab is the default first tab, with Notifications as the second tab
-- **Download controls near action button** - MP3/WAV + music/lyrics/image options are grouped right next to the Download button
+- **Download controls near action button** - M4A/WAV + music/lyrics/image options are grouped right next to the Download button
 
 ### 🔔 Notifications
 - **Live updates** - See your latest Suno notifications in real-time without grouping of similar events
@@ -15,7 +15,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 
 ### 🎵 Song Library & Batch Download
 - **Browse your library** - View all your Suno creations in one place
-- **Bulk downloads** - Download multiple own songs at once in MP3 or WAV format
+- **Bulk downloads** - Download multiple own songs at once in M4A or WAV format
 - **Complete packages** - Include lyrics and cover images with downloads of your own songs
 - **Smart filtering** - Filter by liked songs, stems, public/private, offline-only, or search by title
 - **Playlist picker** - Load your Suno playlists into a dropdown and view playlist tracks directly
@@ -61,7 +61,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 2. **Click the bell icon** in the top-left corner to open the panel
 3. **Use Song Library** (default tab) to load, filter, play, cache, and download tracks
 4. **Select a playlist** from the Playlist dropdown (optional) to load playlist tracks
-5. **Choose download options** (MP3/WAV, music/lyrics/image) next to the Download button. File downloads are limited to songs you own; tracks by other artists can still be saved to the local DB for offline playback.
+5. **Choose download options** (M4A/WAV, music/lyrics/image) next to the Download button. File downloads are limited to songs you own; tracks by other artists can still be saved to the local DB for offline playback.
 6. **Use the mini player** to play songs, seek by clicking the progress bar, and auto-advance through the list
 7. **Switch to Notifications** for live activity updates, or **Settings** for polling/storage controls
 

@@ -68,7 +68,7 @@
 
             <span id="selectControls">
               <button id="selectAll" class="btn-secondary" type="button" aria-pressed="false">Select All</button>
-              <button id="cacheAllBtn" class="btn-secondary" title="Download selected songs as MP3 into the browser database for offline playback">Save to DB</button>
+              <button id="cacheAllBtn" class="btn-secondary" title="Download selected songs as M4A into the browser database for offline playback">Save to DB</button>
               <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
               <button id="deleteCachedBtn" class="btn-danger" title="Delete the selected songs from the browser database">Delete from DB</button>
               <button id="syncNewBtn" class="btn-secondary" title="Refresh metadata for all songs (likes, privacy status, etc.)">Refresh</button>
@@ -92,7 +92,7 @@
                 <div id="fileFormat">
                   <div id="formatControls" style="display: flex; gap: 6px; align-items: center">
                     <label class="checkbox-label" style="margin: 0; padding: 0">
-                      <input type="radio" name="format" id="formatMp3" value="mp3" checked />MP3
+                      <input type="radio" name="format" id="formatM4a" value="m4a" checked />M4A
                     </label>
                     <label class="checkbox-label" style="margin: 0; padding: 0">
                       <input type="radio" name="format" id="formatWav" value="wav" />WAV
