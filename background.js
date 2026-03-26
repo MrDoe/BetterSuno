@@ -54,6 +54,7 @@ const stateReadyPromise = new Promise(r => { stateReady = r; });
 // Offscreen document creation guard (prevent race conditions)
 let offscreenCreating = false;
 let offscreenExists = false;
+let notificationsRefreshHostTabId = null;
 
 // Initialize state and restart polling for any enabled collectors
 (async function init() {
@@ -156,6 +157,27 @@ async function hasLiveBetterSunoContentScript(tabId) {
   } catch (err) {
     return false;
   }
+}
+
+async function claimNotificationsRefreshHost(tabId) {
+  if (typeof tabId !== 'number' || Number.isNaN(tabId)) {
+    return { isOwner: false, ownerTabId: null };
+  }
+
+  if (notificationsRefreshHostTabId === tabId) {
+    return { isOwner: true, ownerTabId: tabId };
+  }
+
+  if (typeof notificationsRefreshHostTabId === 'number') {
+    const ownerIsAlive = await hasLiveBetterSunoContentScript(notificationsRefreshHostTabId);
+    if (ownerIsAlive) {
+      return { isOwner: false, ownerTabId: notificationsRefreshHostTabId };
+    }
+    notificationsRefreshHostTabId = null;
+  }
+
+  notificationsRefreshHostTabId = tabId;
+  return { isOwner: true, ownerTabId: tabId };
 }
 
 // ============================================================================
@@ -556,6 +578,11 @@ async function ensureValidToken(tabId) {
 async function ensureOffscreen() {
   // Firefox doesn't have/need the offscreen API — polling runs inline
   if (isFirefox) return;
+  if (!chrome.offscreen || typeof chrome.offscreen.hasDocument !== 'function' || typeof chrome.offscreen.createDocument !== 'function') {
+    offscreenExists = false;
+    offscreenCreating = false;
+    return;
+  }
 
   // Quick return if we already know it exists
   if (offscreenExists) {
@@ -626,6 +653,22 @@ async function sendToOffscreen(message) {
     } else {
       log("⚠ Error sending to offscreen:", err.message);
     }
+  }
+}
+
+function safeRuntimeSendMessage(message) {
+  try {
+    return chrome.runtime.sendMessage(message).catch(() => {});
+  } catch (e) {
+    return Promise.resolve();
+  }
+}
+
+function safeTabsSendMessage(tabId, message) {
+  try {
+    return chrome.tabs.sendMessage(tabId, message).catch(() => {});
+  } catch (e) {
+    return Promise.resolve();
   }
 }
 
@@ -727,15 +770,11 @@ async function ffPollOnce(tabId) {
   showDesktopNotifications(tabId, mainState);
   saveState();
 
-  try {
-    chrome.runtime.sendMessage({
-      type: "stateUpdate",
-      tabId,
-      state: { ...mainState }
-    });
-  } catch (e) {
-    // No listeners, ignore
-  }
+  safeRuntimeSendMessage({
+    type: "stateUpdate",
+    tabId,
+    state: { ...mainState }
+  });
 }
 
 function ffRestartPolling(tabId) {
@@ -777,13 +816,6 @@ function ffHandleMessage(msg) {
 // ============================================================================
 
 async function getApiTokenWithFallback(logPrefix = 'api') {
-  let token = await ensureValidToken("global");
-
-  if (token) {
-    return token;
-  }
-
-  log(`${logPrefix}: global token failed, trying active Suno tab`);
   try {
     const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
     for (const sunoTab of sunoTabs) {
@@ -791,7 +823,7 @@ async function getApiTokenWithFallback(logPrefix = 'api') {
         continue;
       }
       log(`${logPrefix}: trying token from tab`, sunoTab.id);
-      token = await ensureValidToken(sunoTab.id);
+      const token = await ensureValidToken(sunoTab.id);
       if (token) {
         return token;
       }
@@ -802,6 +834,166 @@ async function getApiTokenWithFallback(logPrefix = 'api') {
 
   log(`${logPrefix}: no token available from any source`);
   return null;
+}
+
+async function fetchFeedV3WithRetry(token, body, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'feed/v3' } = {}) {
+  let retries = 0;
+  let delayMs = initialDelayMs;
+
+  while (retries <= maxRetries) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch('https://studio-api.prod.suno.com/api/feed/v3', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+
+      if (response.status === 429) {
+        if (retries >= maxRetries) {
+          return { ok: false, status: 429, data: null, rateLimited: true };
+        }
+
+        retries += 1;
+        log(`${logPrefix}: 429 Too Many Requests, waiting ${Math.round(delayMs / 1000)}s before retry ${retries}/${maxRetries}`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        delayMs = Math.min(delayMs * 2, 30000);
+        continue;
+      }
+
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (e) {
+        data = null;
+      }
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        data
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  return { ok: false, status: 0, data: null, rateLimited: true };
+}
+
+async function fetchLibraryPageWithRetry(token, page, pageSize, signal, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'library' } = {}) {
+  let retries = 0;
+  let delayMs = initialDelayMs;
+
+  while (retries <= maxRetries) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = () => controller.abort();
+
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(timeout);
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    try {
+      const response = await fetch(`https://studio-api.prod.suno.com/api/library?page=${page}&page_size=${pageSize}`, {
+        method: 'GET',
+        cache: 'no-store',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        signal: controller.signal
+      });
+
+      if (response.status === 429) {
+        if (retries >= maxRetries) {
+          return { ok: false, status: 429, data: null, rateLimited: true };
+        }
+
+        retries += 1;
+        log(`${logPrefix}: 429 Too Many Requests on page ${page}, waiting ${Math.round(delayMs / 1000)}s before retry ${retries}/${maxRetries}`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        delayMs = Math.min(delayMs * 2, 30000);
+        continue;
+      }
+
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (e) {
+        data = null;
+      }
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        data
+      };
+    } finally {
+      clearTimeout(timeout);
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+    }
+  }
+
+  return { ok: false, status: 0, data: null, rateLimited: true };
+}
+
+async function fetchFeedSongsByIds(token, songIds, { batchSize = 20, logPrefix = 'feed/v3 ids' } = {}) {
+  const normalizedSongIds = Array.from(new Set(
+    (Array.isArray(songIds) ? songIds : [])
+      .map(id => (id === null || id === undefined ? '' : String(id).trim()))
+      .filter(Boolean)
+  ));
+
+  const songsById = new Map();
+
+  for (let index = 0; index < normalizedSongIds.length; index += batchSize) {
+    const clipIds = normalizedSongIds.slice(index, index + batchSize);
+    const response = await fetchFeedV3WithRetry(token, {
+      filters: {
+        ids: {
+          presence: 'True',
+          clipIds
+        }
+      },
+      limit: clipIds.length
+    }, {
+      logPrefix
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        clips: []
+      };
+    }
+
+    const clips = response.data?.clips || response.data?.results || response.data?.items || [];
+    clips.forEach(clip => {
+      const clipId = clip?.id || clip?.clip?.id || clip?.song?.id || null;
+      if (!clipId) return;
+      songsById.set(String(clipId).trim(), clip);
+    });
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    clips: normalizedSongIds.map(id => songsById.get(id)).filter(Boolean)
+  };
 }
 
 // ============================================================================
@@ -877,7 +1069,7 @@ async function fetchExistingNotifications() {
       saveState();
 
       // Broadcast to UI
-      chrome.runtime.sendMessage({
+      safeRuntimeSendMessage({
         type: "stateUpdate",
         tabId: "global",
         state: { ...st }
@@ -940,7 +1132,7 @@ async function fetchOlderNotifications(beforeUtc) {
 
     saveState();
 
-    chrome.runtime.sendMessage({
+    safeRuntimeSendMessage({
       type: "stateUpdate",
       tabId: "global",
       state: { ...st }
@@ -985,15 +1177,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // tab-specific update and a mirror on the global slot.  the global
     // state is simply kept in sync with the most recently updated tab –
     // the UI doesn't care which tab performed the fetch.
-    try {
-      chrome.runtime.sendMessage({
-        type: "stateUpdate",
-        tabId: msg.tabId,
-        state: { ...st }
-      });
-    } catch (e) {
-      // ignore if no listeners
-    }
+    safeRuntimeSendMessage({
+      type: "stateUpdate",
+      tabId: msg.tabId,
+      state: { ...st }
+    });
 
     // also update global state to keep content.js happy
     const globalSt = ensureTabState("global");
@@ -1004,15 +1192,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     globalSt.intervalMs = st.intervalMs;
     globalSt.desktopNotificationsEnabled = st.desktopNotificationsEnabled;
 
-    try {
-      chrome.runtime.sendMessage({
-        type: "stateUpdate",
-        tabId: "global",
-        state: { ...globalSt }
-      });
-    } catch (e) {
-      // ignore
-    }
+    safeRuntimeSendMessage({
+      type: "stateUpdate",
+      tabId: "global",
+      state: { ...globalSt }
+    });
 
     sendResponse({ ok: true });
     return true;
@@ -1061,6 +1245,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ otherTabsCount });
     }).catch(() => {
       sendResponse({ otherTabsCount: 0 });
+    });
+    return true;
+  }
+
+  if (msg.type === "contentClaimRefreshHost") {
+    const senderTabId = sender.tab?.id;
+    claimNotificationsRefreshHost(senderTabId).then(result => {
+      sendResponse(result);
+    }).catch(() => {
+      sendResponse({ isOwner: false, ownerTabId: notificationsRefreshHostTabId });
     });
     return true;
   }
@@ -1239,63 +1433,72 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         let token = msg.token;
-        const songIds = msg.songIds || [];
+        const songIds = Array.isArray(msg.songIds) ? msg.songIds.filter(id => id !== null && id !== undefined).map(String) : [];
 
         if (!token) {
           token = await getApiTokenWithFallback('fetch_songs_by_ids');
         }
 
-        if (!token || !Array.isArray(songIds) || songIds.length === 0) {
+        if (!token || songIds.length === 0) {
           sendResponse({ ok: false, status: 0, error: "Missing token or song IDs" });
           return;
         }
 
-        // Fetch library pages until we collect all the requested song IDs
-        const songsByIdMap = new Map();
-        let page = 1;
-        let foundAll = false;
-        const maxPages = 100;
-
-        while (!foundAll && page <= maxPages) {
-          const controller = new AbortController();
-          const timeoutMs = 20000;
-          const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-          const response = await fetch(`https://studio-api.prod.suno.com/api/library?page=${page}&page_size=50`, {
-            method: 'GET',
-            headers: {
-              'Authorization': `Bearer ${token}`
-            },
-            signal: controller.signal
-          });
-
-          clearTimeout(timeout);
-
-          if (!response.ok) {
-            break;
-          }
-
-          const data = await response.json();
-          const clips = data?.clips || data?.results || [];
-
-          for (const clip of clips) {
-            if (songIds.includes(clip.id)) {
-              songsByIdMap.set(clip.id, clip);
-            }
-          }
-
-          // Stop if we've found all songs or if there are no more pages
-          if (songsByIdMap.size === songIds.length || clips.length === 0) {
-            foundAll = true;
-            break;
-          }
-
-          page++;
+        const targetIds = new Set(songIds.map(id => id.trim()).filter(id => id));
+        const directFeedLookup = await fetchFeedSongsByIds(token, songIds, { logPrefix: 'fetch_songs_by_ids' });
+        if (!directFeedLookup.ok && directFeedLookup.status === 429) {
+          sendResponse({ ok: false, status: 429, error: 'Rate limited while fetching songs by ids' });
+          return;
         }
 
-        const resultSongs = songIds
-          .map(id => songsByIdMap.get(id))
-          .filter(Boolean);
+        let resultSongs = directFeedLookup.clips || [];
+        let source = 'feed-by-ids';
+
+        if (resultSongs.length < targetIds.size) {
+          const missingIds = songIds.filter(id => !resultSongs.some(song => song?.id === String(id).trim()));
+          const identity = await fetchCurrentUserIdentity(token).catch(() => null);
+          const allIdentityIds = new Set(getIdentityIds(identity));
+          const userId = Array.from(allIdentityIds)[0] || null;
+
+          let fallbackSongs = [];
+          let fallbackSource = 'bulk-library';
+
+          try {
+            const bulkSongs = await fetchLibrarySongsBulk(token, userId, allIdentityIds, false, { trackAbortController: false });
+            if (Array.isArray(bulkSongs)) {
+              const songsById = new Map(bulkSongs.map(song => [song.id, song]));
+              fallbackSongs = missingIds
+                .map(id => songsById.get(String(id).trim()) || null)
+                .filter(Boolean);
+            } else {
+              fallbackSource = 'paged-library';
+            }
+          } catch (err) {
+            log('fetch_songs_by_ids: bulk fallback failed, falling back to paged library:', err?.message || String(err));
+            fallbackSource = 'paged-library';
+          }
+
+          if (fallbackSource === 'paged-library') {
+            fallbackSongs = await fetchLibrarySongsPaged(token, userId, allIdentityIds, false, {
+              targetIds: new Set(missingIds.map(id => String(id).trim()).filter(Boolean)),
+              trackAbortController: false,
+              logPrefix: 'fetch_songs_by_ids'
+            });
+          }
+
+          if (fallbackSongs.length > 0) {
+            const mergedById = new Map(resultSongs.map(song => [String(song.id).trim(), song]));
+            fallbackSongs.forEach(song => {
+              if (song?.id) {
+                mergedById.set(String(song.id).trim(), song);
+              }
+            });
+            resultSongs = songIds
+              .map(id => mergedById.get(String(id).trim()) || null)
+              .filter(Boolean);
+            source = `feed-by-ids+${fallbackSource}`;
+          }
+        }
 
         sendResponse({
           ok: true,
@@ -1303,7 +1506,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           data: {
             clips: resultSongs,
             count: resultSongs.length,
-            pagesChecked: page - 1
+            source: resultSongs.length > 0 ? source : 'none'
           }
         });
       } catch (e) {
@@ -1349,29 +1552,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           body.cursor = cursorValue;
         }
 
-        const controller = new AbortController();
-        const timeoutMs = 20000;
-        const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-        const response = await fetch('https://studio-api.prod.suno.com/api/feed/v3', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify(body),
-          signal: controller.signal
-        });
-
-        clearTimeout(timeout);
-
+        const response = await fetchFeedV3WithRetry(token, body, { logPrefix: 'fetch_feed_page' });
         const status = response.status;
-        let data = null;
-        try {
-          data = await response.json();
-        } catch (e) {
-          // ignore
-        }
+        const data = response.data || null;
 
         sendResponse({
           ok: response.ok,
@@ -1833,7 +2016,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // inform the page that fetching has begun so UI can show stop button
     if (fetchRequestorTabId) {
       try {
-        chrome.tabs.sendMessage(fetchRequestorTabId, { action: "fetch_started" });
+        safeTabsSendMessage(fetchRequestorTabId, { action: "fetch_started" });
       } catch (e) {
         // tab may have closed
       }
@@ -1862,7 +2045,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       // Notify the requesting tab so its UI can warn the user
       try {
-        chrome.tabs.sendMessage(fetchRequestorTabId, { action: "fetch_stopped" });
+        safeTabsSendMessage(fetchRequestorTabId, { action: "fetch_stopped" });
       } catch (e) {
         // ignore if tab gone
       }
@@ -1969,11 +2152,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (destTab) {
       chrome.tabs.sendMessage(destTab, { action: "log", text: msg.text }).catch(() => {});
     } else {
-      try {
-        chrome.runtime.sendMessage({ action: "log", text: msg.text });
-      } catch (e) {
-        // ignore
-      }
+      safeRuntimeSendMessage({ action: "log", text: msg.text });
     }
   }
 });
@@ -1986,11 +2165,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Only remove per-tab state slots that may still exist from legacy sessions.
 chrome.tabs.onRemoved.addListener(tabId => {
   log("tab removed", tabId);
+  if (notificationsRefreshHostTabId === tabId) {
+    notificationsRefreshHostTabId = null;
+  }
   if (tabState[tabId]) {
     if (isFirefox) {
       ffClearTab(tabId);
     } else {
-      chrome.runtime.sendMessage({ type: "offscreenClearTab", tabId });
+      safeRuntimeSendMessage({ type: "offscreenClearTab", tabId });
     }
     delete tabState[tabId];
   }
@@ -2050,7 +2232,7 @@ function broadcastDownloadState() {
   if (downloadRequestorTabId) {
     chrome.tabs.sendMessage(downloadRequestorTabId, msg).catch(() => {});
   } else {
-    try { chrome.runtime.sendMessage(msg); } catch (e) { /* ignore */ }
+    safeRuntimeSendMessage(msg);
   }
 }
 
@@ -2371,8 +2553,54 @@ function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
   };
 }
 
+function normalizeLikeFlag(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on', 'liked', 'like'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off', 'disliked', 'dislike', 'none', 'null', ''].includes(normalized)) return false;
+  }
+  return false;
+}
+
+function normalizeUpvoteCount(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return 0;
+}
+
 function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
   const rawClip = clip?.clip || clip || {};
+  const likeCandidate =
+    rawClip?.is_liked ??
+    rawClip?.liked ??
+    rawClip?.reaction_type ??
+    rawClip?.current_user_reaction ??
+    rawClip?.user_reaction ??
+    rawClip?.isLike ??
+    rawClip?.react ??
+    rawClip?.upvote ??
+    false;
+
+  const upvoteCandidate =
+    rawClip?.upvote_count ??
+    rawClip?.like_count ??
+    rawClip?.likes ??
+    rawClip?.score ??
+    rawClip?.stats?.upvotes ??
+    rawClip?.stats?.likes ??
+    0;
+
+  const upvoteCount = normalizeUpvoteCount(upvoteCandidate);
+
   return {
     id: rawClip.id,
     title: rawClip.title || `Untitled_${rawClip.id || 'song'}`,
@@ -2382,31 +2610,30 @@ function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
     lyrics: extractLyricsFromClip(rawClip),
     is_public: rawClip.is_public !== false,
     created_at: rawClip.created_at || rawClip.createdAt || clip?.created_at || null,
-    is_liked: rawClip.is_liked || false,
+    is_liked: normalizeLikeFlag(likeCandidate),
     is_stem: isStemClip(rawClip),
-    upvote_count: rawClip.upvote_count || 0,
+    upvote_count: upvoteCount,
     ...extractOwnershipMetadataFromClip(rawClip, currentUserId, currentUserIds)
   };
 }
 
-async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly) {
+async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly, options = {}) {
+  const { trackAbortController = true } = options;
   const controller = new AbortController();
-  activeFetchAbortController = controller;
+  if (trackAbortController) {
+    activeFetchAbortController = controller;
+  }
 
   try {
-    const response = await fetch(`https://studio-api.prod.suno.com/api/library?page=1&page_size=${BULK_LIBRARY_PAGE_SIZE}`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`
-      },
-      signal: controller.signal
+    const response = await fetchLibraryPageWithRetry(token, 1, BULK_LIBRARY_PAGE_SIZE, controller.signal, {
+      logPrefix: 'bulk-library'
     });
 
     if (!response.ok) {
       throw new Error(`Bulk library fetch failed with HTTP ${response.status}`);
     }
 
-    const data = await response.json();
+    const data = response.data || {};
     const clips = data?.clips || data?.results || data?.items || data?.data || [];
     const totalResults = Number(data?.num_total_results ?? data?.total ?? data?.count ?? 0);
     const hasMore = data?.has_more === true || data?.next_cursor != null;
@@ -2420,7 +2647,81 @@ async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly) {
       .filter(clip => !isPublicOnly || clip?.is_public)
       .map(clip => normalizeLibraryClip(clip, userId, userIds));
   } finally {
-    if (activeFetchAbortController === controller) {
+    if (trackAbortController && activeFetchAbortController === controller) {
+      activeFetchAbortController = null;
+    }
+  }
+}
+
+async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, options = {}) {
+  const {
+    targetIds = null,
+    pageSize = 200,
+    maxPages = 200,
+    trackAbortController = true,
+    logPrefix = 'library'
+  } = options;
+
+  const controller = new AbortController();
+  if (trackAbortController) {
+    activeFetchAbortController = controller;
+  }
+
+  try {
+    const normalizedTargetIds = targetIds instanceof Set
+      ? new Set(Array.from(targetIds).map(id => String(id).trim()).filter(Boolean))
+      : null;
+    const songs = [];
+    const foundIds = new Set();
+
+    for (let page = 1; page <= maxPages; page += 1) {
+      const response = await fetchLibraryPageWithRetry(token, page, pageSize, controller.signal, { logPrefix });
+
+      if (!response.ok) {
+        throw new Error(`${logPrefix} failed with HTTP ${response.status}`);
+      }
+
+      const data = response.data || {};
+      const clips = data?.clips || data?.results || data?.items || data?.data || [];
+
+      if (!clips.length) {
+        break;
+      }
+
+      clips.forEach(clip => {
+        if (isPublicOnly && clip?.is_public === false) {
+          return;
+        }
+
+        const normalized = normalizeLibraryClip(clip, userId, userIds);
+        if (!normalized?.id) {
+          return;
+        }
+
+        if (normalizedTargetIds && !normalizedTargetIds.has(normalized.id)) {
+          return;
+        }
+
+        songs.push(normalized);
+        if (normalizedTargetIds) {
+          foundIds.add(normalized.id);
+        }
+      });
+
+      const totalResults = Number(data?.num_total_results ?? data?.total ?? data?.count ?? 0);
+      const hasMore = data?.has_more === true || data?.next_cursor != null;
+      const reachedEnd = !hasMore && clips.length < pageSize;
+      const foundAllTargets = normalizedTargetIds && foundIds.size >= normalizedTargetIds.size;
+      const exhaustedCount = Number.isFinite(totalResults) && page * pageSize >= totalResults;
+
+      if (foundAllTargets || reachedEnd || exhaustedCount) {
+        break;
+      }
+    }
+
+    return songs;
+  } finally {
+    if (trackAbortController && activeFetchAbortController === controller) {
       activeFetchAbortController = null;
     }
   }
@@ -2669,6 +2970,51 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
       }
     }
 
+    const hasMetadataRefreshTargets = checkNewOnly && Array.isArray(metadataRefreshIds) && metadataRefreshIds.length > 0;
+    if (hasMetadataRefreshTargets) {
+      try {
+        notifyTab({ action: "log", text: "🔄 Refreshing library metadata via library API..." });
+        let bulkSongs = null;
+
+        try {
+          bulkSongs = await fetchLibrarySongsBulk(token, userId, new Set(allIdentityIds), isPublicOnly);
+        } catch (err) {
+          notifyTab({ action: "log", text: `ℹ️ Bulk library metadata refresh failed (${err.message}). Falling back to paged library fetch...` });
+        }
+
+        if (stopFetchRequested) {
+          return;
+        }
+
+        if (Array.isArray(bulkSongs)) {
+          isFetching = false;
+          notifyTab({ action: "songs_fetched", songs: bulkSongs, checkNewOnly: true });
+          return;
+        }
+
+        notifyTab({ action: "log", text: "ℹ️ Bulk library metadata refresh appears truncated. Falling back to paged library fetch..." });
+        const pagedSongs = await fetchLibrarySongsPaged(token, userId, new Set(allIdentityIds), isPublicOnly, {
+          logPrefix: 'refresh_library_metadata'
+        });
+
+        if (stopFetchRequested) {
+          return;
+        }
+
+        isFetching = false;
+        notifyTab({ action: "songs_fetched", songs: pagedSongs, checkNewOnly: true });
+        return;
+      } catch (err) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+
+        isFetching = false;
+        notifyTab({ action: "fetch_error", error: `❌ Metadata refresh failed: ${err.message}` });
+        return;
+      }
+    }
+
     await chrome.scripting.executeScript({
       target: { tabId: tabId },
       func: (t, p, m, c, k, u, ids, mr) => {
@@ -2700,155 +3046,28 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
 
 async function fetchCurrentUserIdentity(token) {
   log('[fetchCurrentUserIdentity] START - token length:', token?.length || 0);
-  
-  let identity = { id: null, ids: [], handle: null, displayName: null };
-  
+  const identity = { id: null, ids: [], handle: null, displayName: null };
+
   try {
-    const endpoints = [
-      'https://studio-api.prod.suno.com/api/me/',
-      'https://studio-api.prod.suno.com/api/me'
-    ];
+    const preferredTabs = [];
+    if (typeof downloadRequestorTabId === 'number') preferredTabs.push(downloadRequestorTabId);
+    if (typeof fetchRequestorTabId === 'number') preferredTabs.push(fetchRequestorTabId);
 
-    for (const url of endpoints) {
-      try {
-        log('[fetchCurrentUserIdentity] Fetching from:', url);
-        const res = await fetch(url, {
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        log('[fetchCurrentUserIdentity] Response status:', res.status);
-        if (!res.ok) continue;
+    const sunoTabs = await chrome.tabs.query({ url: 'https://suno.com/*' });
+    const candidateTabIds = Array.from(new Set([
+      ...preferredTabs,
+      ...sunoTabs.map(tab => tab.id).filter(tabId => typeof tabId === 'number')
+    ]));
 
-        const data = await res.json();
-        log('[fetchCurrentUserIdentity] Got data from /api/me/');
-        
-        const candidateIds = collectNormalizedIds([
-          data?.id,
-          data?.user_id,
-          data?.account_id,
-          data?.profile_id,
-          data?.user?.id,
-          data?.user?.user_id,
-          data?.user?.account_id,
-          data?.user?.profile_id,
-          data?.profile?.id,
-          data?.profile?.user_id,
-          data?.profile?.owner_id,
-          ...collectUuidLikeIds(data)
-        ]);
-        
-        identity = {
-          id: candidateIds[0] || null,
-          ids: candidateIds,
-          handle: normalizeHandle(pickFirstNonEmptyString([
-            data?.handle,
-            data?.username,
-            data?.user?.handle,
-            data?.user?.username,
-            data?.profile?.handle,
-            data?.profile?.username
-          ])),
-          displayName: pickFirstNonEmptyString([
-            data?.display_name,
-            data?.name,
-            data?.user?.display_name,
-            data?.user?.name,
-            data?.profile?.display_name,
-            data?.profile?.name
-          ])
-        };
-
-        log('[fetchCurrentUserIdentity] Base identity IDs from /api/me/:', identity.ids);
-        break;  // Got data, stop trying endpoints
-      } catch (e) {
-        log('[fetchCurrentUserIdentity] Error fetching from', url, ':', e?.message);
-        // try next endpoint
+    for (const tabId of candidateTabIds) {
+      const tabIdentity = await fetchCurrentUserIdentityDirect(tabId);
+      if (tabIdentity && (tabIdentity.ids.length > 0 || tabIdentity.handle || tabIdentity.displayName)) {
+        log('[fetchCurrentUserIdentity] Got identity from tab', tabId);
+        return tabIdentity;
       }
     }
   } catch (e) {
-    log('[fetchCurrentUserIdentity] Outer catch:', e?.message);
-  }
-
-  // ALWAYS try to get Suno profile UUID from library (whether /api/me/ worked or not)
-  const hasUuid = identity.ids.some(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id));
-  log('[fetchCurrentUserIdentity] Has UUID in identity?', hasUuid);
-  
-  if (!hasUuid) {
-    log('[fetchCurrentUserIdentity] No UUID, fetching library to extract Suno profile UUID...');
-    try {
-      const libRes = await fetch('https://studio-api.prod.suno.com/api/library?page=1', {
-        method: 'GET',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      log('[fetchCurrentUserIdentity] Library fetch status:', libRes.status);
-      
-      if (libRes.ok) {
-        const libData = await libRes.json();
-        const items = libData?.clips || libData?.results || libData?.items || libData?.data || [];
-        
-        log('[fetchCurrentUserIdentity] Found items in library:', items.length);
-        
-        let ownSong = items.find(item => {
-          const c = item?.clip || item;
-          if (c?.is_owned_by_current_user === true || c?.is_own_song === true) return true;
-          const ownerHandle = c?.handle || c?.user_handle || c?.owner_handle;
-          if (ownerHandle && identity.handle && String(ownerHandle).toLowerCase() === String(identity.handle).toLowerCase()) return true;
-          return false;
-        });
-
-        // Don't arbitrarily pull the first song's UUID since it might belong to another artist in the library.
-        if (!ownSong) {
-          log('[fetchCurrentUserIdentity] Could not definitively verify any library song as owned. Skipping UUID extraction.');
-        } else {
-          log('[fetchCurrentUserIdentity] Found verified own song!');
-        }
-        
-        if (ownSong) {
-          const songClip = ownSong?.clip || ownSong;
-          const ownerUuid = songClip?.owner_user_id || songClip?.user_id || songClip?.profile_id;
-          log('[fetchCurrentUserIdentity] Extracted owner UUID:', ownerUuid);
-          
-          if (ownerUuid && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ownerUuid)) {
-            log('[fetchCurrentUserIdentity] Valid UUID found! Adding to identity:', ownerUuid);
-            identity.ids = collectNormalizedIds([...identity.ids, ownerUuid]);
-            log('[fetchCurrentUserIdentity] Updated identity IDs with UUID:', identity.ids);
-          } else {
-            log('[fetchCurrentUserIdentity] Owner UUID is not a valid UUID format:', ownerUuid);
-          }
-        }
-      } else {
-        log('[fetchCurrentUserIdentity] Library fetch failed with status:', libRes.status);
-      }
-    } catch (e) {
-      log('[fetchCurrentUserIdentity] Failed to fetch library:', e?.message);
-    }
-  }
-
-  // If we still have no identity, try direct tab fallback
-  if (identity.ids.length === 0 && !identity.handle && !identity.displayName) {
-    log('[fetchCurrentUserIdentity] No identity from /api/me/, trying direct tab fallback...');
-    try {
-      const preferredTabs = [];
-      if (typeof downloadRequestorTabId === 'number') preferredTabs.push(downloadRequestorTabId);
-      if (typeof fetchRequestorTabId === 'number') preferredTabs.push(fetchRequestorTabId);
-
-      const sunoTabs = await chrome.tabs.query({ url: 'https://suno.com/*' });
-      const candidateTabIds = Array.from(new Set([
-        ...preferredTabs,
-        ...sunoTabs.map(tab => tab.id).filter(tabId => typeof tabId === 'number')
-      ]));
-
-      for (const tabId of candidateTabIds) {
-        const tabIdentity = await fetchCurrentUserIdentityDirect(tabId);
-        if (tabIdentity && (tabIdentity.ids.length > 0 || tabIdentity.handle || tabIdentity.displayName)) {
-          log('[fetchCurrentUserIdentity] Got identity from tab', tabId);
-          identity = tabIdentity;
-          break;
-        }
-      }
-    } catch (e) {
-      log('[fetchCurrentUserIdentity] Direct tab fallback failed:', e?.message || String(e));
-    }
+    log('[fetchCurrentUserIdentity] Direct tab fallback failed:', e?.message || String(e));
   }
 
   log('[fetchCurrentUserIdentity] FINAL identity:', identity);
@@ -3258,11 +3477,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
       chrome.tabs.sendMessage(downloadRequestorTabId, message).catch(() => {});
       return;
     }
-    try {
-      chrome.runtime.sendMessage(message);
-    } catch (e) {
-      // ignore
-    }
+    safeRuntimeSendMessage(message);
   }
 
   try {

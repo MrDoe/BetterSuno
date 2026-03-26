@@ -17,12 +17,17 @@
     let renderedSongCount = 0;
     let songListSentinel = null;
     let songListObserver = null;
-    let songItemObserver = null;
     const songItemCache = new Map(); // songId → DOM element; reused on re-renders to prevent image reload
     let metadataRefreshInFlight = false;
     const pendingMetadataRefreshIds = new Set();
+    let metadataRefreshBlockedUntil = 0;
     let songListVisibleRefreshTimer = null;
-    const VISIBLE_SONG_REFRESH_DEBOUNCE_MS = 120;
+    let songListVisibleRefreshFollowupTimer = null;
+    let songListVisibleRefreshIntervalTimer = null;
+    const VISIBLE_SONG_REFRESH_DEBOUNCE_MS = 180;
+    const VISIBLE_SONG_REFRESH_REPEAT_MS = 1000;
+    const VISIBLE_SONG_REFRESH_INTERVAL_MS = 10 * 1000;
+    const METADATA_REFRESH_ERROR_BACKOFF_MS = 30 * 1000;
     const SYNC_META_KEY = 'sunoSyncMeta';
     const PLAYLISTS_KEY = 'sunoPlaylists';
     const SELECTED_PLAYLIST_KEY = 'sunoSelectedPlaylist';
@@ -377,6 +382,15 @@
         return null;
     }
 
+    function getSongThumbnailSignature(song) {
+        const source = getSongThumbnailSource(song);
+        if (!source?.url) {
+            return '';
+        }
+
+        return `${source.type || 'unknown'}:${source.url}`;
+    }
+
     function getSunoThumbnailUrl(url) {
         if (typeof url !== 'string' || !url.trim()) {
             return url;
@@ -395,6 +409,32 @@
         }
     }
 
+    function normalizeLikeFlag(value) {
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'number') return value !== 0;
+        if (typeof value === 'string') {
+            const normalized = value.trim().toLowerCase();
+            if (['1', 'true', 'yes', 'on', 'liked', 'like'].includes(normalized)) return true;
+            if (['0', 'false', 'no', 'off', 'disliked', 'dislike', 'none', 'null', ''].includes(normalized)) return false;
+        }
+        return false;
+    }
+
+    function normalizeUpvoteCount(value) {
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+            return Math.floor(value);
+        }
+
+        if (typeof value === 'string') {
+            const parsed = Number(value.trim());
+            if (Number.isFinite(parsed) && parsed >= 0) {
+                return Math.floor(parsed);
+            }
+        }
+
+        return 0;
+    }
+
     function areSongDetailsEqual(leftSong, rightSong) {
         return (
             (leftSong?.title || '') === (rightSong?.title || '') &&
@@ -406,9 +446,9 @@
             (leftSong?.owner_handle || '') === (rightSong?.owner_handle || '') &&
             (leftSong?.owner_display_name || '') === (rightSong?.owner_display_name || '') &&
             leftSong?.is_public === rightSong?.is_public &&
-            leftSong?.is_liked === rightSong?.is_liked &&
+            normalizeLikeFlag(leftSong?.is_liked) === normalizeLikeFlag(rightSong?.is_liked) &&
             leftSong?.is_stem === rightSong?.is_stem &&
-            (leftSong?.upvote_count ?? null) === (rightSong?.upvote_count ?? null) &&
+            normalizeUpvoteCount(leftSong?.upvote_count) === normalizeUpvoteCount(rightSong?.upvote_count) &&
             (leftSong?.is_owned_by_current_user ?? null) === (rightSong?.is_owned_by_current_user ?? null)
         );
     }
@@ -422,9 +462,9 @@
             image_url: freshSong.image_url || existingSong.image_url,
             lyrics: freshSong.lyrics ?? existingSong.lyrics,
             is_public: typeof freshSong.is_public === 'boolean' ? freshSong.is_public : existingSong.is_public,
-            is_liked: typeof freshSong.is_liked === 'boolean' ? freshSong.is_liked : (existingSong.is_liked ?? false),
+            is_liked: freshSong.is_liked !== undefined ? normalizeLikeFlag(freshSong.is_liked) : normalizeLikeFlag(existingSong.is_liked),
             is_stem: freshSong.is_stem ?? existingSong.is_stem,
-            upvote_count: freshSong.upvote_count ?? existingSong.upvote_count,
+            upvote_count: freshSong.upvote_count !== undefined ? normalizeUpvoteCount(freshSong.upvote_count) : normalizeUpvoteCount(existingSong.upvote_count),
             owner_user_id: freshSong.owner_user_id || existingSong.owner_user_id,
             owner_handle: freshSong.owner_handle || existingSong.owner_handle,
             owner_display_name: freshSong.owner_display_name || existingSong.owner_display_name,
@@ -435,6 +475,43 @@
     function normalizeSongClip(rawClip) {
         const clip = rawClip?.clip || rawClip?.song || rawClip?.item || rawClip || {};
         const songId = extractSongIdFromClipItem(rawClip);
+
+        const upvoteCandidate =
+            clip.upvote_count ??
+            rawClip?.upvote_count ??
+            clip.like_count ??
+            rawClip?.like_count ??
+            clip.likes ??
+            rawClip?.likes ??
+            clip.score ??
+            rawClip?.score ??
+            clip.stats?.upvotes ??
+            rawClip?.stats?.upvotes ??
+            clip.stats?.likes ??
+            rawClip?.stats?.likes;
+
+        const upvoteCount = normalizeUpvoteCount(upvoteCandidate);
+
+        const likeCandidate =
+            clip.is_liked ??
+            rawClip?.is_liked ??
+            clip.liked ??
+            rawClip?.liked ??
+            clip.reaction_type ??
+            rawClip?.reaction_type ??
+            clip.current_user_reaction ??
+            rawClip?.current_user_reaction ??
+            clip.user_reaction ??
+            rawClip?.user_reaction ??
+            clip.isLike ??
+            rawClip?.isLike ??
+            clip.react ??
+            rawClip?.react ??
+            clip.upvote ??
+            rawClip?.upvote;
+
+        const isLiked = normalizeLikeFlag(likeCandidate);
+
         return {
             id: songId,
             title: clip.title || rawClip?.title || `Untitled_${songId || 'song'}`,
@@ -448,9 +525,9 @@
                 || extractTextFromPaths(rawClip, SONG_CLIP_FIELD_PATHS.lyrics),
             is_public: (clip.is_public ?? rawClip?.is_public) !== false,
             created_at: clip.created_at || clip.createdAt || rawClip?.created_at || null,
-            is_liked: clip.is_liked || rawClip?.is_liked || false,
+            is_liked: isLiked,
             is_stem: isStemClip(clip),
-            upvote_count: clip.upvote_count || rawClip?.upvote_count || 0,
+            upvote_count: upvoteCount,
             owner_user_id: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null)
                 || extractFirstMatchingValue(rawClip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null),
             owner_handle: extractFirstMatchingValue(clip, ['handle', 'user_handle', 'owner_handle', 'creator_handle', 'author_handle', 'username'], value => (typeof value === 'string' ? value.trim() : null))
@@ -1281,15 +1358,65 @@
             .filter(Boolean);
     }
 
+    function refreshVisibleSongItems(songIds) {
+        if (!songList || !Array.isArray(songIds) || songIds.length === 0) {
+            return;
+        }
+
+        songIds.forEach(songId => {
+            const oldItem = Array.from(songList.querySelectorAll('.song-item[data-song-id]'))
+                .find(el => el.dataset.songId === songId);
+            if (!oldItem) {
+                return;
+            }
+
+            const song = getActiveSongs().find(s => s.id === songId) || allSongs.find(s => s.id === songId);
+            if (!song) {
+                return;
+            }
+
+            const newItem = createSongListItem(song);
+            if ((oldItem.dataset.thumbnailSignature || '') === (newItem.dataset.thumbnailSignature || '')) {
+                const oldThumbnail = oldItem.querySelector('.song-thumbnail');
+                const newThumbnail = newItem.querySelector('.song-thumbnail');
+                if (oldThumbnail && newThumbnail && newThumbnail.parentNode === newItem) {
+                    newItem.replaceChild(oldThumbnail, newThumbnail);
+                }
+            }
+            songList.replaceChild(newItem, oldItem);
+            songItemCache.set(songId, newItem);
+        });
+    }
+
+    function refreshCurrentVisibleSongMetadata(options = {}) {
+        const { forceRefresh = false } = options;
+        const visibleIds = getVisibleSongIds();
+        if (visibleIds.length === 0) {
+            return;
+        }
+
+        refreshVisibleSongItems(visibleIds);
+        void refreshVisibleSongsMetadata(visibleIds, { forceRefresh });
+    }
+
     function scheduleVisibleSongRefresh() {
         if (songListVisibleRefreshTimer) {
             clearTimeout(songListVisibleRefreshTimer);
         }
+        if (songListVisibleRefreshFollowupTimer) {
+            clearTimeout(songListVisibleRefreshFollowupTimer);
+        }
+        if (songListVisibleRefreshIntervalTimer) {
+            clearInterval(songListVisibleRefreshIntervalTimer);
+        }
         songListVisibleRefreshTimer = setTimeout(() => {
-            const visibleIds = getVisibleSongIds();
-            if (visibleIds.length > 0) {
-                void refreshVisibleSongsMetadata(visibleIds);
-            }
+            refreshCurrentVisibleSongMetadata();
+            songListVisibleRefreshFollowupTimer = setTimeout(() => {
+                refreshCurrentVisibleSongMetadata({ forceRefresh: true });
+            }, VISIBLE_SONG_REFRESH_REPEAT_MS);
+            songListVisibleRefreshIntervalTimer = setInterval(() => {
+                refreshCurrentVisibleSongMetadata({ forceRefresh: true });
+            }, VISIBLE_SONG_REFRESH_INTERVAL_MS);
         }, VISIBLE_SONG_REFRESH_DEBOUNCE_MS);
     }
 
@@ -1508,7 +1635,7 @@
     }
 
     async function startIncrementalSync(options = {}) {
-        const { automatic = false } = options;
+        const { automatic = false, refreshMetadata = false } = options;
 
         if (currentFetchMode !== 'idle') {
             return;
@@ -1519,9 +1646,9 @@
             return;
         }
 
-        const metadataRefreshIds = automatic
-            ? []
-            : allSongs.map(song => song.id).filter(id => typeof id === 'string' && id);
+        const metadataRefreshIds = refreshMetadata
+            ? allSongs.map(song => song.id).filter(id => typeof id === 'string' && id)
+            : [];
         currentMetadataRefreshRequested = metadataRefreshIds.length > 0;
 
         currentFetchMode = 'incremental';
@@ -1623,10 +1750,7 @@
                 await loadFilterPreferences();
                 applyFilter();
 
-                // Refresh metadata for currently visible tracks on initial load
-                const initialVisibleIds = sortedFilteredSongs.slice(0, Math.min(sortedFilteredSongs.length, SONG_RENDER_BATCH_SIZE))
-                    .map(song => song.id).filter(Boolean);
-                void refreshVisibleSongsMetadata(initialVisibleIds);
+                scheduleVisibleSongRefresh();
 
                 statusDiv.innerText = `${allSongs.length} cached songs. Checking for new...`;
 
@@ -1743,7 +1867,9 @@
                     metadataUpdateCount += 1;
                     songItemCache.delete(s.id);
 
-                    if (getSongThumbnailUrl(s) !== getSongThumbnailUrl(mergedSong)) {
+                    const previousThumbnailSource = getSongThumbnailSource(s);
+                    const nextThumbnailSource = getSongThumbnailSource(mergedSong);
+                    if ((previousThumbnailSource?.url || '') !== (nextThumbnailSource?.url || '') || (previousThumbnailSource?.type || '') !== (nextThumbnailSource?.type || '')) {
                         mergedSong.image_cache_bust = Date.now();
                         staleImageSongIds.push(s.id);
                     }
@@ -1801,8 +1927,10 @@
         return false;
     }
 
-    async function refreshVisibleSongsMetadata(songIds) {
+    async function refreshVisibleSongsMetadata(songIds, options = {}) {
+        const { forceRefresh = false } = options;
         if (!Array.isArray(songIds) || songIds.length === 0) return;
+        if (Date.now() < metadataRefreshBlockedUntil) return;
 
         const normalizedIds = songIds
             .filter(id => typeof id === 'string' && id.trim())
@@ -1821,7 +1949,7 @@
             const idsToRefresh = idsToCheck
                 .map(id => getActiveSongs().find(song => song.id === id) || allSongs.find(song => song.id === id))
                 .filter(Boolean)
-                .filter(shouldRefreshMetadataForSong)
+                .filter(song => forceRefresh || shouldRefreshMetadataForSong(song))
                 .map(song => song.id);
 
             if (idsToRefresh.length === 0) {
@@ -1831,9 +1959,19 @@
             metadataRefreshInFlight = true;
             try {
                 const response = await sendMessageWithRetry({ action: 'fetch_songs_by_ids', songIds: idsToRefresh });
-                if (!response?.ok || !response?.data?.clips || !Array.isArray(response.data.clips)) {
+                if (!response?.ok) {
+                    if (response?.status === 429) {
+                        metadataRefreshBlockedUntil = Date.now() + METADATA_REFRESH_ERROR_BACKOFF_MS;
+                    }
                     continue;
                 }
+
+                if (!response?.data?.clips || !Array.isArray(response.data.clips)) {
+                    continue;
+                }
+
+                const refreshedAt = Date.now();
+                idsToRefresh.forEach(id => metadataRefreshTimestamps.set(id, refreshedAt));
 
                 const updatedSongs = response.data.clips
                     .map(normalizeSongClip)
@@ -1841,7 +1979,6 @@
 
                 if (updatedSongs.length > 0) {
                     mergeSongs(updatedSongs);
-                    updatedSongs.forEach(song => metadataRefreshTimestamps.set(song.id, Date.now()));
                 }
             } catch (e) {
                 console.debug('[Downloader] metadata refresh by visible items failed:', e);
@@ -2027,7 +2164,7 @@
             if (currentFetchMode !== 'idle') {
                 stopCurrentFetch();
             } else {
-                startIncrementalSync({ automatic: false });
+                startIncrementalSync({ automatic: false, refreshMetadata: true });
             }
         });
     }
@@ -2658,32 +2795,6 @@
         });
     }
 
-    function ensureSongItemObserver() {
-        if (songItemObserver || !songList) {
-            return;
-        }
-
-        songItemObserver = new IntersectionObserver((entries) => {
-            const visibleIds = [];
-            entries.forEach(entry => {
-                if (entry.isIntersecting && entry.target instanceof HTMLElement) {
-                    const songId = entry.target.dataset.songId;
-                    if (songId) {
-                        visibleIds.push(songId);
-                        songItemObserver.unobserve(entry.target);
-                    }
-                }
-            });
-            if (visibleIds.length > 0) {
-                void refreshVisibleSongsMetadata(visibleIds);
-            }
-        }, {
-            root: songList,
-            rootMargin: '180px 0px 180px 0px',
-            threshold: 0.01
-        });
-    }
-
     function updateSongListSentinelState() {
         if (!songListSentinel) {
             return;
@@ -2767,6 +2878,7 @@
         const item = document.createElement("div");
         item.className = "song-item";
         item.dataset.songId = song.id;
+        item.dataset.thumbnailSignature = getSongThumbnailSignature(song);
         if (currentPlayingSongId === song.id) {
             item.classList.add('playing');
         }
@@ -3046,7 +3158,11 @@
         gotoBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 5c-7.633 0-12 7-12 7s4.367 7 12 7 12-7 12-7-4.367-7-12-7zm0 12a5 5 0 1 1 .001-10.001A5 5 0 0 1 12 17zm0-8a3 3 0 1 0 .001 6.001A3 3 0 0 0 12 9z"/></svg>`;
         gotoBtn.onclick = (e) => {
             e.stopPropagation();
-            window.open(`https://suno.com/song/${song.id}`, '_blank');
+            const panel = document.getElementById('bettersuno-panel');
+            if (panel) {
+                panel.classList.remove('open');
+            }
+            window.location.assign(`https://suno.com/song/${song.id}`);
         };
 
         actionsDiv.appendChild(likeBtn);
@@ -3063,11 +3179,6 @@
         item.appendChild(thumbnail);
         item.appendChild(songInfo);
         item.appendChild(actionsDiv);
-
-        ensureSongItemObserver();
-        if (songItemObserver) {
-            songItemObserver.observe(item);
-        }
 
         return item;
     }
@@ -3103,9 +3214,6 @@
         updateSongListSentinelState();
         updateSelectedCount();
 
-        // Update metadata only for songs that are visible now.
-        const visibleSongIds = sortedFilteredSongs.slice(start, end).map(song => song.id).filter(Boolean);
-        void refreshVisibleSongsMetadata(visibleSongIds);
     }
 
     function refreshVisibleSongSelectionState() {
@@ -3219,10 +3327,8 @@
             renderSongListChunk();
         }
 
-        // When song list is populated from storage/fetch, refresh visible metadata.
         if (renderedSongCount > 0) {
-            const visibleSongIds = sortedFilteredSongs.slice(0, renderedSongCount).map(song => song.id).filter(Boolean);
-            void refreshVisibleSongsMetadata(visibleSongIds);
+            scheduleVisibleSongRefresh();
         }
 
         if (preserveScroll) {

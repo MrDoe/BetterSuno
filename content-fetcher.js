@@ -327,6 +327,51 @@
         };
     }
 
+    function normalizeClipLikeStatus(clip) {
+        const likeCandidate =
+            clip?.is_liked ??
+            clip?.liked ??
+            clip?.reaction_type ??
+            clip?.current_user_reaction ??
+            clip?.user_reaction ??
+            clip?.isLike ??
+            clip?.react ??
+            clip?.upvote ??
+            false;
+
+        if (typeof likeCandidate === 'boolean') {
+            return likeCandidate;
+        }
+
+        if (typeof likeCandidate === 'number') {
+            return likeCandidate !== 0;
+        }
+
+        if (typeof likeCandidate === 'string') {
+            const normalized = likeCandidate.trim().toLowerCase();
+            if (['1', 'true', 'yes', 'on', 'liked', 'like'].includes(normalized)) return true;
+            if (['0', 'false', 'no', 'off', 'disliked', 'dislike', 'none', 'null', ''].includes(normalized)) return false;
+        }
+
+        return false;
+    }
+
+    function normalizeClipUpvoteCount(clip) {
+        const countCandidate =
+            clip?.upvote_count ??
+            clip?.like_count ??
+            clip?.likes ??
+            clip?.score ??
+            0;
+
+        const numberValue = Number(countCandidate);
+        if (Number.isFinite(numberValue) && numberValue >= 0) {
+            return Math.floor(numberValue);
+        }
+
+        return 0;
+    }
+
     async function fetchPage(cursorValue) {
         const res = await Promise.race([
             api.runtime.sendMessage({
@@ -457,9 +502,9 @@
                     lyrics: extractLyricsFromClip(clip),
                     is_public: clip.is_public !== false,
                     created_at: clip.created_at,
-                    is_liked: clip.is_liked || false,
+                    is_liked: normalizeClipLikeStatus(clip),
                     is_stem: isStemClip(clip),
-                    upvote_count: clip.upvote_count || 0,
+                    upvote_count: normalizeClipUpvoteCount(clip),
                     ...ownership
                 });
 
