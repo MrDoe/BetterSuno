@@ -327,33 +327,35 @@
         };
     }
 
-    function normalizeClipLikeStatus(clip) {
-        const likeCandidate =
-            clip?.is_liked ??
-            clip?.liked ??
+    function normalizeClipReactionState(clip) {
+        const reactionCandidate =
+            clip?.reaction?.reaction_type ??
             clip?.reaction_type ??
             clip?.current_user_reaction ??
             clip?.user_reaction ??
+            clip?.is_liked ??
+            clip?.liked ??
             clip?.isLike ??
             clip?.react ??
             clip?.upvote ??
             false;
 
-        if (typeof likeCandidate === 'boolean') {
-            return likeCandidate;
+        if (typeof reactionCandidate === 'boolean') {
+            return reactionCandidate ? 'like' : 'none';
         }
 
-        if (typeof likeCandidate === 'number') {
-            return likeCandidate !== 0;
+        if (typeof reactionCandidate === 'number') {
+            return reactionCandidate !== 0 ? 'like' : 'none';
         }
 
-        if (typeof likeCandidate === 'string') {
-            const normalized = likeCandidate.trim().toLowerCase();
-            if (['1', 'true', 'yes', 'on', 'liked', 'like'].includes(normalized)) return true;
-            if (['0', 'false', 'no', 'off', 'disliked', 'dislike', 'none', 'null', ''].includes(normalized)) return false;
+        if (typeof reactionCandidate === 'string') {
+            const normalized = reactionCandidate.trim().toLowerCase();
+            if (['1', 'true', 'yes', 'on', 'liked', 'like', 'l'].includes(normalized)) return 'like';
+            if (['disliked', 'dislike', 'thumbs_down', 'thumb_down', 'downvote', 'd'].includes(normalized)) return 'dislike';
+            if (['0', 'false', 'no', 'off', 'none', 'null', 'neutral', 'clear', ''].includes(normalized)) return 'none';
         }
 
-        return false;
+        return 'none';
     }
 
     function normalizeClipUpvoteCount(clip) {
@@ -502,7 +504,8 @@
                     lyrics: extractLyricsFromClip(clip),
                     is_public: clip.is_public !== false,
                     created_at: clip.created_at,
-                    is_liked: normalizeClipLikeStatus(clip),
+                    reaction_state: normalizeClipReactionState(clip),
+                    is_liked: normalizeClipReactionState(clip) === 'like',
                     is_stem: isStemClip(clip),
                     upvote_count: normalizeClipUpvoteCount(clip),
                     ...ownership

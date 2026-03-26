@@ -1927,10 +1927,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         const songId = typeof msg.songId === 'string' ? msg.songId.trim() : '';
-        const reaction = typeof msg.reaction === 'string' ? msg.reaction.trim().toUpperCase() : '';
+        // reaction is null for 'clear', or 'LIKE'/'DISLIKE'
+        const reaction = msg.reaction === null ? null : (typeof msg.reaction === 'string' ? msg.reaction.trim() : null);
 
-        if (!songId || !reaction) {
-          sendResponse({ ok: false, error: 'Missing songId or reaction' });
+        if (!songId) {
+          sendResponse({ ok: false, error: 'Missing songId' });
           return;
         }
 
@@ -1941,13 +1942,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         const url = `https://studio-api.prod.suno.com/api/gen/${encodeURIComponent(songId)}/update_reaction_type/`;
+
+        // Suno API: reaction present → like/dislike; reaction absent → clear
+        const body = reaction
+          ? { reaction: reaction, recommendation_metadata: {} }
+          : { play_count: 3, skip_count: 0, flagged: false, clip: songId, updated_at: '2023-01-01T00:00:00' };
+
         const response = await fetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`
           },
-          body: JSON.stringify({ reaction, recommendation_metadata: {} })
+          body: JSON.stringify(body)
         });
 
         let responseBody = null;
@@ -1955,6 +1962,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           responseBody = await response.json();
         } catch (error) {
           responseBody = null;
+        }
+
+        if (!response.ok) {
+          console.warn('[BetterSuno] update_reaction_type failed', response.status, responseBody);
         }
 
         sendResponse({ ok: response.ok, status: response.status, data: responseBody });
@@ -2553,15 +2564,16 @@ function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
   };
 }
 
-function normalizeLikeFlag(value) {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
+function normalizeReactionState(value) {
+  if (typeof value === 'boolean') return value ? 'like' : 'none';
+  if (typeof value === 'number') return value !== 0 ? 'like' : 'none';
   if (typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
-    if (['1', 'true', 'yes', 'on', 'liked', 'like'].includes(normalized)) return true;
-    if (['0', 'false', 'no', 'off', 'disliked', 'dislike', 'none', 'null', ''].includes(normalized)) return false;
+    if (['1', 'true', 'yes', 'on', 'liked', 'like', 'l'].includes(normalized)) return 'like';
+    if (['disliked', 'dislike', 'thumbs_down', 'thumb_down', 'downvote', 'd'].includes(normalized)) return 'dislike';
+    if (['0', 'false', 'no', 'off', 'none', 'null', 'neutral', 'clear', ''].includes(normalized)) return 'none';
   }
-  return false;
+  return 'none';
 }
 
 function normalizeUpvoteCount(value) {
@@ -2580,11 +2592,12 @@ function normalizeUpvoteCount(value) {
 function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
   const rawClip = clip?.clip || clip || {};
   const likeCandidate =
-    rawClip?.is_liked ??
-    rawClip?.liked ??
+    rawClip?.reaction?.reaction_type ??
     rawClip?.reaction_type ??
     rawClip?.current_user_reaction ??
     rawClip?.user_reaction ??
+    rawClip?.is_liked ??
+    rawClip?.liked ??
     rawClip?.isLike ??
     rawClip?.react ??
     rawClip?.upvote ??
@@ -2600,6 +2613,7 @@ function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
     0;
 
   const upvoteCount = normalizeUpvoteCount(upvoteCandidate);
+  const reactionState = normalizeReactionState(likeCandidate);
 
   return {
     id: rawClip.id,
@@ -2610,7 +2624,8 @@ function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
     lyrics: extractLyricsFromClip(rawClip),
     is_public: rawClip.is_public !== false,
     created_at: rawClip.created_at || rawClip.createdAt || clip?.created_at || null,
-    is_liked: normalizeLikeFlag(likeCandidate),
+    reaction_state: reactionState,
+    is_liked: reactionState === 'like',
     is_stem: isStemClip(rawClip),
     upvote_count: upvoteCount,
     ...extractOwnershipMetadataFromClip(rawClip, currentUserId, currentUserIds)

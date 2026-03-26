@@ -409,15 +409,73 @@
         }
     }
 
-    function normalizeLikeFlag(value) {
-        if (typeof value === 'boolean') return value;
-        if (typeof value === 'number') return value !== 0;
+    function normalizeReactionState(value) {
+        if (typeof value === 'boolean') {
+            return value ? 'like' : 'none';
+        }
+
+        if (typeof value === 'number') {
+            return value !== 0 ? 'like' : 'none';
+        }
+
         if (typeof value === 'string') {
             const normalized = value.trim().toLowerCase();
-            if (['1', 'true', 'yes', 'on', 'liked', 'like'].includes(normalized)) return true;
-            if (['0', 'false', 'no', 'off', 'disliked', 'dislike', 'none', 'null', ''].includes(normalized)) return false;
+            if (['1', 'true', 'yes', 'on', 'liked', 'like', 'l'].includes(normalized)) return 'like';
+            if (['disliked', 'dislike', 'thumbs_down', 'thumb_down', 'downvote', 'd'].includes(normalized)) return 'dislike';
+            if (['0', 'false', 'no', 'off', 'none', 'null', 'neutral', 'clear', ''].includes(normalized)) return 'none';
         }
-        return false;
+
+        return 'none';
+    }
+
+    function getSongReactionState(song) {
+        return normalizeReactionState(
+            song?.reaction_state ??
+            song?.reactionType ??
+            song?.reaction ??
+            song?.current_user_reaction ??
+            song?.user_reaction ??
+            song?.is_liked
+        );
+    }
+
+    function isSongLiked(song) {
+        return getSongReactionState(song) === 'like';
+    }
+
+    function getNextSongReactionState(currentState) {
+        if (currentState === 'like') return 'dislike';
+        if (currentState === 'dislike') return 'none';
+        return 'like';
+    }
+
+    function getApiReactionValue(reactionState) {
+        if (reactionState === 'like') return 'LIKE';
+        if (reactionState === 'dislike') return 'DISLIKE';
+        return null; // null signals clear
+    }
+
+    function applyReactionButtonState(button, reactionState) {
+        if (!button) return;
+
+        if (reactionState === 'like') {
+            button.textContent = '❤️';
+            button.title = 'Liked. Click to dislike this song';
+            button.setAttribute('aria-label', 'Liked. Click to dislike this song');
+            return;
+        }
+
+        if (reactionState === 'dislike') {
+            button.textContent = '👎';
+            button.style.color = '';
+            button.title = 'Disliked. Click to clear reaction';
+            button.setAttribute('aria-label', 'Disliked. Click to clear reaction');
+            return;
+        }
+
+        button.textContent = '🤍';
+        button.title = 'No reaction. Click to like this song';
+        button.setAttribute('aria-label', 'No reaction. Click to like this song');
     }
 
     function normalizeUpvoteCount(value) {
@@ -446,7 +504,7 @@
             (leftSong?.owner_handle || '') === (rightSong?.owner_handle || '') &&
             (leftSong?.owner_display_name || '') === (rightSong?.owner_display_name || '') &&
             leftSong?.is_public === rightSong?.is_public &&
-            normalizeLikeFlag(leftSong?.is_liked) === normalizeLikeFlag(rightSong?.is_liked) &&
+            getSongReactionState(leftSong) === getSongReactionState(rightSong) &&
             leftSong?.is_stem === rightSong?.is_stem &&
             normalizeUpvoteCount(leftSong?.upvote_count) === normalizeUpvoteCount(rightSong?.upvote_count) &&
             (leftSong?.is_owned_by_current_user ?? null) === (rightSong?.is_owned_by_current_user ?? null)
@@ -454,6 +512,25 @@
     }
 
     function mergeSongMetadata(existingSong, freshSong) {
+        const existingReactionState = getSongReactionState(existingSong);
+
+        // Resolve what the fresh API data says about the reaction
+        const freshReactionState = freshSong.reaction_state !== undefined
+            ? normalizeReactionState(freshSong.reaction_state)
+            : (freshSong.is_liked !== undefined
+                ? normalizeReactionState(freshSong.is_liked)
+                : existingReactionState);
+
+        // Suno's library and feed APIs only return is_liked: true/false — they cannot
+        // signal a DISLIKE. A 'none' freshReactionState (from is_liked: false) is
+        // ambiguous between "neutral" and "disliked". Preserve a locally-set 'dislike'
+        // so that metadata refreshes never silently clear it.
+        // The user can only clear a dislike by explicitly cycling the button (which sends
+        // NONE to the API and clears the local state).
+        const reactionState = (freshReactionState === 'none' && existingReactionState === 'dislike')
+            ? 'dislike'
+            : freshReactionState;
+
         return {
             ...existingSong,
             title: freshSong.title ?? existingSong.title,
@@ -462,7 +539,8 @@
             image_url: freshSong.image_url || existingSong.image_url,
             lyrics: freshSong.lyrics ?? existingSong.lyrics,
             is_public: typeof freshSong.is_public === 'boolean' ? freshSong.is_public : existingSong.is_public,
-            is_liked: freshSong.is_liked !== undefined ? normalizeLikeFlag(freshSong.is_liked) : normalizeLikeFlag(existingSong.is_liked),
+            reaction_state: reactionState,
+            is_liked: reactionState === 'like',
             is_stem: freshSong.is_stem ?? existingSong.is_stem,
             upvote_count: freshSong.upvote_count !== undefined ? normalizeUpvoteCount(freshSong.upvote_count) : normalizeUpvoteCount(existingSong.upvote_count),
             owner_user_id: freshSong.owner_user_id || existingSong.owner_user_id,
@@ -493,16 +571,18 @@
         const upvoteCount = normalizeUpvoteCount(upvoteCandidate);
 
         const likeCandidate =
-            clip.is_liked ??
-            rawClip?.is_liked ??
-            clip.liked ??
-            rawClip?.liked ??
+            clip.reaction?.reaction_type ??
+            rawClip?.reaction?.reaction_type ??
             clip.reaction_type ??
             rawClip?.reaction_type ??
             clip.current_user_reaction ??
             rawClip?.current_user_reaction ??
             clip.user_reaction ??
             rawClip?.user_reaction ??
+            clip.is_liked ??
+            rawClip?.is_liked ??
+            clip.liked ??
+            rawClip?.liked ??
             clip.isLike ??
             rawClip?.isLike ??
             clip.react ??
@@ -510,7 +590,7 @@
             clip.upvote ??
             rawClip?.upvote;
 
-        const isLiked = normalizeLikeFlag(likeCandidate);
+        const reactionState = normalizeReactionState(likeCandidate);
 
         return {
             id: songId,
@@ -525,7 +605,8 @@
                 || extractTextFromPaths(rawClip, SONG_CLIP_FIELD_PATHS.lyrics),
             is_public: (clip.is_public ?? rawClip?.is_public) !== false,
             created_at: clip.created_at || clip.createdAt || rawClip?.created_at || null,
-            is_liked: isLiked,
+            reaction_state: reactionState,
+            is_liked: reactionState === 'like',
             is_stem: isStemClip(clip),
             upvote_count: upvoteCount,
             owner_user_id: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null)
@@ -2807,26 +2888,28 @@
             : (sortedFilteredSongs.length > 0 ? 'All my songs loaded' : '');
     }
 
-    function updateSongLikeState(songId, liked) {
+    function updateSongReactionState(songId, nextReactionState) {
         const allSongsArray = [allSongs, playlistSongs || []];
         let changed = false;
+        const normalizedNextReactionState = normalizeReactionState(nextReactionState);
 
         allSongsArray.forEach(songArr => {
             if (!Array.isArray(songArr)) return;
             songArr.forEach(song => {
                 if (song.id !== songId) return;
 
-                const currentlyLiked = !!song.is_liked;
-                if (currentlyLiked === liked) return;
+                const previousReactionState = getSongReactionState(song);
+                if (previousReactionState === normalizedNextReactionState) return;
 
-                song.is_liked = liked;
+                song.reaction_state = normalizedNextReactionState;
+                song.is_liked = normalizedNextReactionState === 'like';
                 if (!Number.isFinite(song.upvote_count)) {
                     song.upvote_count = 0;
                 }
 
-                if (liked) {
+                if (previousReactionState !== 'like' && normalizedNextReactionState === 'like') {
                     song.upvote_count = (song.upvote_count || 0) + 1;
-                } else {
+                } else if (previousReactionState === 'like' && normalizedNextReactionState !== 'like') {
                     song.upvote_count = Math.max(0, (song.upvote_count || 1) - 1);
                 }
 
@@ -2841,17 +2924,26 @@
         }
     }
 
-    function sendSongReactionUpdate(songId, reaction) {
-        api.runtime.sendMessage({ action: 'update_song_reaction', songId, reaction }, (response) => {
-            if (chrome.runtime.lastError) {
-                statusDiv.innerText = `Failed to update reaction: ${chrome.runtime.lastError.message}`;
-                return;
-            }
+    async function sendSongReactionUpdate(songId, reactionState, previousReactionState) {
+        try {
+            const response = await api.runtime.sendMessage({
+                action: 'update_song_reaction',
+                songId,
+                reaction: getApiReactionValue(reactionState, previousReactionState)
+            });
+
             if (!response || !response.ok) {
                 const errorMessage = response?.error || `status=${response?.status || 'unknown'}`;
                 statusDiv.innerText = `Failed to update reaction: ${errorMessage}`;
+                return false;
             }
-        });
+
+            return true;
+        } catch (error) {
+            const message = api.runtime?.lastError?.message || error?.message || String(error);
+            statusDiv.innerText = `Failed to update reaction: ${message}`;
+            return false;
+        }
     }
 
     function ensureSongListSentinel() {
@@ -3010,35 +3102,33 @@
         visibilitySpan.textContent = song.is_public ? '🌐 Public' : '🔒 Private';
         metaDiv.appendChild(visibilitySpan);
 
-        if (song.is_liked) {
+        if (isSongLiked(song)) {
             const likedSpan = document.createElement("span");
-            likedSpan.textContent = ' • ❤️ Liked';
-            likedSpan.style.color = '#e91e63';
+            likedSpan.textContent = ' ❤️ Liked';
             metaDiv.appendChild(likedSpan);
         }
 
         if (song.upvote_count > 0) {
             const likesSpan = document.createElement("span");
-            likesSpan.textContent = ` • 👍 ${song.upvote_count.toLocaleString()}`;
+            likesSpan.textContent = ` 👍 ${song.upvote_count.toLocaleString()}`;
             likesSpan.title = `${song.upvote_count.toLocaleString()} likes`;
             metaDiv.appendChild(likesSpan);
         }
 
         if (song.is_stem) {
             const stemSpan = document.createElement("span");
-            stemSpan.textContent = ' • 🎹 Stem';
-            stemSpan.style.color = '#9c27b0';
+            stemSpan.textContent = ' 🎹 Stem';
             metaDiv.appendChild(stemSpan);
         }
 
         if (song.created_at) {
-            metaDiv.appendChild(document.createTextNode(' • ' + formatDate(song.created_at)));
+            metaDiv.appendChild(document.createTextNode(' ' + formatDate(song.created_at)));
         }
 
         if (shouldShowOtherArtistBadge(song)) {
             const ownershipSpan = document.createElement('span');
             const artistName = song.owner_display_name || song.owner_handle || 'Other artist';
-            ownershipSpan.textContent = ` • 👤 ${artistName}`;
+            ownershipSpan.textContent = ` 👤 ${artistName}`;
             ownershipSpan.title = 'Only your own songs can be downloaded as files';
             ownershipSpan.style.color = '#7ae';
             metaDiv.appendChild(ownershipSpan);
@@ -3046,7 +3136,7 @@
 
         if (cachedSongIds.has(song.id)) {
             const cachedSpan = document.createElement("span");
-            cachedSpan.textContent = ' • 💾 Cached';
+            cachedSpan.textContent = ' 💾 Cached';
             cachedSpan.title = 'Audio stored in browser database';
             cachedSpan.style.color = '#4caf50';
             metaDiv.appendChild(cachedSpan);
@@ -3058,29 +3148,21 @@
         const actionsDiv = document.createElement("div");
         actionsDiv.className = "song-actions";
 
-        const likeBtn = document.createElement("button");
-        likeBtn.className = "song-action-btn like-btn";
-        likeBtn.textContent = song.is_liked ? '❤️' : '🤍';
-        likeBtn.title = song.is_liked ? 'Unlike this song' : 'Like this song';
-        likeBtn.addEventListener('click', (e) => {
+        const reactionBtn = document.createElement("button");
+        reactionBtn.className = "song-action-btn like-btn";
+        applyReactionButtonState(reactionBtn, getSongReactionState(song));
+        reactionBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            const targetValue = !song.is_liked;
-            updateSongLikeState(song.id, targetValue);
-            sendSongReactionUpdate(song.id, targetValue ? 'LIKE' : 'DISLIKE');
+            const previousReactionState = getSongReactionState(song);
+            const nextReactionState = getNextSongReactionState(previousReactionState);
+            applyReactionButtonState(reactionBtn, nextReactionState);
+            updateSongReactionState(song.id, nextReactionState);
+            const didPersist = await sendSongReactionUpdate(song.id, nextReactionState, previousReactionState);
+            if (!didPersist) {
+                applyReactionButtonState(reactionBtn, previousReactionState);
+                updateSongReactionState(song.id, previousReactionState);
+            }
         });
-
-        let dislikeBtn;
-        if (!Array.isArray(playlistSongs)) {
-            dislikeBtn = document.createElement("button");
-            dislikeBtn.className = "song-action-btn dislike-btn";
-            dislikeBtn.textContent = '👎';
-            dislikeBtn.title = 'Dislike (remove like)';
-            dislikeBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                updateSongLikeState(song.id, false);
-                sendSongReactionUpdate(song.id, 'DISLIKE');
-            });
-        }
 
         const copyLinkBtn = document.createElement("button");
         copyLinkBtn.className = "song-action-btn copy-link-btn";
@@ -3165,13 +3247,10 @@
             window.location.assign(`https://suno.com/song/${song.id}`);
         };
 
-        actionsDiv.appendChild(likeBtn);
+        actionsDiv.appendChild(reactionBtn);
         actionsDiv.appendChild(copyLinkBtn);
         if (renameBtn) {
             actionsDiv.appendChild(renameBtn);
-        }
-        if (dislikeBtn) {
-            actionsDiv.appendChild(dislikeBtn);
         }
         actionsDiv.appendChild(gotoBtn);
 
