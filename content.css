@@ -9,7 +9,8 @@
   --bettersuno-accent: #8b5cf6;
   --bettersuno-accent-hover: #7c3aed;
 
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
   font-size: 14px !important;
   line-height: 1.4 !important;
   color: var(--bettersuno-text) !important;
@@ -66,7 +67,9 @@
   align-items: center !important;
   justify-content: center !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
-  transition: background 0.15s, transform 0.15s !important;
+  transition:
+    background 0.15s,
+    transform 0.15s !important;
   position: relative !important;
   top: -17px !important;
   left: 95px !important;
@@ -298,7 +301,9 @@
   color: var(--bettersuno-text-muted) !important;
   font-size: 12px !important;
   cursor: pointer !important;
-  transition: background 0.1s, color 0.1s !important;
+  transition:
+    background 0.1s,
+    color 0.1s !important;
   pointer-events: auto !important;
 }
 
@@ -329,7 +334,9 @@
   color: var(--bettersuno-text-muted) !important;
   font-size: 12px !important;
   cursor: pointer !important;
-  transition: color 0.1s, background 0.1s !important;
+  transition:
+    color 0.1s,
+    background 0.1s !important;
   font-weight: 500 !important;
   pointer-events: auto !important;
 }
@@ -457,7 +464,6 @@
   box-sizing: border-box !important;
 }
 
-
 /* ========== Downloader (popup.html) embedded in Download tab ========== */
 
 /* Scoped downloader styles - keep panel colors intact */
@@ -535,13 +541,11 @@
   font-family: inherit !important;
 }
 
-#bettersuno-panel .player-tab-buttons > button
-{
+#bettersuno-panel .player-tab-buttons > button {
   font-size: 20px !important;
 }
 
-#bettersuno-panel button:disabled
-{
+#bettersuno-panel button:disabled {
   opacity: 0.5 !important;
   cursor: not-allowed !important;
 }
@@ -879,7 +883,6 @@
   height: 13px !important;
 }
 
-
 .song-item.playing {
   background: rgba(139, 92, 246, 0.1) !important;
   border-left: 3px solid var(--bettersuno-accent) !important;
@@ -965,8 +968,6 @@
   padding-left: 10px !important;
   padding-right: 10px !important;
 }
-
-
 
 #bettersuno-panel .hidden {
   display: none !important;
@@ -1100,7 +1101,11 @@
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.35) 0%, rgba(118, 75, 162, 0.45) 100%) !important;
+  background: linear-gradient(
+    135deg,
+    rgba(102, 126, 234, 0.35) 0%,
+    rgba(118, 75, 162, 0.45) 100%
+  ) !important;
   color: #f4f4f5 !important;
   font-size: 20px !important;
   font-weight: 700 !important;
@@ -1297,7 +1302,8 @@
   border-color: #667eea !important;
 }
 
-#bettersuno-panel #refreshPlaylistsBtn {
+#bettersuno-panel #deletePlaylistBtn,
+#bettersuno-panel #addPlaylistBtn {
   flex: 0 0 auto !important;
   padding: 3px 8px !important;
   font-size: 14px !important;
@@ -1306,14 +1312,73 @@
   letter-spacing: 0 !important;
 }
 
-#bettersuno-panel #playlistSearchControls {
+/* ── Playlist dialog ──────────────────────────────────────────────────────── */
+
+#bettersuno-playlist-dialog {
+  display: none !important;
+  background: #18181b !important;
+  border: 1px solid #3f3f46 !important;
+  border-radius: 10px !important;
+  color: #f4f4f5 !important;
+  padding: 0 !important;
+  width: 90vw !important;
+  height: 90vh !important;
+  max-width: 90vw !important;
+  max-height: 90vh !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6) !important;
+  flex-direction: column !important;
+  justify-self: center;
+  align-self: center;
+}
+
+#bettersuno-playlist-dialog[open] {
+  display: flex !important;
+}
+
+#bettersuno-playlist-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55) !important;
+}
+
+.playlist-dialog-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  padding: 10px 12px 8px !important;
+  border-bottom: 1px solid #3f3f46 !important;
+}
+
+.playlist-dialog-title {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #f4f4f5 !important;
+}
+
+.playlist-dialog-close {
+  background: none !important;
+  border: none !important;
+  color: #a1a1aa !important;
+  font-size: 16px !important;
+  line-height: 1 !important;
+  padding: 2px 6px !important;
+  cursor: pointer !important;
+  border-radius: 4px !important;
+  min-height: unset !important;
+  letter-spacing: 0 !important;
+}
+
+.playlist-dialog-close:hover {
+  color: #f4f4f5 !important;
+  background: #3f3f46 !important;
+}
+
+#bettersuno-playlist-dialog #playlistSearchControls {
   display: flex !important;
   gap: 6px !important;
-  margin-bottom: 6px !important;
+  padding: 10px 12px 6px !important;
   align-items: center !important;
 }
 
-#bettersuno-panel #playlistSearchInput {
+#bettersuno-playlist-dialog #playlistSearchInput {
   flex: 1 1 0 !important;
   min-width: 0 !important;
   background: #27272a !important;
@@ -1326,24 +1391,34 @@
   outline: none !important;
 }
 
-#bettersuno-panel #playlistSearchInput:focus {
+#bettersuno-playlist-dialog #playlistSearchInput:focus {
   border-color: #667eea !important;
 }
 
-#bettersuno-panel #playlistSearchBtn {
+#bettersuno-playlist-dialog #playlistSearchBtn {
   flex: 0 0 auto !important;
   padding: 4px 10px !important;
   font-size: 12px !important;
   min-height: 26px !important;
 }
 
-#bettersuno-panel #playlistSearchResults {
-  background: #18181b !important;
-  border: 1px solid #3f3f46 !important;
-  border-radius: 6px !important;
-  max-height: 200px !important;
+#bettersuno-playlist-dialog #playlistSearchResults {
+  flex: 1 1 auto !important;
   overflow-y: auto !important;
-  margin-bottom: 6px !important;
+  margin: 0 8px 8px !important;
+  border-radius: 6px !important;
+  border: 1px solid transparent !important;
+  display: inline-flex !important;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: center;
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+#bettersuno-playlist-dialog #playlistSearchResults:not(:empty) {
+  border-color: #3f3f46 !important;
+  background: #111113 !important;
 }
 
 #bettersuno-panel .playlist-search-item {
@@ -1382,13 +1457,19 @@
   text-overflow: ellipsis !important;
 }
 
-#bettersuno-panel .playlist-search-count {
-  font-size: 12px !important;
+#bettersuno-playlist-dialog .playlist-search-count,
+#bettersuno-playlist-dialog .playlist-search-owner {
+  font-size: 11px !important;
   color: #a1a1aa !important;
+  line-height: 1.2 !important;
 }
 
-#bettersuno-panel .playlist-search-empty {
-  padding: 10px !important;
+#bettersuno-playlist-dialog .playlist-search-owner {
+  color: #71717a !important;
+}
+
+#bettersuno-playlist-dialog .playlist-search-empty {
+  padding: 18px !important;
   text-align: center !important;
   font-size: 12px !important;
   color: #a1a1aa !important;
@@ -1543,4 +1624,3 @@
     border-left: 1px solid var(--bettersuno-border) !important;
   }
 }
-

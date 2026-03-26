@@ -1636,6 +1636,75 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "search_playlists") {
+    (async () => {
+      try {
+        const token = await getApiTokenWithFallback('search_playlists');
+        if (!token) { sendResponse({ ok: false, error: "No auth token" }); return; }
+        const { query } = msg;
+        if (!query) { sendResponse({ ok: false, error: "No search query" }); return; }
+        const headers = { 
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        };
+        // Using the POST endpoint and payload as specified
+        const url = `https://studio-api-prod.suno.com/api/search/`;
+        const body = JSON.stringify({
+          search_queries: [
+            {
+              name: "playlists",
+              search_type: "playlist",
+              term: query,
+              from_index: 0,
+              size: 100,
+              rank_by: "most_relevant"
+            }
+          ],
+          tune_results: false,
+          tuned_offset: 0
+        });
+        
+        const res = await fetch(url, { 
+          method: 'POST',
+          headers,
+          body
+        });
+        if (!res.ok) {
+          sendResponse({ ok: false, error: `Search failed with status ${res.status}` });
+          return;
+        }
+        const data = await res.json();
+        
+        // Use the exact path from the user's example: result.playlist.result
+        let rawPlaylists = [];
+        if (data?.result?.playlist?.result) {
+          rawPlaylists = data.result.playlist.result;
+        } else if (data?.result?.playlists?.result) {
+          rawPlaylists = data.result.playlists.result;
+        } else if (data?.playlists) {
+          rawPlaylists = data.playlists;
+        }
+
+        const playlists = rawPlaylists.map(pl => ({
+          id: pl.id,
+          name: pl.name || pl.title || null,
+          image_url: pl.image_url || null,
+          song_count: pl.song_count ?? pl.num_total_results ?? null,
+          user_display_name: pl.user_display_name || pl.user_handle || null,
+          user_handle: pl.user_handle || null,
+          is_public: pl.is_public ?? true,
+          is_owned: pl.is_owned ?? false,
+          description: pl.description || ""
+        }));
+
+        sendResponse({ ok: true, playlists });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "get_current_user_identity") {
     (async () => {
       try {

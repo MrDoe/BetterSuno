@@ -388,7 +388,8 @@
             return '';
         }
 
-        return `${source.type || 'unknown'}:${source.url}`;
+        const isCached = cachedSongIds.has(song.id);
+        return `${source.type || 'unknown'}:${source.url}:${isCached ? 'cached' : 'remote'}`;
     }
 
     function getSunoThumbnailUrl(url) {
@@ -1411,7 +1412,7 @@
     const filterPublic = document.getElementById("filterPublic");
     const filterOffline = document.getElementById("filterOffline");
     const playlistFilter = document.getElementById("playlistFilter");
-    const refreshPlaylistsBtn = document.getElementById("refreshPlaylistsBtn");
+    const deletePlaylistBtn = document.getElementById("deletePlaylistBtn");
     const selectAllButton = document.getElementById("selectAll");
     const syncNewBtn = document.getElementById("syncNewBtn");
     const downloadMusicCheckbox = document.getElementById("downloadMusic");
@@ -2325,6 +2326,14 @@
 
     async function selectPlaylist(playlistId) {
         const selectedPlaylistId = normalizePlaylistId(playlistId);
+
+        // Show/hide delete button for external playlists
+        if (deletePlaylistBtn) {
+            const cachedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
+            const currentPl = Array.isArray(cachedPlaylists) ? cachedPlaylists.find(p => p.id === selectedPlaylistId) : null;
+            deletePlaylistBtn.style.display = (currentPl && isPlaylistOtherArtist(currentPl)) ? 'block' : 'none';
+        }
+
         const wasPlaylistMode = Array.isArray(playlistSongs);
         playlistSongs = null;
         await savePreferenceToIDB(SELECTED_PLAYLIST_KEY, selectedPlaylistId || '');
@@ -2455,18 +2464,38 @@
     }
 
     // ========================================================================
-    // Playlist search (other users' playlists)
+    // Playlist search dialog
     // ========================================================================
 
+    const playlistDialog = document.getElementById('bettersuno-playlist-dialog');
+    const addPlaylistBtn = document.getElementById('addPlaylistBtn');
+    const playlistDialogCloseBtn = document.getElementById('playlistDialogCloseBtn');
     const playlistSearchInput = document.getElementById('playlistSearchInput');
     const playlistSearchBtn = document.getElementById('playlistSearchBtn');
     const playlistSearchResults = document.getElementById('playlistSearchResults');
+
+    if (addPlaylistBtn && playlistDialog) {
+        addPlaylistBtn.addEventListener('click', () => {
+            if (playlistSearchInput) playlistSearchInput.value = '';
+            if (playlistSearchResults) playlistSearchResults.innerHTML = '';
+            playlistDialog.showModal();
+            if (playlistSearchInput) playlistSearchInput.focus();
+        });
+    }
+    if (playlistDialogCloseBtn && playlistDialog) {
+        playlistDialogCloseBtn.addEventListener('click', () => playlistDialog.close());
+    }
+    if (playlistDialog) {
+        playlistDialog.addEventListener('click', (e) => {
+            // Close when clicking the backdrop (outside the dialog box)
+            if (e.target === playlistDialog) playlistDialog.close();
+        });
+    }
 
     function renderPlaylistSearchResults(playlists) {
         if (!playlistSearchResults) return;
         playlistSearchResults.innerHTML = '';
         if (!playlists || playlists.length === 0) {
-            playlistSearchResults.style.display = 'block';
             const empty = document.createElement('div');
             empty.className = 'playlist-search-empty';
             empty.textContent = 'No playlists found.';
@@ -2502,60 +2531,70 @@
                 info.appendChild(countEl);
             }
 
+            if (norm.owner_display_name) {
+                const ownerEl = document.createElement('span');
+                ownerEl.className = 'playlist-search-owner';
+                ownerEl.textContent = `by ${norm.owner_display_name}`;
+                info.appendChild(ownerEl);
+            }
+
             item.appendChild(info);
-            item.addEventListener('click', () => {
-                playlistSearchResults.style.display = 'none';
+            item.addEventListener('click', async () => {
+                console.log('[PlaylistSearch] Item clicked, closing dialog for ID:', norm.id);
+                
+                // Save the selected playlist to the dropdown/cache only now
+                await savePlaylistToDropdown(pl, norm.id);
+
+                if (playlistDialog) {
+                    playlistDialog.close();
+                    playlistDialog.removeAttribute('open');
+                }
                 if (playlistSearchInput) playlistSearchInput.value = '';
+                if (playlistSearchResults) playlistSearchResults.innerHTML = '';
                 void selectPlaylist(norm.id);
             });
             playlistSearchResults.appendChild(item);
         });
-        playlistSearchResults.style.display = 'block';
     }
 
     async function runPlaylistSearch() {
         if (!playlistSearchInput) return;
         const input = playlistSearchInput.value.trim();
         if (!input) {
-            if (playlistSearchResults) playlistSearchResults.style.display = 'none';
+            if (playlistSearchResults) playlistSearchResults.innerHTML = '';
             return;
         }
 
-        // Extract a UUID from a suno.com/playlist/UUID URL, or use input as-is
-        let playlistId = input;
-        const urlMatch = input.match(/playlist\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)
-            || input.match(/playlist\/([0-9a-f-]{30,36})/i);
-        if (urlMatch) {
-            playlistId = urlMatch[1];
-        }
-        // Accept only UUID-shaped IDs (with or without hyphens)
-        if (!/^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(playlistId)) {
-            if (playlistSearchResults) {
-                playlistSearchResults.innerHTML = '';
-                const msg = document.createElement('div');
-                msg.className = 'playlist-search-empty';
-                msg.textContent = 'Paste a suno.com/playlist/… URL or a playlist UUID.';
-                playlistSearchResults.appendChild(msg);
-                playlistSearchResults.style.display = 'block';
-            }
-            return;
-        }
+        // 1. If it's a URL or UUID, perform a direct "Load by ID" fetch
+        const playlistId = normalizePlaylistId(input);
+        const isUuid = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i.test(playlistId);
 
         if (playlistSearchBtn) {
             playlistSearchBtn.disabled = true;
             playlistSearchBtn.textContent = '…';
         }
+
         try {
-            const response = await sendMessageWithRetry({ action: 'fetch_playlist_info', playlistId });
-            if (response?.ok && response.playlist) {
-                await savePlaylistToDropdown(response.playlist, response.playlist.id);
-                renderPlaylistSearchResults([response.playlist]);
+            if (isUuid) {
+                // Direct fetch for ID-based input
+                const response = await sendMessageWithRetry({ action: 'fetch_playlist_info', playlistId });
+                if (response?.ok && response.playlist) {
+                    renderPlaylistSearchResults([response.playlist]);
+                } else {
+                    renderPlaylistSearchResults([]);
+                }
             } else {
-                renderPlaylistSearchResults([]);
+                // General text search
+                const response = await sendMessageWithRetry({ action: 'search_playlists', query: input });
+                if (response?.ok && Array.isArray(response.playlists)) {
+                    renderPlaylistSearchResults(response.playlists);
+                } else {
+                    renderPlaylistSearchResults([]);
+                }
             }
         } catch (e) {
-            statusDiv.innerText = `Playlist lookup error: ${e?.message || String(e)}`;
-            if (playlistSearchResults) playlistSearchResults.style.display = 'none';
+            statusDiv.innerText = `Playlist search error: ${e?.message || String(e)}`;
+            if (playlistSearchResults) playlistSearchResults.innerHTML = '';
         } finally {
             if (playlistSearchBtn) {
                 playlistSearchBtn.disabled = false;
@@ -2571,15 +2610,43 @@
         playlistSearchInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') void runPlaylistSearch();
             if (e.key === 'Escape') {
-                playlistSearchResults.style.display = 'none';
-                playlistSearchInput.value = '';
+                if (playlistDialog) playlistDialog.close();
             }
         });
     }
 
-    if (refreshPlaylistsBtn) {
-        refreshPlaylistsBtn.addEventListener('click', () => {
-            void loadPlaylists();
+    if (deletePlaylistBtn) {
+        deletePlaylistBtn.addEventListener('click', async () => {
+            const playlistId = playlistFilter?.value;
+            if (!playlistId) return;
+
+            const cachedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
+            if (!Array.isArray(cachedPlaylists)) return;
+
+            const pl = cachedPlaylists.find(p => p.id === playlistId);
+            if (!pl || !isPlaylistOtherArtist(pl)) {
+                alert("Only playlists from other artists can be deleted from the local database.");
+                return;
+            }
+
+            if (!confirm(`Remove "${pl.name}" from your local BetterSuno database?\n\n(This won't affect Suno.com)`)) {
+                return;
+            }
+
+            // Remove from main list
+            const updated = cachedPlaylists.filter(p => p.id !== playlistId);
+            await savePreferenceToIDB(PLAYLISTS_KEY, updated);
+
+            // Remove song cache for this playlist
+            await deletePreferenceFromIDB(getPlaylistSongsCacheKey(playlistId));
+
+            // Reset UI
+            if (playlistFilter) playlistFilter.value = '';
+            deletePlaylistBtn.style.display = 'none';
+            void loadPlaylists(); // Refresh dropdown
+            void selectPlaylist(''); // Show all songs
+            
+            statusDiv.innerText = `Removed playlist "${pl.name}" from local storage.`;
         });
     }
 
@@ -2612,10 +2679,17 @@
             songItemCache.clear();
             if (playlistFilter) {
                 playlistFilter.value = '';
+                // Only keep "All My Songs" option initially
                 while (playlistFilter.options.length > 1) {
                     playlistFilter.remove(1);
                 }
             }
+            if (deletePlaylistBtn) {
+                deletePlaylistBtn.style.display = 'none';
+            }
+            // Trigger a fresh load of user playlists from Suno
+            void loadPlaylists();
+
             renderSongList({ preserveScroll: false });
             statusDiv.innerText = "✅ Library deleted successfully.";
             void refreshDbUsageDisplay();
@@ -3365,7 +3439,13 @@
     }
 
     function filterSongs(songs, filterState) {
-        return songs.filter(song => matchesSongFilters(song, filterState));
+        const isShowingMySongs = !Array.isArray(playlistSongs);
+        return songs.filter(song => {
+            if (isShowingMySongs && isSongFromOtherArtist(song)) {
+                return false;
+            }
+            return matchesSongFilters(song, filterState);
+        });
     }
 
     function sortSongsForDisplay(songs) {
@@ -3420,7 +3500,7 @@
     }
 
     function getSelectedSongIds() {
-        const activeSongIds = new Set(getActiveSongs().map(song => song.id));
+        const activeSongIds = new Set(filteredSongs.map(song => song.id));
         return Array.from(selectedSongIds).filter(id => activeSongIds.has(id));
     }
 
@@ -3444,8 +3524,7 @@
         selectAllButton.textContent = isPressed ? 'Clear All' : 'Select All';
 
         // Disable Download button if any selected song is from "Other artist"
-        const activeSongs = getActiveSongs();
-        const selectedSongs = activeSongs.filter(song => selectedSongIds.has(song.id));
+        const selectedSongs = filteredSongs.filter(song => selectedSongIds.has(song.id));
         const fromOtherArtist = selectedSongs.some(song => isSongFromOtherArtist(song));
         if (downloadBtn) {
             downloadBtn.disabled = fromOtherArtist;

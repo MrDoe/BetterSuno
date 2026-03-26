@@ -38,13 +38,21 @@
               <select id="playlistFilter">
                 <option value="">All My Songs</option>
               </select>
-              <button id="refreshPlaylistsBtn" class="btn-secondary" title="Refresh playlists from Suno" type="button">⟳</button>
+              <button id="deletePlaylistBtn" class="btn-danger" title="Delete selected external playlist from local database" type="button" style="display: none;">🗑</button>
+              <button id="addPlaylistBtn" class="btn-secondary" title="Load a playlist by URL or ID" type="button">＋</button>
             </div>
-            <div id="playlistSearchControls">
-              <input type="text" id="playlistSearchInput" placeholder="Paste Suno playlist URL or ID..." autocomplete="off" />
-              <button id="playlistSearchBtn" class="btn-secondary" type="button">Load</button>
-            </div>
-            <div id="playlistSearchResults" style="display:none;"></div>
+
+            <dialog id="bettersuno-playlist-dialog">
+              <div class="playlist-dialog-header">
+                <span class="playlist-dialog-title">Add Playlist</span>
+                <button id="playlistDialogCloseBtn" class="playlist-dialog-close" type="button" aria-label="Close">✕</button>
+              </div>
+              <div id="playlistSearchControls">
+                <input type="text" id="playlistSearchInput" placeholder="Search playlist by name or paste URL/ID..." autocomplete="off" />
+                <button id="playlistSearchBtn" class="btn-secondary" type="button">Search</button>
+              </div>
+              <div id="playlistSearchResults"></div>
+            </dialog>
 
             <div id="filterControls">
               <label>Filter:</label>
