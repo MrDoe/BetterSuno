@@ -996,8 +996,27 @@
                 URL.revokeObjectURL(prevBlobUrl);
             }
 
+            const currentSongIdForError = song.id;
+            const onErrorHandler = () => {
+                if (currentPlayingSongId !== currentSongIdForError) return;
+                
+                const currentSrc = String(audioElement.src || '').toLowerCase();
+                if (currentSrc.includes('.m4a') || currentSrc.includes('format=m4a')) {
+                    const mp3Url = getAudioUrlForFormat(song, 'mp3');
+                    if (mp3Url && mp3Url !== audioElement.src) {
+                        console.log('[Downloader] M4A play failed, falling back to MP3:', mp3Url);
+                        audioElement.src = mp3Url;
+                        audioElement.load();
+                        audioElement.play().catch(e => console.error('[Downloader] MP3 fallback also failed:', e));
+                    }
+                }
+            };
+            audioElement.addEventListener('error', onErrorHandler, { once: true });
+
             audioElement.load();
-            audioElement.play();
+            audioElement.play().catch(e => {
+                console.debug('[Downloader] Play promise rejected:', e);
+            });
             miniPlayer.style.display = 'block';
             playerTitle.textContent = song.title || 'Untitled';
             playPauseBtn.textContent = '■';
@@ -2114,8 +2133,19 @@
 
             try {
                 const desiredFormat = getSelectedFormat();
-                const audioUrl = getAudioUrlForFormat(song, desiredFormat) || song.audio_url;
-                const response = await fetch(audioUrl);
+                let audioUrl = getAudioUrlForFormat(song, desiredFormat) || song.audio_url;
+                let response = await fetch(audioUrl);
+                
+                // Fallback: If M4A fails and we haven't tried MP3 yet, try MP3
+                if (!response.ok && desiredFormat === 'm4a') {
+                    const mp3Url = getAudioUrlForFormat(song, 'mp3');
+                    if (mp3Url && mp3Url !== audioUrl) {
+                        console.log(`[Downloader] M4A fetch failed for "${song.title}", falling back to MP3:`, mp3Url);
+                        audioUrl = mp3Url;
+                        response = await fetch(audioUrl);
+                    }
+                }
+
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const blob = await response.blob();
                 await saveAudioBlobToIDB(song.id, blob);
