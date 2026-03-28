@@ -812,8 +812,14 @@
     const playerTabLyrics = document.getElementById('player-tab-lyrics');
     const playerTabViewCover = document.getElementById('player-tab-view-cover');
     const playerTabViewLyrics = document.getElementById('player-tab-view-lyrics');
+    const playerTabViewComments = document.getElementById('player-tab-view-comments');
     const playerTabSubtabCover = document.getElementById('player-tab-subtab-cover');
     const playerTabSubtabLyrics = document.getElementById('player-tab-subtab-lyrics');
+    const playerTabSubtabComments = document.getElementById('player-tab-subtab-comments');
+    const playerTabCommentsList = document.getElementById('player-tab-comments-list');
+    const playerTabCommentInput = document.getElementById('player-tab-comment-input');
+    const playerTabCommentSubmit = document.getElementById('player-tab-comment-submit');
+    const playerTabEmojiPicker = document.getElementById('player-tab-emoji-picker');
     const playerTabNoSong = document.getElementById('player-tab-no-song');
     const playerTabSong = document.getElementById('player-tab-song');
     const playerTabPlayPause = document.getElementById('player-tab-play-pause');
@@ -827,7 +833,7 @@
     let playerTabCurrentView = 'cover';
 
     function setPlayerTabView(view) {
-        const nextView = view === 'lyrics' ? 'lyrics' : 'cover';
+        const nextView = (view === 'lyrics' || view === 'comments') ? view : 'cover';
         playerTabCurrentView = nextView;
 
         if (playerTabViewCover) {
@@ -836,12 +842,22 @@
         if (playerTabViewLyrics) {
             playerTabViewLyrics.style.display = nextView === 'lyrics' ? 'flex' : 'none';
         }
+        if (playerTabViewComments) {
+            playerTabViewComments.style.display = nextView === 'comments' ? 'flex' : 'none';
+        }
 
         if (playerTabSubtabCover) {
             playerTabSubtabCover.classList.toggle('active', nextView === 'cover');
         }
         if (playerTabSubtabLyrics) {
             playerTabSubtabLyrics.classList.toggle('active', nextView === 'lyrics');
+        }
+        if (playerTabSubtabComments) {
+            playerTabSubtabComments.classList.toggle('active', nextView === 'comments');
+        }
+
+        if (currentPlayingSongId) {
+            loadSongComments(currentPlayingSongId);
         }
     }
 
@@ -851,7 +867,230 @@
     if (playerTabSubtabLyrics) {
         playerTabSubtabLyrics.addEventListener('click', () => setPlayerTabView('lyrics'));
     }
+    if (playerTabSubtabComments) {
+        playerTabSubtabComments.addEventListener('click', () => setPlayerTabView('comments'));
+    }
     setPlayerTabView(playerTabCurrentView);
+
+    async function loadSongComments(songId) {
+        if (!playerTabCommentsList) return;
+        playerTabCommentsList.innerHTML = '<div class="player-tab-comments-loading">Loading comments...</div>';
+        
+        try {
+            console.log('[BetterSuno] Loading comments for:', songId);
+            const response = await sendMessageWithRetry({
+                action: 'fetch_song_comments',
+                songId: songId
+            });
+
+            console.log('[BetterSuno] Comments response:', response);
+
+            if (response?.ok && response.data) {
+                renderComments(response.data);
+            } else {
+                playerTabCommentsList.innerHTML = `<div class="player-tab-comments-empty">Failed to load comments (${response?.status || 'Error'})</div>`;
+            }
+        } catch (err) {
+            console.error('[BetterSuno] loadSongComments error:', err);
+            playerTabCommentsList.innerHTML = '<div class="player-tab-comments-empty">Error loading comments</div>';
+        }
+    }
+
+    function renderComments(commentsData) {
+        if (!playerTabCommentsList) return;
+        
+        // Suno API returns { results: [], total_count: X, ... }
+        const allComments = Array.isArray(commentsData.results) ? commentsData.results : [];
+        
+        if (allComments.length === 0) {
+            playerTabCommentsList.innerHTML = '<div class="player-tab-comments-empty">No comments yet</div>';
+            return;
+        }
+
+        // Build tree: comments with parent_id are replies
+        const commentMap = new Map();
+        const rootComments = [];
+
+        // First pass: put all comments in a map
+        allComments.forEach(c => {
+            commentMap.set(c.id, { ...c, replies: [] });
+        });
+
+        // Second pass: link replies to parents
+        allComments.forEach(c => {
+            const commentWithReplies = commentMap.get(c.id);
+            if (c.parent_id && commentMap.has(c.parent_id)) {
+                commentMap.get(c.parent_id).replies.push(commentWithReplies);
+            } else {
+                rootComments.push(commentWithReplies);
+            }
+        });
+
+        // Recursively render comments
+        function renderCommentTree(comment, depth = 0) {
+            const author = comment.user_handle || comment.user_display_name || 'Anonymous';
+            const text = comment.content || '';
+            const date = comment.created_at ? new Date(comment.created_at).toLocaleString() : '';
+            const id = comment.id;
+
+            let html = `
+                <div class="player-tab-comment-item" style="margin-left: ${depth * 20}px">
+                    <div class="player-tab-comment-header">
+                        <span class="player-tab-comment-author">@${escapeHtml(author)}</span>
+                        <span class="player-tab-comment-date">${escapeHtml(date)}</span>
+                    </div>
+                    <div class="player-tab-comment-body">${escapeHtml(text)}</div>
+                    <div class="player-tab-comment-actions">
+                        <span class="player-tab-comment-likes">❤️ ${comment.num_likes || 0}</span>
+                        <button class="player-tab-comment-like-btn" data-id="${id}">Like</button>
+                        <button class="player-tab-comment-reply-btn" data-id="${id}" data-author="${escapeHtml(author)}">Reply</button>
+                    </div>
+                </div>
+            `;
+
+            if (comment.replies && comment.replies.length > 0) {
+                // Sort replies by date (oldest first or newest first?) 
+                // Suno usually shows replies oldest first in a thread
+                const sortedReplies = comment.replies.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+                html += sortedReplies.map(r => renderCommentTree(r, depth + 1)).join('');
+            }
+
+            return html;
+        }
+
+        playerTabCommentsList.innerHTML = rootComments.map(c => renderCommentTree(c)).join('');
+
+        // Attach reply button listeners
+        const replyButtons = playerTabCommentsList.querySelectorAll('.player-tab-comment-reply-btn');
+        replyButtons.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const commentId = btn.getAttribute('data-id');
+                const author = btn.getAttribute('data-author');
+                setupReplyMode(commentId, author);
+            });
+        });
+
+        // Attach like button listeners
+        const likeButtons = playerTabCommentsList.querySelectorAll('.player-tab-comment-like-btn');
+        likeButtons.forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const commentId = btn.getAttribute('data-id');
+                btn.disabled = true;
+                try {
+                    const response = await sendMessageWithRetry({
+                        action: 'update_comment_reaction',
+                        commentId: commentId
+                    });
+                    if (response?.ok) {
+                        loadSongComments(currentPlayingSongId);
+                    } else {
+                        btn.disabled = false;
+                    }
+                } catch (e) {
+                    btn.disabled = false;
+                }
+            });
+        });
+    }
+
+    let activeReplyToId = null;
+
+    function setupReplyMode(commentId, author) {
+        if (!playerTabCommentInput) return;
+        activeReplyToId = commentId;
+        playerTabCommentInput.focus();
+        
+        // Add a visual indicator for reply mode next to the submit button
+        let replyIndicator = document.getElementById('player-tab-reply-indicator');
+        if (!replyIndicator) {
+            replyIndicator = document.createElement('div');
+            replyIndicator.id = 'player-tab-reply-indicator';
+            replyIndicator.className = 'player-tab-reply-indicator';
+            playerTabCommentSubmit.parentNode.insertBefore(replyIndicator, playerTabCommentSubmit);
+        }
+        replyIndicator.innerHTML = `Replying to @${author} <span id="player-tab-cancel-reply">✕</span>`;
+        
+        const cancelBtn = document.getElementById('player-tab-cancel-reply');
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', () => {
+                cancelReplyMode();
+            });
+        }
+    }
+
+    function cancelReplyMode() {
+        activeReplyToId = null;
+        const replyIndicator = document.getElementById('player-tab-reply-indicator');
+        if (replyIndicator) {
+            replyIndicator.remove();
+        }
+        // Don't clear input, user might have typed something
+    }
+
+    if (playerTabCommentInput && playerTabCommentSubmit) {
+        if (playerTabEmojiPicker) {
+            playerTabEmojiPicker.addEventListener('click', (e) => {
+                if (e.target.classList.contains('emoji-item')) {
+                    const emoji = e.target.textContent;
+                    const cursorNext = playerTabCommentInput.selectionStart + emoji.length;
+                    playerTabCommentInput.value = 
+                        playerTabCommentInput.value.substring(0, playerTabCommentInput.selectionStart) +
+                        emoji +
+                        playerTabCommentInput.value.substring(playerTabCommentInput.selectionEnd);
+                    
+                    playerTabCommentInput.selectionStart = playerTabCommentInput.selectionEnd = cursorNext;
+                    playerTabCommentInput.focus();
+                    playerTabCommentSubmit.disabled = false;
+                }
+            });
+        }
+
+        playerTabCommentInput.addEventListener('input', () => {
+            playerTabCommentSubmit.disabled = playerTabCommentInput.value.trim().length === 0;
+            // If user cleared the input and was in reply mode, maybe cancel it? 
+            // Or just leave it. Usually mentions are part of the content anyway.
+        });
+
+        playerTabCommentSubmit.addEventListener('click', async () => {
+            if (!currentPlayingSongId) return;
+            const text = playerTabCommentInput.value.trim();
+            if (!text) return;
+
+            playerTabCommentSubmit.disabled = true;
+            playerTabCommentInput.disabled = true;
+
+            try {
+                const response = await sendMessageWithRetry({
+                    action: 'post_song_comment',
+                    songId: currentPlayingSongId,
+                    content: text,
+                    parentId: activeReplyToId
+                });
+
+                if (response?.ok) {
+                    playerTabCommentInput.value = '';
+                    cancelReplyMode();
+                    loadSongComments(currentPlayingSongId);
+                } else {
+                    alert('Failed to post comment');
+                }
+            } catch (err) {
+                alert('Error posting comment');
+            } finally {
+                playerTabCommentSubmit.disabled = false;
+                playerTabCommentInput.disabled = false;
+            }
+        });
+    }
+
+    function escapeHtml(unsafe) {
+        return (unsafe || '').toString()
+             .replace(/&/g, "&amp;")
+             .replace(/</g, "&lt;")
+             .replace(/>/g, "&gt;")
+             .replace(/"/g, "&quot;")
+             .replace(/'/g, "&#039;");
+    }
 
     if (progressContainer) {
         progressHandle = progressContainer.querySelector('#player-progress-handle');
@@ -1187,7 +1426,7 @@
             if (song.id) {
                 void (async () => {
                     try {
-                        const response = await api.runtime.sendMessage({
+                        const response = await sendMessageWithRetry({
                             action: 'resolve_song_cover_video',
                             songId: song.id
                         });
@@ -1674,7 +1913,7 @@
 
     async function checkFetchState() {
         try {
-            const response = await api.runtime.sendMessage({ action: "get_fetch_state" });
+            const response = await sendMessageWithRetry({ action: "get_fetch_state" });
             if (response && response.isFetching) {
                 currentFetchMode = syncMeta.lastSyncMode || 'incremental';
                 statusDiv.innerText = "Fetching in progress...";
@@ -1791,7 +2030,7 @@
 
     async function checkDownloadState() {
         try {
-            const response = await api.runtime.sendMessage({ action: "get_download_state" });
+            const response = await sendMessageWithRetry({ action: "get_download_state" });
             if (response && response.isDownloading) {
                 setDownloadUiState(true);
                 statusDiv.innerText = "Download in progress...";

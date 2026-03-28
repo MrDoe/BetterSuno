@@ -1992,6 +1992,139 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "fetch_song_comments") {
+    (async () => {
+      try {
+        const songId = typeof msg.songId === 'string' ? msg.songId.trim() : '';
+
+        if (!songId) {
+          sendResponse({ ok: false, error: 'Missing songId' });
+          return;
+        }
+
+        const token = await getApiTokenWithFallback('fetch_song_comments');
+        if (!token) {
+          sendResponse({ ok: false, error: 'No auth token' });
+          return;
+        }
+
+        const url = `https://studio-api.prod.suno.com/api/gen/${encodeURIComponent(songId)}/comments?order=newest`;
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+
+        let responseBody = null;
+        try {
+          responseBody = await response.json();
+        } catch (error) {
+          responseBody = null;
+        }
+
+        if (!response.ok) {
+          console.warn('[BetterSuno] fetch_song_comments failed', response.status, responseBody);
+        }
+
+        sendResponse({ ok: response.ok, status: response.status, data: responseBody });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "update_comment_reaction") {
+    (async () => {
+      try {
+        const commentId = typeof msg.commentId === 'string' ? msg.commentId.trim() : '';
+
+        if (!commentId) {
+          sendResponse({ ok: false, error: 'Missing commentId' });
+          return;
+        }
+
+        const token = await getApiTokenWithFallback('update_comment_reaction');
+        if (!token) {
+          sendResponse({ ok: false, error: 'No auth token' });
+          return;
+        }
+
+        const url = `https://studio-api.prod.suno.com/api/comment/${encodeURIComponent(commentId)}/reaction/`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            reaction: 'LIKE'
+          })
+        });
+
+        let responseBody = null;
+        try {
+          responseBody = await response.json();
+        } catch (error) {
+          responseBody = null;
+        }
+
+        sendResponse({ ok: response.ok, status: response.status, data: responseBody });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "post_song_comment") {
+    (async () => {
+      try {
+        const songId = typeof msg.songId === 'string' ? msg.songId.trim() : '';
+        const content = typeof msg.content === 'string' ? msg.content.trim() : '';
+        const parentId = typeof msg.parentId === 'string' ? msg.parentId.trim() : null;
+
+        if (!songId || !content) {
+          sendResponse({ ok: false, error: 'Missing songId or content' });
+          return;
+        }
+
+        const token = await getApiTokenWithFallback('post_song_comment');
+        if (!token) {
+          sendResponse({ ok: false, error: 'No auth token' });
+          return;
+        }
+
+        const url = `https://studio-api.prod.suno.com/api/gen/${encodeURIComponent(songId)}/comment`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            content: content,
+            parent_id: parentId,
+            track_timestamp: null
+          })
+        });
+
+        let responseBody = null;
+        try {
+          responseBody = await response.json();
+        } catch (error) {
+          responseBody = null;
+        }
+
+        sendResponse({ ok: response.ok, status: response.status, data: responseBody });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "update_song_reaction") {
     (async () => {
       try {

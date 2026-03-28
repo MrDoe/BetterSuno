@@ -831,6 +831,184 @@
   word-break: break-word !important;
 }
 
+/* Comments View Styles */
+.player-tab-comments-wrapper {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  background: var(--bettersuno-bg) !important;
+}
+
+.player-tab-comments-list {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  padding: 0 16px 8px !important;
+  min-height: 0 !important;
+}
+
+.player-tab-comments-list::-webkit-scrollbar {
+  width: 4px !important;
+}
+
+.player-tab-comments-list::-webkit-scrollbar-thumb {
+  background: var(--bettersuno-border) !important;
+  border-radius: 3px !important;
+}
+
+.player-tab-comments-loading,
+.player-tab-comments-empty {
+  text-align: center !important;
+  font-size: 13px !important;
+  color: var(--bettersuno-text) !important;
+  opacity: 0.7 !important;
+  margin-top: 20px !important;
+}
+
+.player-tab-comment-item {
+  margin-bottom: 12px !important;
+  padding-bottom: 12px !important;
+  border-bottom: 1px solid var(--bettersuno-border) !important;
+}
+
+.player-tab-comment-item:last-child {
+  border-bottom: none !important;
+  margin-bottom: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+.player-tab-comment-header {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  margin-bottom: 4px !important;
+}
+
+.player-tab-comment-author {
+  font-weight: 600 !important;
+  font-size: 13px !important;
+  color: var(--bettersuno-primary) !important;
+}
+
+.player-tab-comment-date {
+  font-size: 11px !important;
+  color: var(--bettersuno-text) !important;
+  opacity: 0.6 !important;
+}
+
+.player-tab-comment-body {
+  font-size: 13px !important;
+  color: var(--bettersuno-text) !important;
+  line-height: 1.4 !important;
+  word-break: break-word !important;
+}
+
+.player-tab-comment-actions {
+  display: flex !important;
+  justify-content: flex-end !important;
+  align-items: center !important;
+  gap: 10px !important;
+  margin-top: 4px !important;
+}
+
+.player-tab-comment-likes {
+  font-size: 11px !important;
+  color: var(--bettersuno-text) !important;
+  opacity: 0.7 !important;
+  margin-right: auto !important;
+}
+
+.player-tab-comment-like-btn,
+.player-tab-comment-reply-btn {
+  background: none !important;
+  border: none !important;
+  color: var(--bettersuno-primary) !important;
+  font-size: 11px !important;
+  cursor: pointer !important;
+  padding: 0 !important;
+  opacity: 0.8 !important;
+}
+
+.player-tab-comment-like-btn:hover,
+.player-tab-comment-reply-btn:hover {
+  text-decoration: underline !important;
+  opacity: 1 !important;
+}
+
+.player-tab-comment-like-btn:disabled {
+  opacity: 0.4 !important;
+  cursor: default !important;
+  text-decoration: none !important;
+}
+
+.player-tab-reply-indicator {
+  font-size: 11px !important;
+  color: var(--bettersuno-primary) !important;
+  background: var(--bettersuno-bg) !important;
+  padding: 4px 8px !important;
+  border-radius: 4px !important;
+  border: 1px solid var(--bettersuno-primary) !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+}
+
+#player-tab-cancel-reply {
+  cursor: pointer !important;
+  margin-left: 8px !important;
+  font-weight: bold !important;
+}
+
+.player-tab-comments-input-area {
+  padding: 10px 16px !important;
+  border-top: 1px solid var(--bettersuno-border) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  background: var(--bettersuno-bg-hover) !important;
+  flex-shrink: 0 !important;
+}
+
+.player-tab-emoji-picker {
+  display: flex !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+  margin-bottom: 2px !important;
+}
+
+.emoji-item {
+  cursor: pointer !important;
+  font-size: 16px !important;
+  transition: transform 0.1s ease !important;
+  user-select: none !important;
+}
+
+.emoji-item:hover {
+  transform: scale(1.3) !important;
+}
+
+.player-tab-comments-input-area textarea {
+  width: 100% !important;
+  box-sizing: border-box !important;
+  min-height: 50px !important;
+  max-height: 120px !important;
+  resize: vertical !important;
+  background: var(--bettersuno-bg) !important;
+  border: 1px solid var(--bettersuno-border) !important;
+  color: var(--bettersuno-text) !important;
+  border-radius: 6px !important;
+  padding: 8px !important;
+  font-size: 13px !important;
+  font-family: inherit !important;
+}
+
+.player-tab-comments-input-area textarea:focus {
+  outline: none !important;
+  border-color: var(--bettersuno-primary) !important;
+}
+
+
 .player-tab-controls {
   padding: 10px 16px 12px !important;
   border-top: 1px solid var(--bettersuno-border) !important;

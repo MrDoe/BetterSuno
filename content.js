@@ -173,6 +173,7 @@
             <div class="player-tab-subtabs" id="player-tab-subtabs">
               <button type="button" class="player-tab-subtab active" id="player-tab-subtab-cover" data-view="cover">Cover</button>
               <button type="button" class="player-tab-subtab" id="player-tab-subtab-lyrics" data-view="lyrics">Lyrics</button>
+              <button type="button" class="player-tab-subtab" id="player-tab-subtab-comments" data-view="comments">Comments</button>
             </div>
             <div class="player-tab-view" id="player-tab-view-cover">
               <div class="player-tab-title" id="player-tab-title"></div>
@@ -184,6 +185,29 @@
             <div class="player-tab-view" id="player-tab-view-lyrics" style="display: none;">
               <div class="player-tab-lyrics-wrapper">
                 <div class="player-tab-lyrics" id="player-tab-lyrics">No lyrics available.</div>
+              </div>
+            </div>
+            <div class="player-tab-view" id="player-tab-view-comments" style="display: none;">
+              <div class="player-tab-comments-wrapper">
+                <div class="player-tab-comments-list" id="player-tab-comments-list">
+                  <div class="player-tab-comments-loading">Loading comments...</div>
+                </div>
+                <div class="player-tab-comments-input-area">
+                  <div class="player-tab-emoji-picker" id="player-tab-emoji-picker">
+                    <span class="emoji-item">👍</span>
+                    <span class="emoji-item">🔥</span>
+                    <span class="emoji-item">❤️</span>
+                    <span class="emoji-item">⭐</span>
+                    <span class="emoji-item">✨</span>
+                    <span class="emoji-item">🎵</span>
+                    <span class="emoji-item">🙌</span>
+                    <span class="emoji-item">🎸</span>
+                    <span class="emoji-item">🎹</span>
+                    <span class="emoji-item">🎤</span>
+                  </div>
+                  <textarea id="player-tab-comment-input" placeholder="Add a comment..."></textarea>
+                  <button id="player-tab-comment-submit" class="btn-primary" disabled>Post</button>
+                </div>
               </div>
             </div>
           </div>
