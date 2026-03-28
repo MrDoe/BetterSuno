@@ -3093,9 +3093,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
           return;
         }
 
-        isFetching = false;
-        notifyTab({ action: "fetch_error", error: `❌ Metadata refresh failed: ${err.message}` });
-        return;
+        notifyTab({ action: "log", text: `ℹ️ Metadata refresh via API failed (${err.message}). Falling back to regular fetch...` });
       }
     }
 
