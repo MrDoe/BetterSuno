@@ -920,7 +920,13 @@
         allComments.forEach(c => {
             const commentWithReplies = commentMap.get(c.id);
             if (c.parent_id && commentMap.has(c.parent_id)) {
-                commentMap.get(c.parent_id).replies.push(commentWithReplies);
+                const parent = commentMap.get(c.parent_id);
+                if (parent) {
+                    parent.replies.push(commentWithReplies);
+                } else {
+                    // Parent not found in current results, treat as root for now
+                    rootComments.push(commentWithReplies);
+                }
             } else {
                 rootComments.push(commentWithReplies);
             }

@@ -189,23 +189,28 @@ async function claimNotificationsRefreshHost(tabId) {
  * Dies funktioniert auch wenn der Tab schläft!
  */
 async function getClerkSessionFromCookies() {
-  try {
-    const cookie = await chrome.cookies.get({
-      url: 'https://suno.com',
-      name: '__session'
-    });
-    
-    if (cookie?.value) {
-      log("Clerk __session Cookie found:", cookie.value.slice(0, 20) + "...");
-      return cookie.value;
+  const MAX_RETRIES = 3;
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    try {
+      const cookie = await chrome.cookies.get({
+        url: 'https://suno.com',
+        name: '__session'
+      });
+      
+      if (cookie?.value) {
+        log("Clerk __session Cookie found:", cookie.value.slice(0, 20) + "...");
+        return cookie.value;
+      }
+      
+      log(`Clerk __session Cookie NOT found (attempt ${i + 1}/${MAX_RETRIES})`);
+    } catch (err) {
+      log(`Error getting Clerk session cookie (attempt ${i + 1}/${MAX_RETRIES}):`, err.message);
     }
-    
-    log("Clerk __session Cookie NOT found");
-    return null;
-  } catch (err) {
-    log("Error getting Clerk session cookie:", err.message);
-    return null;
+    if (i < MAX_RETRIES - 1) {
+      await new Promise(r => setTimeout(r, 1000 * (i + 1))); // Exponential backoff: 1s, 2s
+    }
   }
+  return null;
 }
 
 /**
@@ -213,48 +218,62 @@ async function getClerkSessionFromCookies() {
  * Uses the Session Token from the cookie.
  */
 async function refreshTokenViaClerkAPI(sessionToken) {
-  try {
-    // Clerk's Token Endpoint (standard for all Clerk apps)
-    const response = await fetch('https://clerk.suno.com/v1/client/sessions/active/tokens', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${sessionToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        template: ''  // Empty template name = standard Bearer Token
-      })
-    });
+  const MAX_RETRIES = 2;
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    try {
+      // Clerk's Token Endpoint (standard for all Clerk apps)
+      const response = await fetch('https://clerk.suno.com/v1/client/sessions/active/tokens', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${sessionToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          template: ''  // Empty template name = standard Bearer Token
+        })
+      });
 
-    if (!response.ok) {
-      let errorDetail = response.statusText;
-      try {
-        const errorData = await response.json();
-        errorDetail = JSON.stringify(errorData);
-      } catch (e) {
-        const text = await response.text();
-        errorDetail = text.slice(0, 200);
+      if (!response.ok) {
+        let errorDetail = response.statusText;
+        try {
+          const errorData = await response.json();
+          errorDetail = JSON.stringify(errorData);
+        } catch (e) {
+          try {
+            const text = await response.text();
+            errorDetail = text.slice(0, 200);
+          } catch (e2) {}
+        }
+        log(`Clerk API refresh failed (attempt ${i + 1}/${MAX_RETRIES}):`, response.status, errorDetail);
+        
+        // If it's a 401/403, the session token might be invalid, no point in retrying.
+        if (response.status === 401 || response.status === 403) {
+          return null;
+        }
+      } else {
+        const data = await response.json();
+        const jwt = data?.jwt || data?.token;
+        
+        if (jwt) {
+          log("NEW Bearer Token via Clerk API:", jwt.slice(0, 20) + "...");
+          return {
+            token: jwt,
+            expiresAt: Date.now() + (50 * 60 * 1000) // 50 minutes
+          };
+        }
+
+        log("Clerk API response missing token field:", JSON.stringify(data).slice(0, 100));
+        return null;
       }
-      log("Clerk API refresh failed:", response.status, errorDetail);
-      return null;
+    } catch (err) {
+      log(`Error refreshing via Clerk API (attempt ${i + 1}/${MAX_RETRIES}):`, err.message);
     }
-
-    const data = await response.json();
     
-    if (data.jwt) {
-      log("NEW Bearer Token via Clerk API:", data.jwt.slice(0, 20) + "...");
-      return {
-        token: data.jwt,
-        expiresAt: Date.now() + (50 * 60 * 1000) // 50 minutes
-      };
+    if (i < MAX_RETRIES - 1) {
+      await new Promise(r => setTimeout(r, 1500 * (i + 1))); // 1.5s delay then 3s delay
     }
-
-    log("Clerk API response missing jwt field:", JSON.stringify(data).slice(0, 100));
-    return null;
-  } catch (err) {
-    log("Error refreshing token via Clerk API:", err.message);
-    return null;
   }
+  return null;
 }
 
 /**

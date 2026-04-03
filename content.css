@@ -981,6 +981,7 @@
   cursor: pointer !important;
   font-size: 16px !important;
   transition: transform 0.1s ease !important;
+  -webkit-user-select: none !important;
   user-select: none !important;
 }
 

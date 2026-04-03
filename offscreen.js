@@ -95,12 +95,23 @@ setInterval(() => {
 // Request token from background
 // -------------------------------------------------------------
 async function getToken(tabId) {
-  return new Promise(resolve => {
-    chrome.runtime.sendMessage(
-      { type: "offscreenRequestToken", tabId },
-      resp => resolve(resp?.token || null)
-    );
-  });
+  const MAX_RETRIES = 5;
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    const token = await new Promise(resolve => {
+      chrome.runtime.sendMessage(
+        { type: "offscreenRequestToken", tabId },
+        resp => resolve(resp?.token || null)
+      );
+    });
+
+    if (token) return token;
+
+    log(`getToken attempt ${i + 1}/${MAX_RETRIES} failed for tab`, tabId);
+    if (i < MAX_RETRIES - 1) {
+      await new Promise(r => setTimeout(r, 2000 * (i + 1))); // 2s, 4s, 6s, 8s backoff
+    }
+  }
+  return null;
 }
 
 // -------------------------------------------------------------
