@@ -184,28 +184,72 @@ async function claimNotificationsRefreshHost(tabId) {
 // Clerk Session Token aus Cookies + eigener Refresh
 // ============================================================================
 
+const CLERK_COOKIE_URL_CANDIDATES = [
+  'https://suno.com/',
+  'https://www.suno.com/',
+  'https://clerk.suno.com/',
+  'https://accounts.suno.com/'
+];
+
 /**
- * Holt das Clerk Session Token (__session Cookie) direkt aus den Browser-Cookies
- * Dies funktioniert auch wenn der Tab schläft!
+ * Holt das Clerk Session Token (__session Cookie) direkt aus den Browser-Cookies.
+ * Scannt alle Suno/Clerk Domains, da Clerk das Cookie nicht immer auf suno.com setzt.
  */
 async function getClerkSessionFromCookies() {
+  const isUsableSessionCookie = (cookie) => {
+    if (!cookie || typeof cookie.value !== 'string') {
+      return false;
+    }
+
+    const domain = String(cookie.domain || '').replace(/^\./, '').toLowerCase();
+    return cookie.name === '__session' && domain.endsWith('suno.com');
+  };
+
+  const scoreCookie = (cookie) => {
+    const domain = String(cookie.domain || '').replace(/^\./, '').toLowerCase();
+    let score = 0;
+
+    if (domain === 'clerk.suno.com') score += 400;
+    if (domain === 'accounts.suno.com') score += 300;
+    if (domain === 'suno.com') score += 200;
+    if (cookie.hostOnly) score += 50;
+    if (typeof cookie.expirationDate === 'number') score += Math.round(cookie.expirationDate);
+
+    return score;
+  };
+
   try {
-    const cookie = await chrome.cookies.get({
-      url: 'https://suno.com',
-      name: '__session'
-    });
-    
-    if (cookie?.value) {
-      log("Clerk __session Cookie found:", cookie.value.slice(0, 20) + "...");
+    const allCookies = await chrome.cookies.getAll({ name: '__session' });
+    const matchingCookies = allCookies.filter(isUsableSessionCookie);
+
+    if (matchingCookies.length > 0) {
+      matchingCookies.sort((left, right) => scoreCookie(right) - scoreCookie(left));
+      const cookie = matchingCookies[0];
+      log("Clerk __session Cookie found via getAll on domain", cookie.domain || '(unknown)');
       return cookie.value;
     }
-    
-    log("Clerk __session Cookie NOT found");
-    return null;
   } catch (err) {
-    log("Error getting Clerk session cookie:", err.message);
-    return null;
+    log("Error scanning Clerk session cookies via getAll:", err.message);
   }
+
+  for (const url of CLERK_COOKIE_URL_CANDIDATES) {
+    try {
+      const cookie = await chrome.cookies.get({
+        url,
+        name: '__session'
+      });
+
+      if (cookie?.value) {
+        log("Clerk __session Cookie found via URL lookup:", url, 'domain:', cookie.domain || '(unknown)');
+        return cookie.value;
+      }
+    } catch (err) {
+      log("Error getting Clerk session cookie for", url, ':', err.message);
+    }
+  }
+
+  log("Clerk __session Cookie NOT found on any Suno/Clerk domain");
+  return null;
 }
 
 /**
@@ -213,48 +257,77 @@ async function getClerkSessionFromCookies() {
  * Uses the Session Token from the cookie.
  */
 async function refreshTokenViaClerkAPI(sessionToken) {
-  try {
-    // Clerk's Token Endpoint (standard for all Clerk apps)
-    const response = await fetch('https://clerk.suno.com/v1/client/sessions/active/tokens', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${sessionToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        template: ''  // Empty template name = standard Bearer Token
-      })
-    });
-
-    if (!response.ok) {
-      let errorDetail = response.statusText;
-      try {
-        const errorData = await response.json();
-        errorDetail = JSON.stringify(errorData);
-      } catch (e) {
-        const text = await response.text();
-        errorDetail = text.slice(0, 200);
+  const requestBody = JSON.stringify({
+    template: ''
+  });
+  const attempts = [
+    {
+      label: 'cookie-auth',
+      options: {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: requestBody
       }
-      log("Clerk API refresh failed:", response.status, errorDetail);
-      return null;
+    },
+    {
+      label: 'bearer-auth',
+      options: {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Authorization': `Bearer ${sessionToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: requestBody
+      }
     }
+  ];
 
-    const data = await response.json();
-    
-    if (data.jwt) {
-      log("NEW Bearer Token via Clerk API:", data.jwt.slice(0, 20) + "...");
-      return {
-        token: data.jwt,
-        expiresAt: Date.now() + (50 * 60 * 1000) // 50 minutes
-      };
+  for (const attempt of attempts) {
+    try {
+      const response = await fetch('https://clerk.suno.com/v1/client/sessions/active/tokens', attempt.options);
+      let data = null;
+      let textBody = '';
+
+      try {
+        data = await response.clone().json();
+      } catch (parseError) {
+        try {
+          textBody = await response.text();
+        } catch (readError) {
+          textBody = '';
+        }
+      }
+
+      if (!response.ok) {
+        const errorDetail = data ? JSON.stringify(data).slice(0, 200) : textBody.slice(0, 200) || response.statusText;
+        log(`Clerk API refresh failed via ${attempt.label}:`, response.status, errorDetail);
+        continue;
+      }
+
+      const jwt = typeof data?.jwt === 'string' ? data.jwt
+        : typeof data?.token === 'string' ? data.token
+        : typeof data?.client?.jwt === 'string' ? data.client.jwt
+        : null;
+
+      if (jwt) {
+        log(`NEW Bearer Token via Clerk API (${attempt.label}):`, jwt.slice(0, 20) + "...");
+        return {
+          token: jwt,
+          expiresAt: Date.now() + (50 * 60 * 1000)
+        };
+      }
+
+      log(`Clerk API response missing jwt field via ${attempt.label}:`, JSON.stringify(data || textBody).slice(0, 100));
+    } catch (err) {
+      log(`Error refreshing token via Clerk API (${attempt.label}):`, err.message);
     }
-
-    log("Clerk API response missing jwt field:", JSON.stringify(data).slice(0, 100));
-    return null;
-  } catch (err) {
-    log("Error refreshing token via Clerk API:", err.message);
-    return null;
   }
+
+  return null;
 }
 
 /**
@@ -369,16 +442,46 @@ async function fetchTokenDirect(tabId) {
       target: { tabId },
       world: "MAIN",
       func: async () => {
-        try {
-          if (!window.Clerk) return { ok: false, reason: "no-clerk" };
-          if (!window.Clerk.session) return { ok: false, reason: "no-session" };
-          const token = await window.Clerk.session.getToken();
-          if (!token) {
-            console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect ERROR: Clerk returned null token at", Date.now());
-            return { ok: false, reason: "null-token" };
+        const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+        const getClerkToken = async () => {
+          if (!window.Clerk?.session?.getToken) {
+            return { ok: false, reason: "no-session" };
           }
-          console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect NEW TOKEN created:", token.slice(0, 12), "…", "at", Date.now());
-          return { ok: true, token };
+
+          try {
+            const token = await window.Clerk.session.getToken();
+            if (!token) {
+              console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect ERROR: Clerk returned null token at", Date.now());
+              return { ok: false, reason: "null-token" };
+            }
+
+            console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect NEW TOKEN created:", token.slice(0, 12), "…", "at", Date.now());
+            return { ok: true, token };
+          } catch (err) {
+            console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect ERROR:", err.message, "at", Date.now());
+            return { ok: false, reason: err.message };
+          }
+        };
+
+        try {
+          for (let attempt = 0; attempt < 10; attempt += 1) {
+            if (window.Clerk?.session?.getToken) {
+              return await getClerkToken();
+            }
+
+            if (attempt === 0 && !window.Clerk) {
+              console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect: waiting for Clerk bootstrap at", Date.now());
+            }
+
+            await wait(250);
+          }
+
+          if (!window.Clerk) {
+            return { ok: false, reason: "no-clerk" };
+          }
+
+          return { ok: false, reason: "no-session" };
         } catch(err) {
           console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect ERROR:", err.message, "at", Date.now());
           return { ok: false, reason: err.message };
