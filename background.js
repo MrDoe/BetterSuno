@@ -434,23 +434,22 @@ chrome.alarms.create('keepAlive', {
 // ============================================================================
 
 async function fetchTokenDirect(tabId) {
-  // Firefox doesn't support world: "MAIN" in executeScript
-  if (isFirefox) return null;
   if (typeof tabId !== 'number' || isNaN(tabId)) return null;
   try {
-    const results = await chrome.scripting.executeScript({
+    const executeOptions = {
       target: { tabId },
-      world: "MAIN",
       func: async () => {
         const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+        const pageWindow = window.wrappedJSObject || window;
 
         const getClerkToken = async () => {
-          if (!window.Clerk?.session?.getToken) {
+          const getToken = pageWindow?.Clerk?.session?.getToken;
+          if (typeof getToken !== 'function') {
             return { ok: false, reason: "no-session" };
           }
 
           try {
-            const token = await window.Clerk.session.getToken();
+            const token = await getToken.call(pageWindow.Clerk.session);
             if (!token) {
               console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect ERROR: Clerk returned null token at", Date.now());
               return { ok: false, reason: "null-token" };
@@ -466,18 +465,18 @@ async function fetchTokenDirect(tabId) {
 
         try {
           for (let attempt = 0; attempt < 10; attempt += 1) {
-            if (window.Clerk?.session?.getToken) {
+            if (typeof pageWindow?.Clerk?.session?.getToken === 'function') {
               return await getClerkToken();
             }
 
-            if (attempt === 0 && !window.Clerk) {
+            if (attempt === 0 && !pageWindow?.Clerk) {
               console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect: waiting for Clerk bootstrap at", Date.now());
             }
 
             await wait(250);
           }
 
-          if (!window.Clerk) {
+          if (!pageWindow?.Clerk) {
             return { ok: false, reason: "no-clerk" };
           }
 
@@ -487,7 +486,13 @@ async function fetchTokenDirect(tabId) {
           return { ok: false, reason: err.message };
         }
       }
-    });
+    };
+
+    if (!isFirefox) {
+      executeOptions.world = "MAIN";
+    }
+
+    const results = await chrome.scripting.executeScript(executeOptions);
     const result = results?.[0]?.result;
     if (!result?.ok) {
       log("fetchTokenDirect failed:", result?.reason);
@@ -501,16 +506,15 @@ async function fetchTokenDirect(tabId) {
 }
 
 async function fetchCurrentUserIdentityDirect(tabId) {
-  if (isFirefox) return null;
   if (typeof tabId !== 'number' || isNaN(tabId)) return null;
 
   try {
-    const results = await chrome.scripting.executeScript({
+    const executeOptions = {
       target: { tabId },
-      world: "MAIN",
       func: () => {
         try {
-          const clerk = window.Clerk;
+          const pageWindow = window.wrappedJSObject || window;
+          const clerk = pageWindow.Clerk;
           const user = clerk?.user || clerk?.session?.user || null;
           if (!user) {
             return { ok: false, reason: 'no-user' };
@@ -561,14 +565,14 @@ async function fetchCurrentUserIdentityDirect(tabId) {
           if (!userIdSuno) {
             try {
               const globalsToCheck = [
-                window.currentUser,
-                window.user,
-                window.profile,
-                window.userData,
-                window.sunoUser,
-                window.sunoProfile,
-                window.__INITIAL_STATE__,
-                window.__data__
+                pageWindow.currentUser,
+                pageWindow.user,
+                pageWindow.profile,
+                pageWindow.userData,
+                pageWindow.sunoUser,
+                pageWindow.sunoProfile,
+                pageWindow.__INITIAL_STATE__,
+                pageWindow.__data__
               ];
               
               for (const obj of globalsToCheck) {
@@ -601,7 +605,13 @@ async function fetchCurrentUserIdentityDirect(tabId) {
           return { ok: false, reason: error?.message || String(error) };
         }
       }
-    });
+    };
+
+    if (!isFirefox) {
+      executeOptions.world = "MAIN";
+    }
+
+    const results = await chrome.scripting.executeScript(executeOptions);
 
     const result = results?.[0]?.result;
     if (!result?.ok || !result.identity) {
