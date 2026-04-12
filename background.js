@@ -252,79 +252,191 @@ async function getClerkSessionFromCookies() {
   return null;
 }
 
-/**
- * Refreshes the Bearer Token directly via Clerk's API.
- * Uses the Session Token from the cookie.
- */
-async function refreshTokenViaClerkAPI(sessionToken) {
-  const requestBody = JSON.stringify({
-    template: ''
+function tokenSlice(token, len = 12) {
+  if (typeof token !== 'string' || !token) {
+    return '';
+  }
+
+  if (token.length <= len) {
+    return token;
+  }
+
+  return token.slice(0, len) + '...' + token.slice(-len);
+}
+
+function tabStatus(sunoTab) {
+  if (!sunoTab || typeof sunoTab.id !== 'number') {
+    return 'unknown';
+  }
+
+  if (sunoTab.discarded) {
+    return 'discarded';
+  }
+  if (sunoTab.frozen) {
+    return 'frozen';
+  }
+  if (sunoTab.status === 'unloaded') {
+    return 'unloaded';
+  }
+  if (sunoTab.active) {
+    return 'active';
+  }
+
+  return sunoTab.status || 'unknown';
+}
+
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function executeWithTimeout(sunoTab, func, timeoutMs = 2000) {
+  const executeOptions = {
+    target: { tabId: sunoTab.id },
+    func
+  };
+
+  if (!isFirefox) {
+    executeOptions.world = 'MAIN';
+  }
+
+  return Promise.race([
+    chrome.scripting.executeScript(executeOptions),
+    new Promise(resolve => setTimeout(() => resolve(null), timeoutMs))
+  ]);
+}
+
+async function updateTabWithTimeout(tabId, updateInfo, timeoutMs = 1500) {
+  return Promise.race([
+    chrome.tabs.update(tabId, updateInfo),
+    new Promise(resolve => setTimeout(() => resolve(null), timeoutMs))
+  ]);
+}
+
+async function findSunoTabsForTokenRefresh(preferredTabId) {
+  const sunoTabs = await chrome.tabs.query({ url: 'https://suno.com/*' });
+  const filteredTabs = sunoTabs.filter(tab => typeof tab.id === 'number');
+
+  filteredTabs.sort((left, right) => {
+    const leftPreferred = left.id === preferredTabId ? 1 : 0;
+    const rightPreferred = right.id === preferredTabId ? 1 : 0;
+    if (leftPreferred !== rightPreferred) {
+      return rightPreferred - leftPreferred;
+    }
+
+    const leftScore = (left.active ? 100 : 0) + (left.discarded ? -50 : 0) + (left.frozen ? -25 : 0);
+    const rightScore = (right.active ? 100 : 0) + (right.discarded ? -50 : 0) + (right.frozen ? -25 : 0);
+    return rightScore - leftScore;
   });
-  const attempts = [
-    {
-      label: 'cookie-auth',
-      options: {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: requestBody
-      }
-    },
-    {
-      label: 'bearer-auth',
-      options: {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Authorization': `Bearer ${sessionToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: requestBody
-      }
-    }
-  ];
 
-  for (const attempt of attempts) {
-    try {
-      const response = await fetch('https://clerk.suno.com/v1/client/sessions/active/tokens', attempt.options);
-      let data = null;
-      let textBody = '';
+  return filteredTabs;
+}
 
-      try {
-        data = await response.clone().json();
-      } catch (parseError) {
+/**
+ * Refreshes the Bearer token through the live Clerk client inside a Suno tab.
+ * This now requires at least one reachable Suno tab and no longer calls Clerk's
+ * token REST endpoint directly.
+ */
+async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
+  let tabCount = 0;
+
+  try {
+    for (let run = 1; run <= 4; run += 1) {
+      const sunoTabs = await findSunoTabsForTokenRefresh(preferredTabId);
+      tabCount = 0;
+
+      for (const sunoTab of sunoTabs) {
+        tabCount += 1;
+        let token = null;
+        let results = null;
+
         try {
-          textBody = await response.text();
-        } catch (readError) {
-          textBody = '';
+          if (!isFirefox && run > 1) {
+            const currentStatus = tabStatus(sunoTab);
+            if (currentStatus === 'frozen' || currentStatus === 'discarded' || currentStatus === 'unloaded') {
+              if (run > 3) {
+                try {
+                  await chrome.windows.update(sunoTab.windowId, { focused: true });
+                } catch (focusError) {
+                  log(`refreshTokenViaClerkAPI: could not focus window ${sunoTab.windowId}:`, focusError.message);
+                }
+              }
+
+              const updatedTab = await updateTabWithTimeout(sunoTab.id, { active: true });
+              if (!updatedTab) {
+                log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, activating tab ${sunoTab.id} timed out`);
+                continue;
+              }
+
+              await sleep(200);
+
+              if (run > 2) {
+                const refreshedTab = await chrome.tabs.get(sunoTab.id);
+                if (refreshedTab?.frozen || refreshedTab?.discarded || refreshedTab?.status === 'unloaded') {
+                  await chrome.tabs.reload(sunoTab.id);
+                  await sleep(500);
+                }
+              }
+            }
+          }
+
+          results = await executeWithTimeout(
+            sunoTab,
+            async () => {
+              const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+              const pageWindow = window.wrappedJSObject || window;
+              const maxRetries = 10;
+              const delayMs = 100;
+
+              for (let index = 0; index < maxRetries; index += 1) {
+                const getToken = pageWindow?.Clerk?.session?.getToken;
+                if (typeof getToken === 'function') {
+                  try {
+                    return await getToken.call(pageWindow.Clerk.session);
+                  } catch (error) {
+                    console.error('refreshTokenViaClerkAPI getToken error:', error);
+                    return null;
+                  }
+                }
+
+                await wait(delayMs);
+              }
+
+              return null;
+            },
+            2000
+          );
+        } catch (err) {
+          log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, error in tab ${sunoTab.id}:`, err.message);
+          results = null;
         }
+
+        if (results) {
+          token = results[0]?.result || null;
+        }
+
+        if (token) {
+          if (token === sessionToken) {
+            log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, OLD Bearer Token via Clerk session in tab ${sunoTab.id}:`, tokenSlice(token));
+          } else {
+            log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, NEW Bearer Token via Clerk session in tab ${sunoTab.id}:`, tokenSlice(token));
+          }
+
+          return {
+            token,
+            expiresAt: Date.now() + (50 * 60 * 1000),
+            sourceTabId: sunoTab.id
+          };
+        }
+
+        log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, Clerk session token refresh in tab ${sunoTab.id} failed (status: ${tabStatus(sunoTab)})`);
       }
-
-      if (!response.ok) {
-        const errorDetail = data ? JSON.stringify(data).slice(0, 200) : textBody.slice(0, 200) || response.statusText;
-        log(`Clerk API refresh failed via ${attempt.label}:`, response.status, errorDetail);
-        continue;
-      }
-
-      const jwt = typeof data?.jwt === 'string' ? data.jwt
-        : typeof data?.token === 'string' ? data.token
-        : typeof data?.client?.jwt === 'string' ? data.client.jwt
-        : null;
-
-      if (jwt) {
-        log(`NEW Bearer Token via Clerk API (${attempt.label}):`, jwt.slice(0, 20) + "...");
-        return {
-          token: jwt,
-          expiresAt: Date.now() + (50 * 60 * 1000)
-        };
-      }
-
-      log(`Clerk API response missing jwt field via ${attempt.label}:`, JSON.stringify(data || textBody).slice(0, 100));
-    } catch (err) {
-      log(`Error refreshing token via Clerk API (${attempt.label}):`, err.message);
     }
+  } catch (err) {
+    log('refreshTokenViaClerkAPI: unexpected error while scanning Suno tabs:', err.message);
+  }
+
+  if (!tabCount) {
+    log('refreshTokenViaClerkAPI: Refreshing Bearer Token failed, because no relevant Suno tabs were found');
   }
 
   return null;
@@ -332,10 +444,10 @@ async function refreshTokenViaClerkAPI(sessionToken) {
 
 /**
  * Main function: provide token with automatic refresh.
- * Works WITHOUT an active tab!
+ * Requires a reachable Suno tab because Clerk now refreshes inside page context.
  */
-async function ensureValidTokenCookieBased(tabId) {
-  log("ensureValidTokenCookieBased called for tab", tabId);
+async function ensureValidTokenViaClerkSession(tabId) {
+  log("ensureValidTokenViaClerkSession called for tab", tabId);
 
   const st = ensureTabState(tabId);
   const now = Date.now();
@@ -346,19 +458,18 @@ async function ensureValidTokenCookieBased(tabId) {
     return st.token;
   }
 
-  log("Token expired or missing - fetching new token via Clerk API");
+  log("Token expired or missing - fetching new token via Clerk session in Suno tab");
 
-  // Step 1: Get session token from cookie
+  // Step 1: Get session token from cookie for session continuity/debugging
   const sessionToken = await getClerkSessionFromCookies();
   if (!sessionToken) {
-    log("ERROR: No Clerk Session Cookie found - user must be logged in to Suno!");
-    return null;
+    log("No Clerk Session Cookie found - continuing with live Clerk session only");
   }
 
-  // Step 2: Get new Bearer Token from Clerk API
-  const tokenData = await refreshTokenViaClerkAPI(sessionToken);
+  // Step 2: Get new Bearer Token via Clerk session inside a Suno tab
+  const tokenData = await refreshTokenViaClerkAPI(sessionToken, tabId);
   if (!tokenData) {
-    log("ERROR: Clerk API Token refresh failed");
+    log("ERROR: Clerk session token refresh failed - at least one usable Suno tab is required");
     return null;
   }
 
@@ -430,7 +541,7 @@ chrome.alarms.create('keepAlive', {
 });
 
 // ============================================================================
-// FALLBACK: Token from MAIN World (only if cookie method fails)
+// FALLBACK: Token from MAIN World (only if live Clerk session refresh fails)
 // ============================================================================
 
 async function fetchTokenDirect(tabId) {
@@ -644,14 +755,14 @@ async function fetchCurrentUserIdentityDirect(tabId) {
 async function ensureValidToken(tabId) {
   log("ensureValidToken called for tab", tabId);
 
-  // STRATEGY 1: Cookie-based (works even with sleeping tab)
-  const cookieToken = await ensureValidTokenCookieBased(tabId);
+  // STRATEGY 1: Refresh via live Clerk session in an available Suno tab
+  const cookieToken = await ensureValidTokenViaClerkSession(tabId);
   if (cookieToken) {
-    log("✓ Token obtained via cookie method");
+    log("✓ Token obtained via live Clerk session");
     return cookieToken;
   }
 
-  log("⚠ Cookie method failed, trying MAIN world fallback...");
+  log("⚠ Live Clerk session refresh failed, trying MAIN world fallback...");
 
   // STRATEGY 2: Fallback to MAIN world (legacy approach)
   const st = ensureTabState(tabId);
@@ -4278,7 +4389,7 @@ chrome.notifications.onClosed.addListener((notifId) => {
 // ============================================================================
 
 log("🚀 Background Service Worker started");
-log("Token refresh via Clerk API every 45 minutes");
+log("Token refresh via live Clerk session every 45 minutes");
 log("Tab keep-alive every 5 minutes");
 
 // Watchdog alarm: re-ensures the offscreen document is alive and polling
@@ -4296,7 +4407,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     for (const [tabId, st] of Object.entries(tabState)) {
       if (st.enabled) {
         log("⏰ Refreshing token for active collector", tabId);
-        await ensureValidTokenCookieBased(tabId);
+        await ensureValidTokenViaClerkSession(tabId);
       }
     }
   }
