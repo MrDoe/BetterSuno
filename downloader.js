@@ -3315,6 +3315,29 @@
         updateSongListSentinelState();
     }
 
+    function navigateToSongPage(songId) {
+        if (!songId) return;
+
+        const targetUrl = `https://suno.com/song/${encodeURIComponent(songId)}`;
+
+        // Open song details in a new tab so current page playback is never interrupted.
+        try {
+            const anchor = document.createElement('a');
+            anchor.href = targetUrl;
+            anchor.target = '_blank';
+            anchor.rel = 'noopener';
+            anchor.style.display = 'none';
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            return;
+        } catch (error) {
+            console.debug('[Downloader] New-tab anchor navigation failed.', error);
+        }
+
+        statusDiv.innerText = 'Unable to open song in new tab. Please allow pop-ups for this site.';
+    }
+
     function createSongListItem(song) {
         const item = document.createElement("div");
         item.className = "song-item";
@@ -3585,7 +3608,7 @@
 
         const gotoBtn = document.createElement("button");
         gotoBtn.className = "song-action-btn goto-btn";
-        gotoBtn.title = "Go to Song";
+        gotoBtn.title = "View Song (opens in new tab)";
         gotoBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 5c-7.633 0-12 7-12 7s4.367 7 12 7 12-7 12-7-4.367-7-12-7zm0 12a5 5 0 1 1 .001-10.001A5 5 0 0 1 12 17zm0-8a3 3 0 1 0 .001 6.001A3 3 0 0 0 12 9z"/></svg>`;
         gotoBtn.onclick = (e) => {
             e.stopPropagation();
@@ -3593,7 +3616,7 @@
             if (panel) {
                 panel.classList.remove('open');
             }
-            window.location.assign(`https://suno.com/song/${song.id}`);
+            navigateToSongPage(song.id);
         };
 
         actionsDiv.appendChild(reactionBtn);
