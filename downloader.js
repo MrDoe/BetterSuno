@@ -3593,7 +3593,18 @@
             if (panel) {
                 panel.classList.remove('open');
             }
-            window.location.assign(`https://suno.com/song/${song.id}`);
+            // Navigate using a client-side SPA route change so the page does not
+            // fully reload and ongoing playback in the BetterSuno player is preserved.
+            // history.pushState updates the URL without a reload; dispatching a
+            // popstate event signals Next.js's router to render the new route.
+            const songPath = `/song/${song.id}`;
+            try {
+                history.pushState({ url: songPath, as: songPath }, '', songPath);
+                window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+            } catch (_) {
+                // Fallback: open in a new tab so playback in the current tab is unaffected
+                window.open(`https://suno.com/song/${song.id}`, '_blank');
+            }
         };
 
         actionsDiv.appendChild(reactionBtn);
