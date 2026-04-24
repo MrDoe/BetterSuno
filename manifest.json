@@ -58,6 +58,16 @@
         "https://suno.com/*"
       ],
       "js": [
+        "reverb-inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://suno.com/*"
+      ],
+      "js": [
         "content.js",
         "content-idb.js",
         "downloader.js"

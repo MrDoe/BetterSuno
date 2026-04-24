@@ -16,6 +16,7 @@ const SHARED_FILES = [
   'downloader.js',
   'idb-store.js',
   'idb-helpers.js',
+  'reverb-inject.js',
   'LICENSE',
   'README.md',
 ];

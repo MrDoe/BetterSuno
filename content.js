@@ -24,6 +24,7 @@
       <div id="bettersuno-tabs">
         <button class="bettersuno-tab active" data-tab="library">Song Library</button>
         <button class="bettersuno-tab" data-tab="player">Player</button>
+        <button class="bettersuno-tab" data-tab="studio-tools">Studio Tools</button>
         <button class="bettersuno-tab" data-tab="notifications">Notifications</button>
         <button class="bettersuno-tab" data-tab="settings">Settings</button>
       </div>
@@ -226,6 +227,50 @@
           </div>
         </div>
       </div>
+      <div id="bettersuno-studio-tools-content" class="bettersuno-content" style="display: none;">
+        <div class="studio-tools-inner">
+          <section class="studio-tools-section">
+            <div class="studio-tools-section-title">Reverb <span id="studio-reverb-hook" class="studio-reverb-hook">⚡ Waiting…</span></div>
+            <div class="studio-tools-row">
+              <label class="studio-tools-check-label">
+                <input type="checkbox" id="studio-reverb-enable" />
+                <span>Enable</span>
+              </label>
+            </div>
+            <div class="studio-tools-row">
+              <span class="studio-tools-label">Wet</span>
+              <input type="range" id="studio-reverb-wet" min="0" max="100" value="50" class="studio-tools-slider" />
+              <span id="studio-reverb-wet-val" class="studio-tools-val">50%</span>
+            </div>
+            <div class="studio-tools-row">
+              <span class="studio-tools-label">Room</span>
+              <select id="studio-reverb-room" class="studio-tools-select">
+                <option value="small">Small Room</option>
+                <option value="medium" selected>Medium Hall</option>
+                <option value="large">Large Hall</option>
+              </select>
+            </div>
+          </section>
+          <section class="studio-tools-section">
+            <div class="studio-tools-section-title">Selection Range</div>
+            <div class="studio-tools-row">
+              <span class="studio-tools-label">Start (s)</span>
+              <input type="number" id="studio-reverb-sel-start" min="0" step="0.1" placeholder="0.0" class="studio-tools-timeinput" />
+              <button id="studio-reverb-sel-start-cap" class="studio-tools-capbtn" title="Capture playhead">⊙</button>
+            </div>
+            <div class="studio-tools-row">
+              <span class="studio-tools-label">End (s)</span>
+              <input type="number" id="studio-reverb-sel-end" min="0" step="0.1" placeholder="end" class="studio-tools-timeinput" />
+              <button id="studio-reverb-sel-end-cap" class="studio-tools-capbtn" title="Capture playhead">⊙</button>
+            </div>
+            <div class="studio-tools-row">
+              <button id="studio-reverb-sel-whole" class="studio-tools-btn">Whole song</button>
+              <button id="studio-reverb-sel-clear" class="studio-tools-btn studio-tools-btn-warn">Clear &amp; disable</button>
+            </div>
+            <div id="studio-reverb-sel-display" class="studio-tools-sel-display">Range: whole song</div>
+          </section>
+        </div>
+      </div>
     </div>
     <button id="bettersuno-bell" title="BetterSuno">
       <svg viewBox="0 0 24 24"><path d="m12 17.27 6.18 3.73-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
@@ -251,6 +296,7 @@
   const settingsContent = root.querySelector('#bettersuno-settings-content');
   const libraryContent = root.querySelector('#bettersuno-download-content');
   const playerContent = root.querySelector('#bettersuno-player-content');
+  const studioToolsContent = root.querySelector('#bettersuno-studio-tools-content');
 
   function setActiveTab(tabName, activeButton = null) {
     currentTab = tabName;
@@ -264,13 +310,14 @@
       notifications: list,
       library: libraryContent,
       player: playerContent,
-      settings: settingsContent
+      settings: settingsContent,
+      'studio-tools': studioToolsContent,
     };
 
     Object.entries(sections).forEach(([name, element]) => {
       if (!element) return;
       element.style.display = name === tabName
-        ? (name === 'library' || name === 'player' ? 'flex' : 'block')
+        ? (name === 'library' || name === 'player' || name === 'studio-tools' ? 'flex' : 'block')
         : 'none';
     });
 
@@ -866,6 +913,116 @@
   } catch (e) {
     console.debug('[BetterSuno] Extension context unavailable');
   }
+
+  // ── Studio Tools tab ────────────────────────────────────────────────────
+  (function initStudioTools() {
+    const enableCb   = root.querySelector('#studio-reverb-enable');
+    const wetSlider  = root.querySelector('#studio-reverb-wet');
+    const wetVal     = root.querySelector('#studio-reverb-wet-val');
+    const roomSel    = root.querySelector('#studio-reverb-room');
+    const selStart   = root.querySelector('#studio-reverb-sel-start');
+    const selEnd     = root.querySelector('#studio-reverb-sel-end');
+    const startCap   = root.querySelector('#studio-reverb-sel-start-cap');
+    const endCap     = root.querySelector('#studio-reverb-sel-end-cap');
+    const wholeSong  = root.querySelector('#studio-reverb-sel-whole');
+    const clearBtn   = root.querySelector('#studio-reverb-sel-clear');
+    const selDisplay = root.querySelector('#studio-reverb-sel-display');
+    const hookStatus = root.querySelector('#studio-reverb-hook');
+
+    function sendCmd(detail) {
+      window.dispatchEvent(new CustomEvent('bettersuno:reverb-cmd', { detail }));
+    }
+
+    function capturePlayhead() {
+      for (const el of document.querySelectorAll(
+        'audio:not(#bettersuno-audio-element), video'
+      )) {
+        if (Number.isFinite(el.currentTime) && el.duration > 0) return el.currentTime;
+      }
+      for (const el of document.querySelectorAll('[role="slider"]')) {
+        const max = parseFloat(el.getAttribute('aria-valuemax') || '0');
+        const now = parseFloat(el.getAttribute('aria-valuenow') || '0');
+        if (max > 100 && now >= 0) return now;
+      }
+      return null;
+    }
+
+    function updateSelDisplay() {
+      const s = selStart.value;
+      const e = selEnd.value;
+      if (!s && !e) {
+        selDisplay.textContent = 'Range: whole song';
+      } else {
+        const startStr = s ? `${parseFloat(s).toFixed(1)}s` : '0s';
+        const endStr   = e ? `${parseFloat(e).toFixed(1)}s` : 'end';
+        selDisplay.textContent = `Range: ${startStr} \u2192 ${endStr}`;
+      }
+    }
+
+    function pushSelection() {
+      sendCmd({
+        type: 'setSelection',
+        value: {
+          start: selStart.value !== '' ? parseFloat(selStart.value) : null,
+          end:   selEnd.value   !== '' ? parseFloat(selEnd.value)   : null,
+        },
+      });
+      updateSelDisplay();
+    }
+
+    enableCb.addEventListener('change', () =>
+      sendCmd({ type: 'setEnabled', value: enableCb.checked })
+    );
+    wetSlider.addEventListener('input', () => {
+      wetVal.textContent = `${wetSlider.value}%`;
+      sendCmd({ type: 'setWet', value: parseInt(wetSlider.value, 10) / 100 });
+    });
+    roomSel.addEventListener('change', () =>
+      sendCmd({ type: 'setRoomSize', value: roomSel.value })
+    );
+    selStart.addEventListener('change', pushSelection);
+    selEnd.addEventListener('change', pushSelection);
+    startCap.addEventListener('click', () => {
+      const t = capturePlayhead();
+      if (t !== null) { selStart.value = t.toFixed(2); pushSelection(); }
+    });
+    endCap.addEventListener('click', () => {
+      const t = capturePlayhead();
+      if (t !== null) { selEnd.value = t.toFixed(2); pushSelection(); }
+    });
+    wholeSong.addEventListener('click', () => {
+      selStart.value = '';
+      selEnd.value   = '';
+      sendCmd({ type: 'clearSelection' });
+      updateSelDisplay();
+    });
+    clearBtn.addEventListener('click', () => {
+      enableCb.checked = false;
+      selStart.value   = '';
+      selEnd.value     = '';
+      sendCmd({ type: 'setEnabled',    value: false });
+      sendCmd({ type: 'clearSelection' });
+      updateSelDisplay();
+    });
+
+    window.addEventListener('bettersuno:reverb-status', e => {
+      const d = e.detail || {};
+      if (!hookStatus) return;
+      hookStatus.textContent = d.hooked ? '\u26a1 Hooked' : '\u26a1 Waiting\u2026';
+      hookStatus.classList.toggle('studio-reverb-hook--live', !!d.hooked);
+
+      // Auto-populate selection fields when Suno Studio fires EditV3Selection
+      if (d.selectionUpdated) {
+        const s = d.selStart;
+        const en = d.selEnd;
+        selStart.value = (s != null) ? parseFloat(s).toFixed(2) : '';
+        selEnd.value   = (en != null) ? parseFloat(en).toFixed(2) : '';
+        updateSelDisplay();
+      }
+    });
+
+    sendCmd({ type: 'getStatus' });
+  })();
 
   // Periodic refresh as fallback (in case stateUpdate messages are missed).
   refreshInterval = setInterval(() => {
