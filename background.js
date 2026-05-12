@@ -1978,7 +1978,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               song_count: playlist.num_total_results ?? playlist.total ?? playlist.total_results ?? playlist.total_count ?? null,
               is_public: playlist.is_public,
               is_owned: playlist.is_owned,
-              is_owned_by_current_user: playlist.is_owned_by_current_user
+              is_owned_by_current_user: playlist.is_owned_by_current_user,
+              owner_user_id: playlist.owner_user_id || playlist.user_id || playlist.creator_user_id || playlist.author_user_id || null,
+              owner_handle: playlist.owner_handle || playlist.user_handle || playlist.creator_handle || playlist.author_handle || null,
+              owner_display_name: playlist.owner_display_name || playlist.user_display_name || playlist.creator_display_name || playlist.author_display_name || null
             }
           });
           return;
@@ -2048,7 +2051,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           user_display_name: pl.user_display_name || pl.user_handle || null,
           user_handle: pl.user_handle || null,
           is_public: pl.is_public ?? true,
-          is_owned: pl.is_owned ?? false,
+          is_owned: pl.is_owned,
+          is_owned_by_current_user: pl.is_owned_by_current_user,
+          owner_user_id: pl.owner_user_id || pl.user_id || pl.creator_user_id || pl.author_user_id || null,
+          owner_handle: pl.owner_handle || pl.user_handle || pl.creator_handle || pl.author_handle || null,
+          owner_display_name: pl.owner_display_name || pl.user_display_name || pl.creator_display_name || pl.author_display_name || pl.user_handle || null,
           description: pl.description || ""
         }));
 
@@ -2305,6 +2312,92 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           diagnostics
         });
         sendResponse({ ...lastResult, diagnostics });
+      } catch (e) {
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === 'playlist_add_songs' || msg.action === 'playlist_remove_songs' || msg.action === 'playlist_reorder_songs') {
+    (async () => {
+      try {
+        const mode = msg.action === 'playlist_add_songs'
+          ? 'add'
+          : (msg.action === 'playlist_reorder_songs' ? 'reorder' : 'remove');
+        const rawPlaylistId = typeof msg.playlistId === 'string' ? msg.playlistId.trim() : '';
+        const playlistId = rawPlaylistId
+          ? (rawPlaylistId.match(/playlist\/([0-9a-f-]{30,36})/i)?.[1] || rawPlaylistId)
+          : '';
+
+        let data;
+        if (mode === 'remove' && Array.isArray(msg.indices)) {
+          data = msg.indices;
+        } else if (mode === 'reorder' && typeof msg.fromIndex === 'number' && typeof msg.toIndex === 'number') {
+          data = { fromIndex: msg.fromIndex, toIndex: msg.toIndex };
+        } else if (Array.isArray(msg.songIds)) {
+          data = Array.from(new Set(msg.songIds.map(id => String(id || '').trim()).filter(Boolean)));
+        } else {
+          data = [];
+        }
+
+        if (!playlistId) {
+          sendResponse({ ok: false, error: 'Missing playlistId' });
+          return;
+        }
+        if (!Array.isArray(data) && !(mode === 'reorder' && typeof data === 'object' && typeof data?.fromIndex === 'number' && typeof data?.toIndex === 'number')) {
+          sendResponse({ ok: false, error: `Missing required data for ${mode} operation` });
+          return;
+        }
+        if (Array.isArray(data) && data.length === 0) {
+          sendResponse({ ok: false, error: `No ${mode === 'remove' ? 'indices' : 'songIds'} provided` });
+          return;
+        }
+
+        const token = await getApiTokenWithFallback(
+          mode === 'add'
+            ? 'playlist_add_songs'
+            : (mode === 'reorder' ? 'playlist_reorder_songs' : 'playlist_remove_songs')
+        );
+        if (!token) {
+          sendResponse({ ok: false, error: 'No auth token' });
+          return;
+        }
+
+        const ownership = await fetchPlaylistOwnershipInfo(token, playlistId);
+        if (!ownership.ok) {
+          sendResponse({ ok: false, error: ownership.error || 'Could not verify playlist ownership' });
+          return;
+        }
+        if (!ownership.isOwned) {
+          sendResponse({ ok: false, error: 'Only your own playlists can be modified', code: 'not_owned' });
+          return;
+        }
+
+        const result = await runPlaylistMutation(token, playlistId, data, mode);
+        if (!result.ok) {
+          sendResponse({
+            ok: false,
+            status: result.status,
+            error: `Failed to ${mode} songs in playlist`,
+            diagnostics: result.diagnostics || []
+          });
+          return;
+        }
+
+        const affectedCount = inferPlaylistMutationCount(result.data, Array.isArray(data) ? data.length : 0, mode);
+        const skippedCount = Array.isArray(data) ? Math.max(0, data.length - affectedCount) : 0;
+
+        sendResponse({
+          ok: true,
+          status: result.status,
+          data: result.data,
+          diagnostics: result.diagnostics || [],
+          addedCount: mode === 'add' ? affectedCount : undefined,
+          removedCount: mode === 'remove' ? affectedCount : undefined,
+          reorderedCount: mode === 'reorder' ? affectedCount : undefined,
+          skippedCount
+        });
       } catch (e) {
         sendResponse({ ok: false, error: e?.message || String(e) });
       }
@@ -3915,6 +4008,205 @@ async function fetchPlaylistSongsFromPageHtml(playlistId) {
 
   return { ok: false, status: response.status, error: 'No playlist songs found on playlist page' };
 }
+
+async function fetchPlaylistOwnershipInfo(token, playlistId) {
+  const headers = { Authorization: `Bearer ${token}` };
+  const encoded = encodeURIComponent(playlistId);
+  const candidates = [
+    `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}?page=1&page_size=1`,
+    `https://studio-api.prod.suno.com/api/playlist/${encoded}?page=1&page_size=1`
+  ];
+
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, { headers });
+      if (!response.ok) continue;
+
+      let data = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!data || typeof data !== 'object') continue;
+
+      const playlist = data.playlist || data.data?.playlist || data.data || data;
+      if (!playlist || typeof playlist !== 'object') continue;
+
+      const isExplicitlyOther = playlist.is_owned_by_current_user === false || playlist.is_owned === false;
+      return {
+        ok: true,
+        status: response.status,
+        isOwned: !isExplicitlyOther,
+        playlist
+      };
+    } catch {
+      // try next endpoint
+    }
+  }
+
+  return { ok: false, status: 0, isOwned: false, error: 'Could not verify playlist ownership' };
+}
+
+function buildPlaylistMutationCandidates(playlistId, data, mode) {
+  const encoded = encodeURIComponent(playlistId);
+  const isAdd = mode === 'add';
+  const isReorder = mode === 'reorder';
+  const isRemove = mode === 'remove';
+
+  let updateClipsBody;
+  if (isRemove && Array.isArray(data)) {
+    updateClipsBody = {
+      playlist_id: playlistId,
+      update_type: 'remove',
+      metadata: { indexes: data },
+      recommendation_metadata: {}
+    };
+  } else if (isReorder && typeof data === 'object' && typeof data.fromIndex === 'number' && typeof data.toIndex === 'number') {
+    updateClipsBody = {
+      playlist_id: playlistId,
+      update_type: 'reorder',
+      metadata: { from_index: data.fromIndex, to_index: data.toIndex },
+      recommendation_metadata: {}
+    };
+  } else {
+    const songIds = Array.isArray(data) ? data : [];
+    updateClipsBody = {
+      playlist_id: playlistId,
+      update_type: isAdd ? 'add' : 'remove',
+      metadata: { clip_ids: songIds },
+      recommendation_metadata: {}
+    };
+  }
+
+  if (isReorder || isRemove) {
+    return [
+      { label: 'update_clips', method: 'POST', url: 'https://studio-api-prod.suno.com/api/playlist/update_clips/', body: updateClipsBody }
+    ];
+  }
+
+  const songIds = Array.isArray(data) ? data : [];
+  const clipIdsBody = { clip_ids: songIds };
+  const songIdsBody = { song_ids: songIds };
+  const songsBody = { songs: songIds };
+  const clipsBody = { clips: songIds };
+
+  if (isAdd) {
+    return [
+      { label: 'update_clips', method: 'POST', url: 'https://studio-api-prod.suno.com/api/playlist/update_clips/', body: updateClipsBody },
+      { label: 'v2-songs-post-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/songs`, body: songIdsBody },
+      { label: 'v1-songs-post-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/songs`, body: songIdsBody },
+      { label: 'v2-clips-post-clip_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/clips`, body: clipIdsBody },
+      { label: 'v1-clips-post-clip_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/clips`, body: clipIdsBody },
+      { label: 'v2-add_songs-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/add_songs`, body: songIdsBody },
+      { label: 'v1-add_songs-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/add_songs`, body: songIdsBody },
+      { label: 'v2-add_clips-clip_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/add_clips`, body: clipIdsBody },
+      { label: 'v1-add_clips-clip_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/add_clips`, body: clipIdsBody },
+      { label: 'v2-songs-post-songs', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/songs`, body: songsBody },
+      { label: 'v1-songs-post-songs', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/songs`, body: songsBody }
+    ];
+  }
+
+  return [
+    { label: 'update_clips', method: 'POST', url: 'https://studio-api-prod.suno.com/api/playlist/update_clips/', body: updateClipsBody },
+    { label: 'v2-songs-delete-song_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/songs`, body: songIdsBody },
+    { label: 'v1-songs-delete-song_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/songs`, body: songIdsBody },
+    { label: 'v2-clips-delete-clip_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/clips`, body: clipIdsBody },
+    { label: 'v1-clips-delete-clip_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/clips`, body: clipIdsBody },
+    { label: 'v2-remove_songs-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/remove_songs`, body: songIdsBody },
+    { label: 'v1-remove_songs-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/remove_songs`, body: songIdsBody },
+    { label: 'v2-remove_clips-clip_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/remove_clips`, body: clipIdsBody },
+    { label: 'v1-remove_clips-clip_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/remove_clips`, body: clipIdsBody },
+    { label: 'v2-songs-delete-clips', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/songs`, body: clipsBody },
+    { label: 'v1-songs-delete-clips', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/songs`, body: clipsBody }
+  ];
+}
+
+function inferPlaylistMutationCount(data, requestedCount, mode) {
+  if (mode === 'reorder') return requestedCount;
+
+  if (!data || typeof data !== 'object') return requestedCount;
+
+  const keys = mode === 'add'
+    ? ['added_count', 'added', 'success_count', 'affected_count', 'count', 'created_count']
+    : ['removed_count', 'removed', 'success_count', 'affected_count', 'count', 'deleted_count'];
+
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.max(0, Math.min(requestedCount, value));
+    }
+  }
+
+  const arrays = [
+    data.songs,
+    data.clips,
+    data.items,
+    data.result,
+    data.results,
+    data.updated,
+    data.changed,
+    data.data?.songs,
+    data.data?.clips,
+    data.data?.items,
+    data.data?.result,
+    data.data?.results
+  ];
+  for (const arr of arrays) {
+    if (Array.isArray(arr)) {
+      return Math.max(0, Math.min(requestedCount, arr.length));
+    }
+  }
+
+  return requestedCount;
+}
+
+async function runPlaylistMutation(token, playlistId, data, mode) {
+  const candidates = buildPlaylistMutationCandidates(playlistId, data, mode);
+  const diagnostics = [];
+
+  for (const candidate of candidates) {
+    let status = 0;
+    let ok = false;
+    let data = null;
+    let error = null;
+
+    try {
+      const response = await fetch(candidate.url, {
+        method: candidate.method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: candidate.body ? JSON.stringify(candidate.body) : undefined
+      });
+
+      status = response.status;
+      ok = response.ok;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+
+      diagnostics.push({ source: candidate.label, status, ok });
+
+      if (ok) {
+        return { ok: true, status, data, diagnostics };
+      }
+    } catch (e) {
+      error = e?.message || String(e);
+      diagnostics.push({ source: candidate.label, status, ok, error });
+    }
+  }
+
+  return {
+    ok: false,
+    status: diagnostics[diagnostics.length - 1]?.status || 0,
+    diagnostics
+  };
+}
+
 async function getDownloadTargetTabId() {
   const candidates = [downloadRequestorTabId, fetchRequestorTabId];
 

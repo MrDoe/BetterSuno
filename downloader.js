@@ -69,6 +69,7 @@
     let syncMeta = createDefaultSyncMeta();
     let playlistSongs = null; // Active playlist songs when a playlist is selected, else null
     let sunoUserId = null; // Set from the first own song when My Songs are loaded
+    let cachedPlaylists = [];
 
     function createDefaultSyncMeta() {
         return {
@@ -144,11 +145,58 @@
         return Array.from(merged.values()).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     }
 
+    function setCachedPlaylists(playlists) {
+        cachedPlaylists = Array.isArray(playlists) ? playlists : [];
+    }
+
+    function getCachedPlaylistById(playlistId) {
+        if (!playlistId) return null;
+        return cachedPlaylists.find(playlist => playlist.id === playlistId) || null;
+    }
+
+    function getOwnPlaylistsFromCache() {
+        return cachedPlaylists.filter(playlist => !isPlaylistOtherArtist(playlist));
+    }
+
+    function getSelectedPlaylistMetadata() {
+        if (!playlistFilter) return null;
+        const selectedId = normalizePlaylistId(playlistFilter.value || '');
+        if (!selectedId) return null;
+        return getCachedPlaylistById(selectedId);
+    }
+
+    function canModifyPlaylist(playlist) {
+        return !!playlist?.id && !isPlaylistOtherArtist(playlist);
+    }
+
+    function isEditableSelectedPlaylistView() {
+        return Array.isArray(playlistSongs) && canModifyPlaylist(getSelectedPlaylistMetadata());
+    }
+
+    function getSelectedSongsAcrossLibrary() {
+        if (!selectedSongIds.size) {
+            return [];
+        }
+
+        const songMap = new Map();
+        [allSongs, Array.isArray(playlistSongs) ? playlistSongs : []].forEach(collection => {
+            if (!Array.isArray(collection)) return;
+            collection.forEach(song => {
+                if (song?.id && selectedSongIds.has(song.id) && !songMap.has(song.id)) {
+                    songMap.set(song.id, song);
+                }
+            });
+        });
+
+        return Array.from(songMap.values());
+    }
+
     async function savePlaylistToDropdown(playlist, preferredValue = '') {
         if (!playlist?.id) return;
 
-        const cachedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
-        const mergedPlaylists = mergePlaylistsById(Array.isArray(cachedPlaylists) ? cachedPlaylists : [], [playlist]);
+        const persistedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
+        const mergedPlaylists = mergePlaylistsById(Array.isArray(persistedPlaylists) ? persistedPlaylists : [], [playlist]);
+        setCachedPlaylists(mergedPlaylists);
         await savePreferenceToIDB(PLAYLISTS_KEY, mergedPlaylists);
         renderPlaylistOptions(mergedPlaylists, preferredValue || playlist.id);
     }
@@ -168,6 +216,7 @@
 
     function renderPlaylistOptions(playlists, preferredValue = '') {
         if (!playlistFilter) return;
+        setCachedPlaylists(playlists);
 
         while (playlistFilter.options.length > 1) {
             playlistFilter.remove(1);
@@ -1919,6 +1968,10 @@
     const isPublicOnly = false; // fetch all songs
     const downloadBtn = document.getElementById("downloadBtn");
     const stopDownloadBtn = document.getElementById("stopDownloadBtn");
+    const downloadDialog = document.getElementById("bettersuno-download-dialog");
+    const downloadDialogCloseBtn = document.getElementById("downloadDialogCloseBtn");
+    const downloadDialogCancelBtn = document.getElementById("downloadDialogCancelBtn");
+    const downloadDialogConfirmBtn = document.getElementById("downloadDialogConfirmBtn");
     const stopFetchBtn = document.getElementById("bettersuno-stop-fetch-btn");
     const cacheAllBtn = document.getElementById("cacheAllBtn");
     const stopCacheBtn = document.getElementById("stopCacheBtn");
@@ -1932,6 +1985,8 @@
     const playlistFilter = document.getElementById("playlistFilter");
     const deletePlaylistBtn = document.getElementById("deletePlaylistBtn");
     const selectAllButton = document.getElementById("selectAll");
+    const addToPlaylistBtn = document.getElementById("addToPlaylistBtn");
+    const removeFromPlaylistBtn = document.getElementById("removeFromPlaylistBtn");
     const syncNewBtn = document.getElementById("syncNewBtn");
     const downloadMusicCheckbox = document.getElementById("downloadMusic");
     const downloadLyricsCheckbox = document.getElementById("downloadLyrics");
@@ -2839,9 +2894,9 @@
             const savedSelection = await loadPreferenceFromIDB(SELECTED_PLAYLIST_KEY);
             const preferredValue = currentValue || savedSelection || '';
 
-            const cachedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
-            if (Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0) {
-                renderPlaylistOptions(cachedPlaylists, preferredValue);
+            const persistedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
+            if (Array.isArray(persistedPlaylists) && persistedPlaylists.length > 0) {
+                renderPlaylistOptions(persistedPlaylists, preferredValue);
             }
 
             // Fetch all pages (1-based pagination)
@@ -2853,14 +2908,14 @@
                     response = await sendMessageWithRetry({ action: 'fetch_user_playlists', page });
                 } catch (e) {
                     const reason = e?.message || String(e);
-                    statusDiv.innerText = Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0
+                    statusDiv.innerText = Array.isArray(persistedPlaylists) && persistedPlaylists.length > 0
                         ? `Loaded cached playlists. Refresh failed: ${reason}`
                         : `Playlist load failed: ${reason}`;
                     return;
                 }
                 if (!response?.ok || !response.data) {
                     const reason = response?.error || `HTTP ${response?.status || 'unknown'}`;
-                    statusDiv.innerText = Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0
+                    statusDiv.innerText = Array.isArray(persistedPlaylists) && persistedPlaylists.length > 0
                         ? `Loaded cached playlists. Refresh failed: ${reason}`
                         : `Playlist load failed: ${reason}`;
                     return;
@@ -2876,18 +2931,18 @@
             }
 
             if (allPlaylists.length === 0) {
-                statusDiv.innerText = Array.isArray(cachedPlaylists) && cachedPlaylists.length > 0
-                    ? `Loaded ${cachedPlaylists.length} cached playlist(s).`
+                statusDiv.innerText = Array.isArray(persistedPlaylists) && persistedPlaylists.length > 0
+                    ? `Loaded ${persistedPlaylists.length} cached playlist(s).`
                     : 'No playlists returned by Suno.';
                 return;
             }
 
             // Sort alphabetically by name
             const normalizedPlaylists = allPlaylists.map(normalizePlaylistMetadata);
-            const cachedExternalPlaylists = Array.isArray(cachedPlaylists)
-                ? cachedPlaylists.filter(isPlaylistOtherArtist)
+            const persistedExternalPlaylists = Array.isArray(persistedPlaylists)
+                ? persistedPlaylists.filter(isPlaylistOtherArtist)
                 : [];
-            const mergedPlaylists = mergePlaylistsById(normalizedPlaylists, cachedExternalPlaylists);
+            const mergedPlaylists = mergePlaylistsById(normalizedPlaylists, persistedExternalPlaylists);
             renderPlaylistOptions(mergedPlaylists, preferredValue);
             await savePreferenceToIDB(PLAYLISTS_KEY, mergedPlaylists);
 
@@ -2906,8 +2961,7 @@
 
         // Show/hide delete button for external playlists
         if (deletePlaylistBtn) {
-            const cachedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
-            const currentPl = Array.isArray(cachedPlaylists) ? cachedPlaylists.find(p => p.id === selectedPlaylistId) : null;
+            const currentPl = getCachedPlaylistById(selectedPlaylistId);
             deletePlaylistBtn.style.display = (currentPl && isPlaylistOtherArtist(currentPl)) ? 'block' : 'none';
         }
 
@@ -3047,12 +3101,39 @@
     const playlistDialog = document.getElementById('bettersuno-playlist-dialog');
     const addPlaylistBtn = document.getElementById('addPlaylistBtn');
     const playlistDialogCloseBtn = document.getElementById('playlistDialogCloseBtn');
+    const playlistDialogTitle = playlistDialog?.querySelector('.playlist-dialog-title') || null;
+    const playlistSearchControls = document.getElementById('playlistSearchControls');
     const playlistSearchInput = document.getElementById('playlistSearchInput');
     const playlistSearchBtn = document.getElementById('playlistSearchBtn');
     const playlistSearchResults = document.getElementById('playlistSearchResults');
+    let playlistDialogMode = 'search';
+    let resolvePlaylistPicker = null;
+
+    function resetPlaylistDialogMode() {
+        playlistDialogMode = 'search';
+        if (playlistDialogTitle) {
+            playlistDialogTitle.textContent = 'Add Playlist';
+        }
+        if (playlistSearchControls) {
+            playlistSearchControls.style.display = 'flex';
+        }
+    }
+
+    function closePlaylistDialogWithSelection(selection) {
+        if (typeof resolvePlaylistPicker === 'function') {
+            resolvePlaylistPicker(selection || null);
+            resolvePlaylistPicker = null;
+        }
+        if (playlistDialog) {
+            playlistDialog.close();
+            playlistDialog.removeAttribute('open');
+        }
+        resetPlaylistDialogMode();
+    }
 
     if (addPlaylistBtn && playlistDialog) {
         addPlaylistBtn.addEventListener('click', () => {
+            resetPlaylistDialogMode();
             if (playlistSearchInput) playlistSearchInput.value = '';
             if (playlistSearchResults) playlistSearchResults.innerHTML = '';
             playlistDialog.showModal();
@@ -3060,22 +3141,47 @@
         });
     }
     if (playlistDialogCloseBtn && playlistDialog) {
-        playlistDialogCloseBtn.addEventListener('click', () => playlistDialog.close());
+        playlistDialogCloseBtn.addEventListener('click', () => {
+            if (playlistDialogMode === 'picker') {
+                closePlaylistDialogWithSelection(null);
+                return;
+            }
+            playlistDialog.close();
+            resetPlaylistDialogMode();
+        });
     }
     if (playlistDialog) {
         playlistDialog.addEventListener('click', (e) => {
             // Close when clicking the backdrop (outside the dialog box)
-            if (e.target === playlistDialog) playlistDialog.close();
+            if (e.target === playlistDialog) {
+                if (playlistDialogMode === 'picker') {
+                    closePlaylistDialogWithSelection(null);
+                    return;
+                }
+                playlistDialog.close();
+                resetPlaylistDialogMode();
+            }
+        });
+        playlistDialog.addEventListener('close', () => {
+            if (playlistDialogMode === 'picker' && typeof resolvePlaylistPicker === 'function') {
+                resolvePlaylistPicker(null);
+                resolvePlaylistPicker = null;
+            }
+            resetPlaylistDialogMode();
         });
     }
 
-    function renderPlaylistSearchResults(playlists) {
+    function renderPlaylistSearchResults(playlists, options = {}) {
+        const {
+            emptyText = 'No playlists found.',
+            onSelect = null
+        } = options;
         if (!playlistSearchResults) return;
         playlistSearchResults.innerHTML = '';
         if (!playlists || playlists.length === 0) {
             const empty = document.createElement('div');
             empty.className = 'playlist-search-empty';
-            empty.textContent = 'No playlists found.';
+            empty.textContent = emptyText;
             playlistSearchResults.appendChild(empty);
             return;
         }
@@ -3117,6 +3223,11 @@
 
             item.appendChild(info);
             item.addEventListener('click', async () => {
+                if (typeof onSelect === 'function') {
+                    onSelect(norm);
+                    return;
+                }
+
                 console.log('[PlaylistSearch] Item clicked, closing dialog for ID:', norm.id);
                 
                 // Save the selected playlist to the dropdown/cache only now
@@ -3131,6 +3242,41 @@
                 void selectPlaylist(norm.id);
             });
             playlistSearchResults.appendChild(item);
+        });
+    }
+
+    async function pickOwnPlaylistFromDialog(defaultPlaylistId = '') {
+        const ownPlaylists = getOwnPlaylistsFromCache();
+        if (!ownPlaylists.length) {
+            statusDiv.innerText = 'No own playlists available. Refresh playlists first.';
+            return null;
+        }
+
+        playlistDialogMode = 'picker';
+        if (playlistDialogTitle) {
+            playlistDialogTitle.textContent = 'Select Own Playlist';
+        }
+        if (playlistSearchControls) {
+            playlistSearchControls.style.display = 'none';
+        }
+
+        const orderedPlaylists = [...ownPlaylists].sort((a, b) => {
+            if (a.id === defaultPlaylistId) return -1;
+            if (b.id === defaultPlaylistId) return 1;
+            return (a.name || '').localeCompare(b.name || '');
+        });
+
+        renderPlaylistSearchResults(orderedPlaylists, {
+            emptyText: 'No own playlists available.',
+            onSelect: (playlist) => closePlaylistDialogWithSelection(playlist)
+        });
+
+        if (playlistDialog && !playlistDialog.open) {
+            playlistDialog.showModal();
+        }
+
+        return await new Promise((resolve) => {
+            resolvePlaylistPicker = resolve;
         });
     }
 
@@ -3197,7 +3343,6 @@
             const playlistId = playlistFilter?.value;
             if (!playlistId) return;
 
-            const cachedPlaylists = await loadPreferenceFromIDB(PLAYLISTS_KEY);
             if (!Array.isArray(cachedPlaylists)) return;
 
             const pl = cachedPlaylists.find(p => p.id === playlistId);
@@ -3212,6 +3357,7 @@
 
             // Remove from main list
             const updated = cachedPlaylists.filter(p => p.id !== playlistId);
+            setCachedPlaylists(updated);
             await savePreferenceToIDB(PLAYLISTS_KEY, updated);
 
             // Remove song cache for this playlist
@@ -3225,6 +3371,301 @@
             
             statusDiv.innerText = `Removed playlist "${pl.name}" from local storage.`;
         });
+    }
+
+    function getSelectedSongsForPlaylistMutation() {
+        const selectedIds = getSelectedSongIds();
+        if (selectedIds.length === 0) {
+            statusDiv.innerText = 'No songs selected!';
+            return [];
+        }
+        return getActiveSongs().filter(song => selectedIds.includes(song.id));
+    }
+
+    async function addSelectedSongsToPlaylist() {
+        const selectedPlaylist = getSelectedPlaylistMetadata();
+        if (!selectedPlaylist?.id) {
+            statusDiv.innerText = 'Select a playlist first, then add selected songs.';
+            return;
+        }
+        if (!canModifyPlaylist(selectedPlaylist)) {
+            statusDiv.innerText = 'Songs can only be added to your own playlists.';
+            return;
+        }
+
+        const selectedSongs = getSelectedSongsAcrossLibrary();
+        if (!selectedSongs.length) return;
+
+        const songIds = selectedSongs.map(song => song.id).filter(Boolean);
+        if (!songIds.length) {
+            statusDiv.innerText = 'Selected songs are missing valid IDs.';
+            return;
+        }
+
+        if (addToPlaylistBtn) addToPlaylistBtn.disabled = true;
+        try {
+            const response = await sendMessageWithRetry({
+                action: 'playlist_add_songs',
+                playlistId: selectedPlaylist.id,
+                songIds
+            });
+
+            if (!response?.ok) {
+                statusDiv.innerText = response?.error || 'Failed to add songs to playlist.';
+                return;
+            }
+
+            const added = Number(response.addedCount || 0);
+            const skipped = Number(response.skippedCount || 0);
+            statusDiv.innerText = `Added ${added} song(s) to "${selectedPlaylist.name}"${skipped > 0 ? ` (${skipped} already there).` : '.'}`;
+
+            // Refresh the target playlist count and cached songs if currently open.
+            const targetInCache = getCachedPlaylistById(selectedPlaylist.id);
+            if (targetInCache) {
+                targetInCache.song_count = Math.max(0, Number(targetInCache.song_count || 0) + added);
+                renderPlaylistOptions(cachedPlaylists, playlistFilter?.value || '');
+                await savePreferenceToIDB(PLAYLISTS_KEY, cachedPlaylists);
+            }
+
+            if (playlistFilter?.value === selectedPlaylist.id) {
+                await selectPlaylist(selectedPlaylist.id);
+            }
+        } catch (e) {
+            statusDiv.innerText = `Add to playlist failed: ${e?.message || String(e)}`;
+        } finally {
+            if (addToPlaylistBtn) addToPlaylistBtn.disabled = false;
+            updateSelectedCount();
+        }
+    }
+
+    async function removeSelectedSongsFromPlaylist() {
+        const selectedSongs = getSelectedSongsForPlaylistMutation();
+        if (!selectedSongs.length) return;
+
+        const selectedPlaylist = getSelectedPlaylistMetadata();
+        if (!selectedPlaylist?.id) {
+            statusDiv.innerText = 'Select a playlist first, then remove selected songs.';
+            return;
+        }
+        if (!canModifyPlaylist(selectedPlaylist)) {
+            statusDiv.innerText = 'Songs can only be removed from your own playlists.';
+            return;
+        }
+
+        if (!Array.isArray(playlistSongs)) {
+            statusDiv.innerText = 'Playlist not fully loaded yet.';
+            return;
+        }
+
+        const selectedSongIds = new Set(selectedSongs.map(song => song.id).filter(Boolean));
+        if (!selectedSongIds.size) {
+            statusDiv.innerText = 'Selected songs are missing valid IDs.';
+            return;
+        }
+
+        const indices = playlistSongs
+            .map((song, index) => selectedSongIds.has(song.id) ? index : -1)
+            .filter(index => index >= 0);
+        if (!indices.length) {
+            statusDiv.innerText = 'Selected songs are not in the current playlist.';
+            return;
+        }
+
+        if (removeFromPlaylistBtn) removeFromPlaylistBtn.disabled = true;
+        try {
+            const response = await sendMessageWithRetry({
+                action: 'playlist_remove_songs',
+                playlistId: selectedPlaylist.id,
+                indices
+            });
+
+            if (!response?.ok) {
+                statusDiv.innerText = response?.error || 'Failed to remove songs from playlist.';
+                return;
+            }
+
+            const removed = Number(response.removedCount || 0);
+            const skipped = Number(response.skippedCount || 0);
+            statusDiv.innerText = `Removed ${removed} song(s) from "${selectedPlaylist.name}"${skipped > 0 ? ` (${skipped} not in playlist).` : '.'}`;
+
+            if (Array.isArray(playlistSongs)) {
+                const removeSet = new Set(selectedSongIds);
+                playlistSongs = playlistSongs.filter(song => !removeSet.has(song.id));
+                selectedSongIds.forEach(songId => {
+                    if (removeSet.has(songId)) {
+                        selectedSongIds.delete(songId);
+                    }
+                });
+                await savePreferenceToIDB(getPlaylistSongsCacheKey(selectedPlaylist.id), playlistSongs);
+                applyFilter({ preserveScroll: true, minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE) });
+            }
+
+            const selectedInCache = getCachedPlaylistById(selectedPlaylist.id);
+            if (selectedInCache && Number.isFinite(Number(selectedInCache.song_count))) {
+                selectedInCache.song_count = Math.max(0, Number(selectedInCache.song_count || 0) - removed);
+                renderPlaylistOptions(cachedPlaylists, selectedPlaylist.id);
+                await savePreferenceToIDB(PLAYLISTS_KEY, cachedPlaylists);
+            }
+        } catch (e) {
+            statusDiv.innerText = `Remove from playlist failed: ${e?.message || String(e)}`;
+        } finally {
+            if (removeFromPlaylistBtn) removeFromPlaylistBtn.disabled = false;
+            updateSelectedCount();
+        }
+    }
+
+    async function reorderSelectedPlaylist(fromIndex, toIndex, movedSongId) {
+        const selectedPlaylist = getSelectedPlaylistMetadata();
+        if (!canModifyPlaylist(selectedPlaylist)) {
+            statusDiv.innerText = 'Only your own selected playlist can be reordered.';
+            return false;
+        }
+
+        try {
+            const response = await sendMessageWithRetry({
+                action: 'playlist_reorder_songs',
+                playlistId: selectedPlaylist.id,
+                fromIndex,
+                toIndex
+            });
+
+            if (!response?.ok) {
+                statusDiv.innerText = response?.error || 'Failed to reorder playlist.';
+                return false;
+            }
+
+            const song = playlistSongs?.find(item => item.id === movedSongId) || null;
+            statusDiv.innerText = `Reordered playlist${song ? `: ${getSongDisplayTitle(song)}` : ''}.`;
+            return true;
+        } catch (e) {
+            statusDiv.innerText = `Playlist reorder failed: ${e?.message || String(e)}`;
+            return false;
+        }
+    }
+
+    async function moveSongWithinPlaylist(songId, direction) {
+        if (!Array.isArray(playlistSongs) || playlistSongs.length < 2) {
+            return;
+        }
+
+        const currentIndex = playlistSongs.findIndex(song => song.id === songId);
+        if (currentIndex < 0) {
+            return;
+        }
+
+        const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+        if (targetIndex < 0 || targetIndex >= playlistSongs.length) {
+            return;
+        }
+
+        await reorderSongAtIndex(currentIndex, targetIndex, songId);
+    }
+
+    async function reorderSongAtIndex(fromIndex, toIndex, songId) {
+        if (!Array.isArray(playlistSongs) || fromIndex === toIndex) {
+            return;
+        }
+
+        const nextSongs = [...playlistSongs];
+        const [movedSong] = nextSongs.splice(fromIndex, 1);
+        nextSongs.splice(toIndex, 0, movedSong);
+
+        const previousSongs = playlistSongs;
+        playlistSongs = nextSongs;
+        songItemCache.clear();
+        applyFilter({ preserveScroll: true, minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE) });
+        await savePreferenceToIDB(getPlaylistSongsCacheKey(getSelectedPlaylistMetadata().id), playlistSongs);
+
+        const didPersist = await reorderSelectedPlaylist(fromIndex, toIndex, songId);
+        if (!didPersist) {
+            playlistSongs = previousSongs;
+            songItemCache.clear();
+            await savePreferenceToIDB(getPlaylistSongsCacheKey(getSelectedPlaylistMetadata().id), playlistSongs);
+            applyFilter({ preserveScroll: true, minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE) });
+        }
+    }
+
+    function showReorderModal(songId, currentIndex) {
+        const playlistLength = Array.isArray(playlistSongs) ? playlistSongs.length : 0;
+        if (playlistLength < 2) return;
+
+        // Create modal overlay
+        const modal = document.createElement('div');
+        modal.className = 'reorder-modal';
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+            padding: 20px;
+        `;
+
+        const content = document.createElement('div');
+        content.style.cssText = `
+            background: #18181b;
+            border: 1px solid #3f3f46;
+            border-radius: 8px;
+            padding: 20px;
+            max-width: 300px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        `;
+
+        const title = document.createElement('h3');
+        title.textContent = 'Move to position:';
+        title.style.cssText = 'color: #f4f4f5; margin: 0 0 15px 0; font-size: 16px;';
+        content.appendChild(title);
+
+        const positionContainer = document.createElement('div');
+        positionContainer.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px;';
+
+        for (let i = 0; i < playlistLength; i++) {
+            const btn = document.createElement('button');
+            btn.textContent = String(i + 1);
+            btn.style.cssText = `
+                padding: 8px 12px;
+                background: ${i === currentIndex ? '#8b5cf6' : '#27272a'};
+                color: #f4f4f5;
+                border: 1px solid #3f3f46;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+                transition: all 0.2s;
+            `;
+            btn.addEventListener('click', async () => {
+                modal.remove();
+                if (i !== currentIndex) {
+                    await reorderSongAtIndex(currentIndex, i, songId);
+                }
+            });
+            positionContainer.appendChild(btn);
+        }
+
+        content.appendChild(positionContainer);
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = `
+            width: 100%;
+            margin-top: 15px;
+            padding: 10px;
+            background: #27272a;
+            color: #f4f4f5;
+            border: 1px solid #3f3f46;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+        cancelBtn.addEventListener('click', () => modal.remove());
+        content.appendChild(cancelBtn);
+
+        modal.appendChild(content);
+        document.body.appendChild(modal);
     }
 
     document.addEventListener('bettersuno:refresh-library', () => {
@@ -3261,6 +3702,7 @@
                     playlistFilter.remove(1);
                 }
             }
+            setCachedPlaylists([]);
             if (deletePlaylistBtn) {
                 deletePlaylistBtn.style.display = 'none';
             }
@@ -3290,8 +3732,20 @@
         updateSelectedCount();
     });
 
+    if (addToPlaylistBtn) {
+        addToPlaylistBtn.addEventListener('click', () => {
+            void addSelectedSongsToPlaylist();
+        });
+    }
+
+    if (removeFromPlaylistBtn) {
+        removeFromPlaylistBtn.addEventListener('click', () => {
+            void removeSelectedSongsFromPlaylist();
+        });
+    }
+
     // Download selected songs
-    downloadBtn.addEventListener("click", () => {
+    function executeDownload() {
         const activeSongs = getActiveSongs();
         const selectedIds = getSelectedSongIds();
         if (selectedIds.length === 0) {
@@ -3336,7 +3790,35 @@
         statusDiv.innerText = blocked.length > 0
             ? `Downloading ${downloadable.length} own song(s): ${selectedTypes.join(", ")}. Skipped ${blocked.length} song(s) by other artists.`
             : `Downloading ${downloadable.length} song(s): ${selectedTypes.join(", ")}...`;
+    }
+
+    downloadBtn.addEventListener("click", () => {
+        const selectedIds = getSelectedSongIds();
+        if (selectedIds.length === 0) {
+            statusDiv.innerText = "No songs selected!";
+            return;
+        }
+        if (downloadDialog) {
+            downloadDialog.showModal();
+        } else {
+            executeDownload();
+        }
     });
+
+    if (downloadDialogConfirmBtn) {
+        downloadDialogConfirmBtn.addEventListener("click", () => {
+            downloadDialog?.close();
+            executeDownload();
+        });
+    }
+
+    if (downloadDialogCloseBtn) {
+        downloadDialogCloseBtn.addEventListener("click", () => downloadDialog?.close());
+    }
+
+    if (downloadDialogCancelBtn) {
+        downloadDialogCancelBtn.addEventListener("click", () => downloadDialog?.close());
+    }
 
     // Stop downloading
     stopDownloadBtn.addEventListener("click", () => {
@@ -3810,6 +4292,56 @@
         const actionsDiv = document.createElement("div");
         actionsDiv.className = "song-actions";
 
+        if (isEditableSelectedPlaylistView() && Array.isArray(playlistSongs)) {
+            const songIndex = playlistSongs.findIndex(item => item.id === song.id);
+
+            // Long-tap support for mobile reordering
+            let touchStartTime = 0;
+            let longPressTimeout;
+            const LONG_PRESS_DURATION = 500; // ms
+
+            item.addEventListener('touchstart', (e) => {
+                if (e.touches.length !== 1) return; // Single touch only
+                touchStartTime = Date.now();
+                longPressTimeout = setTimeout(() => {
+                    // Show reorder modal on long press
+                    showReorderModal(song.id, songIndex);
+                }, LONG_PRESS_DURATION);
+            }, { passive: true });
+
+            item.addEventListener('touchend', () => {
+                clearTimeout(longPressTimeout);
+            }, { passive: true });
+
+            item.addEventListener('touchmove', () => {
+                // Cancel long press if user moves finger
+                clearTimeout(longPressTimeout);
+            }, { passive: true });
+
+            const moveUpBtn = document.createElement('button');
+            moveUpBtn.className = 'song-action-btn reorder-btn';
+            moveUpBtn.textContent = '↑';
+            moveUpBtn.title = 'Move song up in playlist';
+            moveUpBtn.disabled = songIndex <= 0;
+            moveUpBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                void moveSongWithinPlaylist(song.id, 'up');
+            });
+
+            const moveDownBtn = document.createElement('button');
+            moveDownBtn.className = 'song-action-btn reorder-btn';
+            moveDownBtn.textContent = '↓';
+            moveDownBtn.title = 'Move song down in playlist';
+            moveDownBtn.disabled = songIndex < 0 || songIndex >= playlistSongs.length - 1;
+            moveDownBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                void moveSongWithinPlaylist(song.id, 'down');
+            });
+
+            actionsDiv.appendChild(moveUpBtn);
+            actionsDiv.appendChild(moveDownBtn);
+        }
+
         const reactionBtn = document.createElement("button");
         reactionBtn.className = "song-action-btn like-btn";
         applyReactionButtonState(reactionBtn, getSongReactionState(song));
@@ -4033,6 +4565,20 @@
     }
 
     function sortSongsForDisplay(songs) {
+        if (Array.isArray(playlistSongs)) {
+            const playlistOrder = new Map(playlistSongs.map((song, index) => [song.id, index]));
+            return [...songs].sort((a, b) => {
+                const aIndex = playlistOrder.get(a.id);
+                const bIndex = playlistOrder.get(b.id);
+                if (typeof aIndex === 'number' && typeof bIndex === 'number' && aIndex !== bIndex) {
+                    return aIndex - bIndex;
+                }
+                if (typeof aIndex === 'number') return -1;
+                if (typeof bIndex === 'number') return 1;
+                return (a.title || '').localeCompare(b.title || '');
+            });
+        }
+
         return [...songs].sort((a, b) => {
             const aTs = getSongTimestamp(a);
             const bTs = getSongTimestamp(b);
@@ -4096,6 +4642,36 @@
         };
     }
 
+    function updatePlaylistActionButtons(selectedSongs) {
+        const hasVisibleSelection = Array.isArray(selectedSongs) && selectedSongs.length > 0;
+        const hasAnySelection = selectedSongIds.size > 0;
+        const selectedPlaylist = getSelectedPlaylistMetadata();
+        const canEditSelectedPlaylist = canModifyPlaylist(selectedPlaylist);
+        const canRemove = hasVisibleSelection && canEditSelectedPlaylist;
+
+        if (addToPlaylistBtn) {
+            addToPlaylistBtn.disabled = !hasAnySelection || !canEditSelectedPlaylist;
+            if (!selectedPlaylist?.id) {
+                addToPlaylistBtn.title = 'Select a playlist first to add songs';
+            } else if (!canEditSelectedPlaylist) {
+                addToPlaylistBtn.title = 'Cannot add songs to playlists you do not own';
+            } else {
+                addToPlaylistBtn.title = 'Add selected songs to the current playlist';
+            }
+        }
+
+        if (removeFromPlaylistBtn) {
+            removeFromPlaylistBtn.disabled = !canRemove;
+            if (!selectedPlaylist?.id) {
+                removeFromPlaylistBtn.title = 'Select a playlist first to remove songs';
+            } else if (!canModifyPlaylist(selectedPlaylist)) {
+                removeFromPlaylistBtn.title = 'Cannot remove from playlists you do not own';
+            } else {
+                removeFromPlaylistBtn.title = 'Remove selected songs from the current playlist, including songs by other artists';
+            }
+        }
+    }
+
     function updateSelectedCount() {
         const total = filteredSongs.length;
         const selected = filteredSongs.filter(song => selectedSongIds.has(song.id)).length;
@@ -4118,6 +4694,8 @@
                 downloadBtn.title = "";
             }
         }
+
+        updatePlaylistActionButtons(selectedSongs);
     }
 
     function formatDate(dateStr) {

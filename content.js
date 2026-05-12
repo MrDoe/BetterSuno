@@ -78,6 +78,10 @@
 
             <span id="selectControls">
               <button id="selectAll" class="btn-secondary" type="button" aria-pressed="false">Select All</button>
+              <button id="downloadBtn" class="btn-secondary" type="button" title="Download selected songs">Download</button>
+              <button id="stopDownloadBtn" class="btn-stop hidden" type="button">Stop</button>
+              <button id="addToPlaylistBtn" class="btn-secondary" type="button" title="Add selected songs to one of your playlists">Add to PL</button>
+              <button id="removeFromPlaylistBtn" class="btn-danger" type="button" title="Remove selected songs from the current playlist">Remove from PL</button>
               <button id="cacheAllBtn" class="btn-secondary" title="Download selected songs as M4A into the browser database for offline playback">Save to DB</button>
               <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
               <button id="deleteCachedBtn" class="btn-danger" title="Delete the selected songs from the browser database">Delete from DB</button>
@@ -87,32 +91,38 @@
 
             <div id="songList"></div>
 
-            <div class="btn-row btn-row-actions">
+            <dialog id="bettersuno-download-dialog">
+              <div class="playlist-dialog-header">
+                <span class="playlist-dialog-title">Download Options</span>
+                <button id="downloadDialogCloseBtn" class="playlist-dialog-close" type="button" aria-label="Close">✕</button>
+              </div>
               <div id="downloadTypeControls">
-                <label>Download:</label>
-                <label class="checkbox-label" style="margin: 0; padding: 0">
+                <label style="display: block; margin-bottom: 8px; font-weight: bold;">Include:</label>
+                <label class="checkbox-label">
                   <input type="checkbox" id="downloadMusic" checked />🎵 Music
                 </label>
-                <label class="checkbox-label" style="margin: 0; padding: 0">
+                <label class="checkbox-label">
                   <input type="checkbox" id="downloadLyrics" checked />📝 Lyrics
                 </label>
-                <label class="checkbox-label" style="margin: 0; padding: 0">
+                <label class="checkbox-label">
                   <input type="checkbox" id="downloadImage" checked />🖼️ Image
                 </label>
-                <div id="fileFormat">
-                  <div id="formatControls" style="display: flex; gap: 6px; align-items: center">
-                    <label class="checkbox-label" style="margin: 0; padding: 0">
-                      <input type="radio" name="format" id="formatM4a" value="m4a" checked />M4A
-                    </label>
-                    <label class="checkbox-label" style="margin: 0; padding: 0">
-                      <input type="radio" name="format" id="formatWav" value="wav" />WAV
-                    </label>
-                  </div>
+                <hr style="border-color: #3f3f46; margin: 10px 0;" />
+                <label style="display: block; margin-bottom: 8px; font-weight: bold;">Format:</label>
+                <div id="formatControls" style="display: flex; gap: 6px; align-items: center">
+                  <label class="checkbox-label">
+                    <input type="radio" name="format" id="formatM4a" value="m4a" checked />M4A
+                  </label>
+                  <label class="checkbox-label">
+                    <input type="radio" name="format" id="formatWav" value="wav" />WAV
+                  </label>
                 </div>
               </div>
-              <button id="downloadBtn" class="btn-primary">Download</button>
-              <button id="stopDownloadBtn" class="btn-stop hidden">Stop</button>
-            </div>
+              <div style="margin-top: 14px; display: flex; gap: 8px; justify-content: flex-end;">
+                <button id="downloadDialogCancelBtn" class="btn-secondary" type="button">Cancel</button>
+                <button id="downloadDialogConfirmBtn" class="btn-primary" type="button">Download</button>
+              </div>
+            </dialog>
           </div>
 
           <div id="bettersuno-mini-player" class="mini-player" style="display: none;">

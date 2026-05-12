@@ -1423,6 +1423,16 @@
   line-height: 1 !important;
 }
 
+#bettersuno-panel #selectControls #downloadBtn,
+#bettersuno-panel #selectControls #stopDownloadBtn {
+  flex: 0 0 auto !important;
+  padding: 5px 8px !important;
+  font-size: 12px !important;
+  letter-spacing: 0 !important;
+  min-height: 28px !important;
+  line-height: 1 !important;
+}
+
 #bettersuno-panel #selectControls #selectAll[aria-pressed="true"] {
   background: #667eea !important;
   color: white !important;
@@ -1430,6 +1440,16 @@
 }
 
 #bettersuno-panel #selectControls #cacheAllBtn {
+  flex: 0 0 auto !important;
+  padding: 5px 8px !important;
+  font-size: 12px !important;
+  letter-spacing: 0 !important;
+  min-height: 28px !important;
+  line-height: 1 !important;
+}
+
+#bettersuno-panel #selectControls #addToPlaylistBtn,
+#bettersuno-panel #selectControls #removeFromPlaylistBtn {
   flex: 0 0 auto !important;
   padding: 5px 8px !important;
   font-size: 12px !important;
