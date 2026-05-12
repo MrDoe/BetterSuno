@@ -1031,7 +1031,7 @@
 }
 
 .player-tab-emoji-select {
-  width: 100% !important;
+  width: 80px !important;
   box-sizing: border-box !important;
   background: var(--bettersuno-bg) !important;
   border: 1px solid var(--bettersuno-border) !important;

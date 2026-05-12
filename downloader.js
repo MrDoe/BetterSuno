@@ -21,6 +21,7 @@
     let metadataRefreshInFlight = false;
     const pendingMetadataRefreshIds = new Set();
     let metadataRefreshBlockedUntil = 0;
+    let filterInputDebounceTimer = null;
     let songListVisibleRefreshTimer = null;
     let songListVisibleRefreshFollowupTimer = null;
     let songListVisibleRefreshIntervalTimer = null;
@@ -1425,6 +1426,18 @@
         }
     }
 
+    let playerProgressRafId = null;
+    function schedulePlayerProgressUiUpdate() {
+        if (playerProgressRafId != null) {
+            return;
+        }
+
+        playerProgressRafId = requestAnimationFrame(() => {
+            playerProgressRafId = null;
+            updatePlayerProgressUi();
+        });
+    }
+
     function seekAudioFromProgressContainer(container, bar, handle, event) {
         if (!audioElement || !container) {
             return;
@@ -1756,7 +1769,7 @@
 
     if (audioElement) {
         audioElement.addEventListener('timeupdate', () => {
-            updatePlayerProgressUi();
+            schedulePlayerProgressUiUpdate();
         });
 
         audioElement.addEventListener('loadedmetadata', () => {
@@ -1950,14 +1963,24 @@
             return;
         }
 
+        const visibleItemsById = new Map();
+        songList.querySelectorAll('.song-item[data-song-id]').forEach((item) => {
+            const id = item.dataset.songId;
+            if (id) {
+                visibleItemsById.set(id, item);
+            }
+        });
+
+        const activeSongMap = new Map(getActiveSongs().map(song => [song.id, song]));
+        const allSongMap = new Map(allSongs.map(song => [song.id, song]));
+
         songIds.forEach(songId => {
-            const oldItem = Array.from(songList.querySelectorAll('.song-item[data-song-id]'))
-                .find(el => el.dataset.songId === songId);
+            const oldItem = visibleItemsById.get(songId);
             if (!oldItem) {
                 return;
             }
 
-            const song = getActiveSongs().find(s => s.id === songId) || allSongs.find(s => s.id === songId);
+            const song = activeSongMap.get(songId) || allSongMap.get(songId);
             if (!song) {
                 return;
             }
@@ -2763,7 +2786,13 @@
 
     // Filter input
     filterInput.addEventListener("input", () => {
-        applyFilter();
+        if (filterInputDebounceTimer) {
+            clearTimeout(filterInputDebounceTimer);
+        }
+        filterInputDebounceTimer = setTimeout(() => {
+            filterInputDebounceTimer = null;
+            applyFilter();
+        }, 140);
     });
 
     // Filter checkboxes
@@ -3666,7 +3695,7 @@
             thumbnailImage.className = "song-thumbnail-image";
             thumbnailImage.src = src;
             thumbnailImage.alt = song.title ? `${song.title} cover art` : 'Song cover art';
-            thumbnailImage.loading = 'eager';
+            thumbnailImage.loading = 'lazy';
             thumbnailImage.decoding = 'async';
             thumbnailImage.style.display = 'block';
             thumbnailImage.style.width = '100%';

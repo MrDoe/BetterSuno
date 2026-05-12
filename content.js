@@ -210,9 +210,6 @@
                   <div class="player-tab-comments-loading">Loading comments...</div>
                 </div>
                 <div class="player-tab-comments-input-area">
-                  <select id="player-tab-emoji-select" class="player-tab-emoji-select" style="display: none;">
-                    <option value="">Emoji...</option>
-                  </select>
                   <div class="player-tab-emoji-picker" id="player-tab-emoji-picker">
                     <span class="emoji-item">👍</span>
                     <span class="emoji-item">🔥</span>
@@ -224,6 +221,9 @@
                     <span class="emoji-item">🎸</span>
                     <span class="emoji-item">🎹</span>
                     <span class="emoji-item">🎤</span>
+                    <select id="player-tab-emoji-select" class="player-tab-emoji-select" style="display: none;">
+                      <option value="">Emoji...</option>
+                    </select>
                   </div>
                   <textarea id="player-tab-comment-input" placeholder="Add a comment..."></textarea>
                   <button id="player-tab-comment-submit" class="btn-primary" disabled>Post</button>
@@ -1247,8 +1247,24 @@
   }
 
   // Run periodic visibility check as a fallback for cases the MutationObserver misses.
-  // 2000ms is sufficient because the MutationObserver handles immediate corrections.
-  let visibilityCheckInterval = setInterval(ensureVisibility, 2000);
+  // Keep this infrequent: MutationObserver and visibility events cover most updates.
+  const VISIBILITY_CHECK_INTERVAL_VISIBLE_MS = 30000;
+  const VISIBILITY_CHECK_INTERVAL_HIDDEN_MS = 120000;
+  let visibilityCheckInterval = null;
+
+  function restartVisibilityCheckInterval() {
+    if (visibilityCheckInterval) {
+      clearInterval(visibilityCheckInterval);
+    }
+
+    const intervalMs = document.visibilityState === 'visible'
+      ? VISIBILITY_CHECK_INTERVAL_VISIBLE_MS
+      : VISIBILITY_CHECK_INTERVAL_HIDDEN_MS;
+
+    visibilityCheckInterval = setInterval(ensureVisibility, intervalMs);
+  }
+
+  restartVisibilityCheckInterval();
   ensureVisibility();
 
   // Watch for DOM mutations and re-assert visibility after route/layout changes.
@@ -1275,12 +1291,19 @@
   requestAndroidFirefoxKeepAliveState();
 
   document.addEventListener('visibilitychange', () => {
+    restartVisibilityCheckInterval();
     if (document.visibilityState === 'visible') {
       requestAndroidFirefoxKeepAliveState();
     }
   }, { passive: true });
 
   const releaseAndroidFirefoxKeepAlive = () => {
+    if (visibilityCheckInterval) {
+      clearInterval(visibilityCheckInterval);
+      visibilityCheckInterval = null;
+    }
+    visibilityObserver.disconnect();
+
     androidFirefoxKeepAliveManager.stop();
 
     if (!androidFirefoxKeepAliveIsOwner || !isContextValid()) {

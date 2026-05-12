@@ -23,10 +23,6 @@ function log(...args) {
 // Log that background.js is loading
 log("=== BACKGROUND.JS LOADING ===");
 
-setInterval(() => {
-  log("heartbeat");
-}, 60000);
-
 // Browser detection: Firefox uses persistent background scripts instead of service workers
 const isFirefox = typeof browser !== 'undefined' && !!browser.runtime?.getBrowserInfo;
 
