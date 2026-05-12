@@ -97,18 +97,18 @@
                 <button id="downloadDialogCloseBtn" class="playlist-dialog-close" type="button" aria-label="Close">✕</button>
               </div>
               <div id="downloadTypeControls">
-                <label style="display: block; margin-bottom: 8px; font-weight: bold;">Include:</label>
+                <label style="display: block; margin-bottom: 5px; font-weight: bold;">Include:</label>
                 <label class="checkbox-label">
-                  <input type="checkbox" id="downloadMusic" checked />🎵 Music
+                  <input type="checkbox" id="downloadMusic" checked />Music
                 </label>
                 <label class="checkbox-label">
-                  <input type="checkbox" id="downloadLyrics" checked />📝 Lyrics
+                  <input type="checkbox" id="downloadLyrics" checked />Lyrics
                 </label>
                 <label class="checkbox-label">
-                  <input type="checkbox" id="downloadImage" checked />🖼️ Image
+                  <input type="checkbox" id="downloadImage" checked />Cover Image
                 </label>
                 <hr style="border-color: #3f3f46; margin: 10px 0;" />
-                <label style="display: block; margin-bottom: 8px; font-weight: bold;">Format:</label>
+                <label style="display: block; margin-bottom: 5px; font-weight: bold;">Format:</label>
                 <div id="formatControls" style="display: flex; gap: 6px; align-items: center">
                   <label class="checkbox-label">
                     <input type="radio" name="format" id="formatM4a" value="m4a" checked />M4A

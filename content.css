@@ -1538,7 +1538,6 @@
   border-left: 1px solid var(--bettersuno-border) !important;
   padding-left: 2px !important;
 }
-}
 
 /* Playlist selector row */
 #bettersuno-panel #playlistControls {
@@ -1615,7 +1614,6 @@
   justify-content: space-between !important;
   padding: 10px 12px 8px !important;
   border-bottom: 1px solid var(--bettersuno-border) !important;
-}
 }
 
 .playlist-dialog-title {
@@ -1782,12 +1780,11 @@
   padding: 16px 20px 12px !important;
   border-bottom: 1px solid var(--bettersuno-border) !important;
 }
-}
 
 #bettersuno-download-dialog .playlist-dialog-title {
   font-size: 16px !important;
   font-weight: 600 !important;
-  color: #f4f4f5 !important;
+  color: var(--bettersuno-text) !important;
 }
 
 #bettersuno-download-dialog .playlist-dialog-close {
@@ -1815,14 +1812,14 @@
 
 #bettersuno-download-dialog #downloadTypeControls label {
   display: block !important;
-  margin-bottom: 12px !important;
-  font-weight: 500 !important;
-  color: #f4f4f5 !important;
+  margin-bottom: 8px;
+  font-weight: 500;
+  color: #f4f4f5;
 }
 
 #bettersuno-download-dialog .checkbox-label {
   display: flex !important;
-  align-items: center !important;
+  align-items: baseline !important;
   gap: 8px !important;
   margin-bottom: 8px !important;
   cursor: pointer !important;
@@ -1831,7 +1828,10 @@
 
 #bettersuno-download-dialog .checkbox-label input[type="checkbox"],
 #bettersuno-download-dialog .checkbox-label input[type="radio"] {
-  margin: 0 !important;
+  top: 3px;
+  left: 1px;
+  position: relative;
+  margin: 0 0.5rem 0 0 !important;
   accent-color: #8b5cf6 !important;
 }
 
