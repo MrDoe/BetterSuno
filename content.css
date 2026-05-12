@@ -775,6 +775,11 @@
   position: relative !important;
   top: -1rem !important;
   height: 100% !important;
+  touch-action: pan-y !important;
+}
+
+.player-tab-art-wrapper.is-swipeable {
+  cursor: ew-resize !important;
 }
 
 #player-tab-video {
@@ -796,6 +801,7 @@
 }
 
 .player-tab-title {
+  margin-top: 1rem;
   text-align: center !important;
   font-weight: 700 !important;
   font-size: 18px !important;
@@ -805,6 +811,53 @@
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   white-space: nowrap !important;
+}
+
+.player-tab-media-controls {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: 20px !important;
+  padding: 0 16px 8px !important;
+  flex-shrink: 0 !important;
+}
+
+.player-tab-media-toggle {
+  position: absolute !important;
+  top: 50% !important;
+  right: 10px !important;
+  transform: translateY(-50%) !important;
+  width: 34px !important;
+  height: 56px !important;
+  min-width: 34px !important;
+  padding: 0 !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  background: rgba(0, 0, 0, 0.18) !important;
+  color: rgba(255, 255, 255, 0.72) !important;
+  backdrop-filter: blur(6px) !important;
+  -webkit-backdrop-filter: blur(6px) !important;
+  font-size: 18px !important;
+  line-height: 1 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 2 !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2) !important;
+  opacity: 0.72 !important;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease !important;
+}
+
+.player-tab-media-toggle:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.3) !important;
+  color: rgba(255, 255, 255, 0.92) !important;
+  opacity: 1 !important;
+}
+
+.player-tab-media-hint {
+  font-size: 12px !important;
+  color: var(--bettersuno-text-muted) !important;
+  text-align: center !important;
 }
 
 .player-tab-lyrics-wrapper {
@@ -975,6 +1028,23 @@
   gap: 8px !important;
   flex-wrap: wrap !important;
   margin-bottom: 2px !important;
+}
+
+.player-tab-emoji-select {
+  width: 100% !important;
+  box-sizing: border-box !important;
+  background: var(--bettersuno-bg) !important;
+  border: 1px solid var(--bettersuno-border) !important;
+  color: var(--bettersuno-text) !important;
+  border-radius: 6px !important;
+  padding: 7px 8px !important;
+  font-size: 13px !important;
+  font-family: inherit !important;
+}
+
+.player-tab-emoji-select:focus {
+  outline: none !important;
+  border-color: var(--bettersuno-primary) !important;
 }
 
 .emoji-item {

@@ -809,6 +809,9 @@
     const playerTabVideo = document.getElementById('player-tab-video');
     const playerTabCoverImage = document.getElementById('player-tab-cover-image');
     const playerTabTitle = document.getElementById('player-tab-title');
+    const playerTabArtWrapper = document.getElementById('player-tab-art-wrapper');
+    const playerTabMediaToggle = document.getElementById('player-tab-media-toggle');
+    const playerTabMediaHint = document.getElementById('player-tab-media-hint');
     const playerTabLyrics = document.getElementById('player-tab-lyrics');
     const playerTabViewCover = document.getElementById('player-tab-view-cover');
     const playerTabViewLyrics = document.getElementById('player-tab-view-lyrics');
@@ -819,6 +822,7 @@
     const playerTabCommentsList = document.getElementById('player-tab-comments-list');
     const playerTabCommentInput = document.getElementById('player-tab-comment-input');
     const playerTabCommentSubmit = document.getElementById('player-tab-comment-submit');
+    const playerTabEmojiSelect = document.getElementById('player-tab-emoji-select');
     const playerTabEmojiPicker = document.getElementById('player-tab-emoji-picker');
     const playerTabNoSong = document.getElementById('player-tab-no-song');
     const playerTabSong = document.getElementById('player-tab-song');
@@ -831,6 +835,161 @@
     let playerTabProgressHandle = null;
     let playerTabMediaRequestId = 0;
     let playerTabCurrentView = 'cover';
+    let playerTabCurrentMediaMode = 'image';
+    let playerTabCurrentSong = null;
+    let playerTabCurrentSongIdForMedia = null;
+    const playerTabResolvedVideoUrlCache = new Map();
+    const isAndroidDevice = /Android/i.test(navigator.userAgent || '');
+    const isDesktopBrowser = !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+    const PLAYER_TAB_MEDIA_SWIPE_THRESHOLD_PX = 48;
+    const COMMON_EMOJIS = [
+        '😀', '😃', '😄', '😁', '😆', '🤣', '😂', '🙂', '🙃', '😉', '😊', '😇',
+        '🥰', '😍', '🤩', '😘', '😗', '😙', '😚', '😋', '😜', '😝', '😛', '🫠',
+        '🤗', '🤭', '🫢', '🫣', '🤔', '🫡', '🤨', '😐', '😑', '😶', '🫥', '😏',
+        '😒', '🙄', '😬', '🤥', '😌', '😔', '😪', '🤤', '😴', '🥱', '😷', '🤒',
+        '🤕', '🤢', '🤮', '🥵', '🥶', '😵', '🤯', '🤠', '🥳', '😎', '🤓', '🧐',
+        '😕', '🫤', '😟', '🙁', '☹️', '😮', '😯', '😲', '😳', '🥺', '🥹', '😢',
+        '😭', '😤', '😠', '😡', '🤬', '😈', '💀', '💩', '🤡', '👻', '👀', '👏',
+        '🙌', '🫶', '🤝', '👍', '👎', '👊', '✊', '🤜', '🤛', '👌', '✌️', '🤟',
+        '🤘', '🤙', '🖐️', '✋', '🫱', '🫲', '🙏', '💪', '🫵', '🫰', '🫳', '🫴',
+        '❤️', '🧡', '💛', '💚', '💙', '🩵', '💜', '🩷', '🖤', '🤍', '🤎', '💔',
+        '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '🔥', '✨', '⭐', '🌟',
+        '💫', '🎉', '🎊', '🎵', '🎶', '🎤', '🎧', '🎹', '🎸', '🥁', '🎷', '🎺',
+        '🍀', '🌈', '☀️', '🌙', '⚡', '☕', '🍻', '🍕', '🍔', '🍟', '🍣', '🍩',
+        '🚀', '🌍', '💡', '✅', '❌', '⚠️', '💬', '🗨️', '📌', '📣', '🔔', '🔗'
+    ];
+
+    function setupDesktopEmojiSelector() {
+        if (!playerTabEmojiSelect) return;
+
+        if (!isDesktopBrowser) {
+            playerTabEmojiSelect.style.display = 'none';
+            return;
+        }
+
+        if (playerTabEmojiSelect.dataset.initialized !== 'true') {
+            const existingValues = new Set(
+                Array.from(playerTabEmojiSelect.options)
+                    .map(option => option.value)
+                    .filter(Boolean)
+            );
+
+            COMMON_EMOJIS.forEach(emoji => {
+                if (existingValues.has(emoji)) return;
+                const option = document.createElement('option');
+                option.value = emoji;
+                option.textContent = emoji;
+                playerTabEmojiSelect.appendChild(option);
+            });
+
+            playerTabEmojiSelect.dataset.initialized = 'true';
+        }
+
+        playerTabEmojiSelect.style.display = 'block';
+    }
+
+    function isLikelyVideoUrl(url) {
+        if (typeof url !== 'string') return false;
+        const cleaned = url.split('?')[0].toLowerCase();
+        return cleaned.endsWith('.mp4') || cleaned.endsWith('.webm') || cleaned.endsWith('.mov') || cleaned.endsWith('.m4v');
+    }
+
+    function deriveProcessedVideoUrl(...values) {
+        for (const value of values) {
+            if (typeof value !== 'string' || !value) continue;
+            const match = value.match(/video_gen_([0-9a-f-]{36})/i);
+            if (match?.[1]) {
+                return `https://cdn1.suno.ai/video_gen_${match[1]}_processed_video.mp4`;
+            }
+        }
+        return null;
+    }
+
+    function getPlayerTabCoverImageUrl(song) {
+        const candidates = [
+            song?.image_url,
+            song?.thumbnail_url,
+            song?.cover_image_url,
+            song?.artwork_url
+        ];
+
+        for (const candidate of candidates) {
+            if (typeof candidate !== 'string') continue;
+            const trimmed = candidate.trim();
+            if (trimmed && !isLikelyVideoUrl(trimmed)) {
+                return trimmed;
+            }
+        }
+
+        return null;
+    }
+
+    function getPlayerTabDirectVideoUrl(song) {
+        if (!song) return null;
+
+        return (
+            deriveProcessedVideoUrl(
+                song.video_url,
+                song.image_url,
+                song.thumbnail_url,
+                song.cover_image_url,
+                song.artwork_url
+            ) ||
+            song.video_url ||
+            song.video_cdn_url ||
+            song.mp4_url ||
+            song.cover_video_url ||
+            (isLikelyVideoUrl(song.image_url) ? song.image_url : null) ||
+            (isLikelyVideoUrl(song.thumbnail_url) ? song.thumbnail_url : null) ||
+            (isLikelyVideoUrl(song.cover_image_url) ? song.cover_image_url : null) ||
+            null
+        );
+    }
+
+    function canTogglePlayerTabVideo(song) {
+        if (!song) return false;
+        return !!(getPlayerTabDirectVideoUrl(song) || playerTabResolvedVideoUrlCache.get(song.id) || song.id);
+    }
+
+    function updatePlayerTabMediaControls(song = playerTabCurrentSong) {
+        const canToggleVideo = canTogglePlayerTabVideo(song);
+
+        if (playerTabMediaToggle) {
+            const shouldShowButton = !isAndroidDevice && canToggleVideo;
+            playerTabMediaToggle.style.display = shouldShowButton ? 'inline-flex' : 'none';
+            const showImage = playerTabCurrentMediaMode === 'video';
+            playerTabMediaToggle.textContent = showImage ? '≪' : '≫';
+            playerTabMediaToggle.setAttribute('aria-label', showImage ? 'Show cover image' : 'Show cover video');
+            playerTabMediaToggle.setAttribute('title', showImage ? 'Show cover image' : 'Show cover video');
+        }
+
+        if (playerTabMediaHint) {
+            const shouldShowHint = isAndroidDevice && canToggleVideo;
+            playerTabMediaHint.style.display = shouldShowHint ? 'block' : 'none';
+            playerTabMediaHint.textContent = playerTabCurrentMediaMode === 'video'
+                ? 'Swipe right to return to the cover image.'
+                : 'Swipe left to load the cover video.';
+        }
+
+        if (playerTabArtWrapper) {
+            playerTabArtWrapper.classList.toggle('is-swipeable', isAndroidDevice && canToggleVideo);
+        }
+    }
+
+    function setPlayerTabMediaMode(mode) {
+        const nextMode = mode === 'video' ? 'video' : 'image';
+        if (playerTabCurrentMediaMode === nextMode) {
+            updatePlayerTabMediaControls();
+            return;
+        }
+
+        playerTabCurrentMediaMode = nextMode;
+        updatePlayerTabMediaControls();
+
+        if (playerTabCurrentSong) {
+            updatePlayerTabUi(playerTabCurrentSong);
+        }
+    }
 
     function setPlayerTabView(view) {
         const nextView = (view === 'lyrics' || view === 'comments') ? view : 'cover';
@@ -870,6 +1029,51 @@
     if (playerTabSubtabComments) {
         playerTabSubtabComments.addEventListener('click', () => setPlayerTabView('comments'));
     }
+    if (playerTabMediaToggle) {
+        playerTabMediaToggle.addEventListener('click', () => {
+            if (!canTogglePlayerTabVideo(playerTabCurrentSong)) return;
+            setPlayerTabMediaMode(playerTabCurrentMediaMode === 'video' ? 'image' : 'video');
+        });
+    }
+    if (playerTabViewCover && isAndroidDevice) {
+        let touchStartX = null;
+        let touchStartY = null;
+
+        playerTabViewCover.addEventListener('touchstart', (event) => {
+            if (!canTogglePlayerTabVideo(playerTabCurrentSong) || event.touches.length !== 1) {
+                touchStartX = null;
+                touchStartY = null;
+                return;
+            }
+
+            touchStartX = event.touches[0].clientX;
+            touchStartY = event.touches[0].clientY;
+        }, { passive: true });
+
+        playerTabViewCover.addEventListener('touchend', (event) => {
+            if (touchStartX == null || !canTogglePlayerTabVideo(playerTabCurrentSong) || event.changedTouches.length !== 1) {
+                touchStartX = null;
+                touchStartY = null;
+                return;
+            }
+
+            const deltaX = event.changedTouches[0].clientX - touchStartX;
+            const deltaY = event.changedTouches[0].clientY - touchStartY;
+            touchStartX = null;
+            touchStartY = null;
+
+            if (Math.abs(deltaX) < PLAYER_TAB_MEDIA_SWIPE_THRESHOLD_PX || Math.abs(deltaX) <= Math.abs(deltaY)) {
+                return;
+            }
+
+            if (deltaX < 0) {
+                setPlayerTabMediaMode('video');
+            } else {
+                setPlayerTabMediaMode('image');
+            }
+        }, { passive: true });
+    }
+    updatePlayerTabMediaControls();
     setPlayerTabView(playerTabCurrentView);
 
     async function loadSongComments(songId) {
@@ -900,7 +1104,43 @@
         if (!playerTabCommentsList) return;
         
         // Suno API returns { results: [], total_count: X, ... }
-        const allComments = Array.isArray(commentsData.results) ? commentsData.results : [];
+        const rawComments = Array.isArray(commentsData.results) ? commentsData.results : [];
+
+        const flattenComments = (comments, parentId = null, result = [], byId = new Map()) => {
+            comments.forEach(comment => {
+                if (!comment || typeof comment !== 'object') return;
+
+                const commentId = typeof comment.id === 'string' ? comment.id : '';
+                if (!commentId) return;
+
+                const nestedReplies = Array.isArray(comment.replies) ? comment.replies : [];
+                const nextParentId = comment.parent_id || parentId || null;
+                const flattenedComment = {
+                    ...comment,
+                    parent_id: nextParentId,
+                    replies: []
+                };
+
+                const existing = byId.get(commentId);
+                if (existing) {
+                    Object.assign(existing, flattenedComment);
+                    if (!existing.parent_id && nextParentId) {
+                        existing.parent_id = nextParentId;
+                    }
+                } else {
+                    byId.set(commentId, flattenedComment);
+                    result.push(flattenedComment);
+                }
+
+                if (nestedReplies.length > 0) {
+                    flattenComments(nestedReplies, commentId, result, byId);
+                }
+            });
+
+            return result;
+        };
+
+        const allComments = flattenComments(rawComments);
         
         if (allComments.length === 0) {
             playerTabCommentsList.innerHTML = '<div class="player-tab-comments-empty">No comments yet</div>';
@@ -1034,19 +1274,38 @@
     }
 
     if (playerTabCommentInput && playerTabCommentSubmit) {
+        const insertEmojiIntoComment = (emoji) => {
+            if (!emoji) return;
+            const selectionStart = playerTabCommentInput.selectionStart ?? playerTabCommentInput.value.length;
+            const selectionEnd = playerTabCommentInput.selectionEnd ?? playerTabCommentInput.value.length;
+            const cursorNext = selectionStart + emoji.length;
+
+            playerTabCommentInput.value =
+                playerTabCommentInput.value.substring(0, selectionStart) +
+                emoji +
+                playerTabCommentInput.value.substring(selectionEnd);
+
+            playerTabCommentInput.selectionStart = playerTabCommentInput.selectionEnd = cursorNext;
+            playerTabCommentInput.focus();
+            playerTabCommentSubmit.disabled = playerTabCommentInput.value.trim().length === 0;
+        };
+
+        setupDesktopEmojiSelector();
+
+        if (playerTabEmojiSelect && isDesktopBrowser) {
+            playerTabEmojiSelect.addEventListener('change', () => {
+                const emoji = playerTabEmojiSelect.value;
+                if (!emoji) return;
+                insertEmojiIntoComment(emoji);
+                playerTabEmojiSelect.value = '';
+            });
+        }
+
         if (playerTabEmojiPicker) {
             playerTabEmojiPicker.addEventListener('click', (e) => {
                 if (e.target.classList.contains('emoji-item')) {
                     const emoji = e.target.textContent;
-                    const cursorNext = playerTabCommentInput.selectionStart + emoji.length;
-                    playerTabCommentInput.value = 
-                        playerTabCommentInput.value.substring(0, playerTabCommentInput.selectionStart) +
-                        emoji +
-                        playerTabCommentInput.value.substring(playerTabCommentInput.selectionEnd);
-                    
-                    playerTabCommentInput.selectionStart = playerTabCommentInput.selectionEnd = cursorNext;
-                    playerTabCommentInput.focus();
-                    playerTabCommentSubmit.disabled = false;
+                    insertEmojiIntoComment(emoji);
                 }
             });
         }
@@ -1299,23 +1558,7 @@
 
     function updatePlayerTabUi(song) {
         if (!playerTabSong || !playerTabNoSong) return;
-
-        const isLikelyVideoUrl = (url) => {
-            if (typeof url !== 'string') return false;
-            const cleaned = url.split('?')[0].toLowerCase();
-            return cleaned.endsWith('.mp4') || cleaned.endsWith('.webm') || cleaned.endsWith('.mov') || cleaned.endsWith('.m4v');
-        };
-
-        const deriveProcessedVideoUrl = (...values) => {
-            for (const value of values) {
-                if (typeof value !== 'string' || !value) continue;
-                const match = value.match(/video_gen_([0-9a-f-]{36})/i);
-                if (match?.[1]) {
-                    return `https://cdn1.suno.ai/video_gen_${match[1]}_processed_video.mp4`;
-                }
-            }
-            return null;
-        };
+        playerTabCurrentSong = song || null;
 
         const hideVideo = () => {
             if (!playerTabVideo) return;
@@ -1377,11 +1620,19 @@
 
         if (!song) {
             playerTabMediaRequestId += 1;
+            playerTabCurrentSongIdForMedia = null;
+            playerTabCurrentMediaMode = 'image';
             playerTabNoSong.style.display = 'flex';
             playerTabSong.style.display = 'none';
             hideVideo();
             if (playerTabCoverImage) playerTabCoverImage.style.display = 'none';
+            updatePlayerTabMediaControls(null);
             return;
+        }
+
+        if (playerTabCurrentSongIdForMedia !== song.id) {
+            playerTabCurrentSongIdForMedia = song.id;
+            playerTabCurrentMediaMode = 'image';
         }
 
         const requestId = ++playerTabMediaRequestId;
@@ -1400,36 +1651,22 @@
             playerTabLyrics.textContent = lyrics || 'No lyrics available.';
         }
 
-        // Update cover media: video only
-        const thumbnailUrl = song.image_url || song.thumbnail_url || song.cover_image_url || song.artwork_url || null;
-        const derivedProcessedVideoUrl = deriveProcessedVideoUrl(
-            song.video_url,
-            song.image_url,
-            song.thumbnail_url,
-            song.cover_image_url,
-            song.artwork_url
-        );
-        const videoUrl =
-            derivedProcessedVideoUrl ||
-            song.video_url ||
-            song.video_cdn_url ||
-            song.mp4_url ||
-            song.cover_video_url ||
-            (isLikelyVideoUrl(song.image_url) ? song.image_url : null) ||
-            (isLikelyVideoUrl(song.thumbnail_url) ? song.thumbnail_url : null) ||
-            (isLikelyVideoUrl(song.cover_image_url) ? song.cover_image_url : null) ||
-            null;
+        const thumbnailUrl = getPlayerTabCoverImageUrl(song);
+        const directVideoUrl = getPlayerTabDirectVideoUrl(song);
+        const cachedResolvedVideoUrl = song.id ? playerTabResolvedVideoUrlCache.get(song.id) || null : null;
+        const videoUrl = cachedResolvedVideoUrl || directVideoUrl;
+        updatePlayerTabMediaControls(song);
 
         if (playerTabVideo) {
-            if (videoUrl) {
+            if (playerTabCurrentMediaMode === 'video' && videoUrl) {
                 showVideo(videoUrl, thumbnailUrl);
             } else {
                 showNoMedia();
             }
 
-            // Resolve preferred cover video from the Suno song page.
-            // This can replace metadata URLs that point to the wrong clip.
-            if (song.id) {
+            // Resolve preferred cover video from the Suno song page only after
+            // the user explicitly switches to video mode.
+            if (playerTabCurrentMediaMode === 'video' && !videoUrl && song.id) {
                 void (async () => {
                     try {
                         const response = await sendMessageWithRetry({
@@ -1444,6 +1681,10 @@
                         const resolvedUrl = (response?.ok && typeof response.videoUrl === 'string')
                             ? response.videoUrl
                             : null;
+
+                        if (resolvedUrl) {
+                            playerTabResolvedVideoUrlCache.set(song.id, resolvedUrl);
+                        }
 
                         if (resolvedUrl && (!videoUrl || resolvedUrl !== videoUrl)) {
                             showVideo(resolvedUrl, thumbnailUrl);
@@ -1915,6 +2156,38 @@
             downloadBtn.textContent = "Download";
             stopDownloadBtn.classList.add("hidden");
         }
+    }
+
+    function saveFileInPage(bytes, mimeType, filename) {
+        let payload = null;
+
+        if (bytes instanceof ArrayBuffer) {
+            payload = bytes;
+        } else if (ArrayBuffer.isView(bytes)) {
+            payload = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        } else if (Array.isArray(bytes)) {
+            payload = new Uint8Array(bytes).buffer;
+        }
+
+        if (!(payload instanceof ArrayBuffer)) {
+            throw new Error('Invalid download payload');
+        }
+
+        const blob = new Blob([payload], { type: mimeType || 'application/octet-stream' });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = typeof filename === 'string' ? filename : '';
+        anchor.rel = 'noopener';
+        anchor.style.display = 'none';
+
+        (document.body || document.documentElement).appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+
+        setTimeout(() => {
+            URL.revokeObjectURL(objectUrl);
+        }, 60000);
     }
 
     async function checkFetchState() {
@@ -3069,7 +3342,18 @@
     }
 
     // Listen for messages from background
-    api.runtime.onMessage.addListener((message) => {
+    api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.action === "save_file_in_page") {
+            try {
+                saveFileInPage(message.bytes, message.mimeType, message.filename);
+                sendResponse({ ok: true });
+            } catch (error) {
+                console.error('[Downloader] Failed to save file in page:', error);
+                sendResponse({ ok: false, error: error?.message || String(error) });
+            }
+            return true;
+        }
+
         if (message.action === "log") {
             statusDiv.innerText = message.text + "\n" + statusDiv.innerText;
         }
@@ -3585,15 +3869,11 @@
 
         const gotoBtn = document.createElement("button");
         gotoBtn.className = "song-action-btn goto-btn";
-        gotoBtn.title = "Go to Song";
+        gotoBtn.title = "Open song in new tab";
         gotoBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 5c-7.633 0-12 7-12 7s4.367 7 12 7 12-7 12-7-4.367-7-12-7zm0 12a5 5 0 1 1 .001-10.001A5 5 0 0 1 12 17zm0-8a3 3 0 1 0 .001 6.001A3 3 0 0 0 12 9z"/></svg>`;
         gotoBtn.onclick = (e) => {
             e.stopPropagation();
-            const panel = document.getElementById('bettersuno-panel');
-            if (panel) {
-                panel.classList.remove('open');
-            }
-            window.location.assign(`https://suno.com/song/${song.id}`);
+            window.open(`https://suno.com/song/${song.id}`, '_blank', 'noopener');
         };
 
         actionsDiv.appendChild(reactionBtn);

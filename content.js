@@ -14,6 +14,10 @@
   let olderNotificationsFetching = false;
   let olderNotificationsExhausted = false;
   let isNotificationsRefreshHost = false;
+  const isAndroidFirefox = /Android/i.test(navigator.userAgent) && /Firefox/i.test(navigator.userAgent);
+  let androidFirefoxKeepAliveEnabled = false;
+  let androidFirefoxKeepAliveIsOwner = false;
+  let androidFirefoxKeepAliveOwnerTabId = null;
 
   function getPanelMarkup() {
     return `
@@ -144,6 +148,15 @@
               Desktop Notifications
             </label>
           </div>
+          <div class="bettersuno-setting-row">
+            <label>
+              <input type="checkbox" id="bettersuno-setting-android-keepalive" class="bettersuno-setting" data-key="androidFirefoxKeepAliveEnabled">
+              Android Firefox tab keepalive (experimental)
+            </label>
+          </div>
+          <div class="bettersuno-setting-row">
+            <div id="bettersuno-setting-android-keepalive-note" class="bettersuno-setting-value"></div>
+          </div>
           <hr>
           <div class="bettersuno-setting-row">
             <h4>Download Settings</h4>
@@ -177,9 +190,13 @@
             </div>
             <div class="player-tab-view" id="player-tab-view-cover">
               <div class="player-tab-title" id="player-tab-title"></div>
+              <div class="player-tab-media-controls" id="player-tab-media-controls">
+                <div class="player-tab-media-hint" id="player-tab-media-hint" style="display: none;"></div>
+              </div>
               <div class="player-tab-art-wrapper" id="player-tab-art-wrapper">
                 <video class="player-tab-video-media" id="player-tab-video" style="display: none;" autoplay loop muted playsinline></video>
                 <img class="player-tab-cover-image" id="player-tab-cover-image" style="display: none;" alt="Cover art" />
+                <button type="button" class="btn-secondary player-tab-media-toggle" id="player-tab-media-toggle" style="display: none;" aria-label="Show cover video" title="Show cover video">≫</button>
               </div>
             </div>
             <div class="player-tab-view" id="player-tab-view-lyrics" style="display: none;">
@@ -193,6 +210,9 @@
                   <div class="player-tab-comments-loading">Loading comments...</div>
                 </div>
                 <div class="player-tab-comments-input-area">
+                  <select id="player-tab-emoji-select" class="player-tab-emoji-select" style="display: none;">
+                    <option value="">Emoji...</option>
+                  </select>
                   <div class="player-tab-emoji-picker" id="player-tab-emoji-picker">
                     <span class="emoji-item">👍</span>
                     <span class="emoji-item">🔥</span>
@@ -251,6 +271,392 @@
   const settingsContent = root.querySelector('#bettersuno-settings-content');
   const libraryContent = root.querySelector('#bettersuno-download-content');
   const playerContent = root.querySelector('#bettersuno-player-content');
+
+  const androidFirefoxKeepAliveManager = (() => {
+    const KEEPALIVE_AUDIO_ID = 'bettersuno-android-keepalive-audio';
+    const KEEPALIVE_TITLE = 'BetterSuno KeepAlive';
+    const KEEPALIVE_ARTIST = 'Experimental Android Firefox keepalive';
+    const KEEPALIVE_FREQUENCY_HZ = 18000;
+    const KEEPALIVE_GAIN = 0.00001;
+    const KEEPALIVE_INTERVAL_MS = 5000;
+    const KEEPALIVE_LOCK_NAME = 'bettersuno-android-firefox-keepalive';
+
+    let running = false;
+    let audioContext = null;
+    let oscillatorNode = null;
+    let gainNode = null;
+    let mediaDestination = null;
+    let audioElement = null;
+    let resumeTimer = null;
+    let webLockAbortController = null;
+    let gestureRetryHandler = null;
+
+    function clearGestureRetry() {
+      if (!gestureRetryHandler) {
+        return;
+      }
+
+      document.removeEventListener('pointerdown', gestureRetryHandler, true);
+      document.removeEventListener('touchstart', gestureRetryHandler, true);
+      gestureRetryHandler = null;
+    }
+
+    function armGestureRetry() {
+      if (gestureRetryHandler) {
+        return;
+      }
+
+      gestureRetryHandler = () => {
+        if (!running) {
+          clearGestureRetry();
+          return;
+        }
+
+        void tick();
+      };
+
+      document.addEventListener('pointerdown', gestureRetryHandler, true);
+      document.addEventListener('touchstart', gestureRetryHandler, true);
+    }
+
+    function isOtherMediaPlaying() {
+      try {
+        const mediaElements = document.querySelectorAll('audio,video');
+        for (const element of mediaElements) {
+          if (element === audioElement) {
+            continue;
+          }
+          if (!element.paused && !element.ended && element.readyState > 2) {
+            return true;
+          }
+        }
+      } catch (e) {
+        return false;
+      }
+
+      return false;
+    }
+
+    function clearOwnedMediaSession() {
+      if (!("mediaSession" in navigator)) {
+        return;
+      }
+
+      try {
+        if (navigator.mediaSession.metadata?.title === KEEPALIVE_TITLE) {
+          navigator.mediaSession.playbackState = 'none';
+          navigator.mediaSession.metadata = null;
+        }
+      } catch (e) {}
+
+      ['play', 'pause', 'stop'].forEach((action) => {
+        try {
+          navigator.mediaSession.setActionHandler(action, null);
+        } catch (e) {}
+      });
+    }
+
+    function setOwnedMediaSessionPlaying() {
+      if (!("mediaSession" in navigator)) {
+        return;
+      }
+
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: KEEPALIVE_TITLE,
+          artist: KEEPALIVE_ARTIST,
+          album: 'BetterSuno'
+        });
+        navigator.mediaSession.playbackState = 'playing';
+      } catch (e) {}
+
+      ['play', 'pause', 'stop'].forEach((action) => {
+        try {
+          navigator.mediaSession.setActionHandler(action, () => {
+            void tick();
+          });
+        } catch (e) {}
+      });
+    }
+
+    async function acquireWebLock() {
+      if (!("locks" in navigator) || webLockAbortController) {
+        return;
+      }
+
+      try {
+        webLockAbortController = new AbortController();
+        navigator.locks.request(
+          KEEPALIVE_LOCK_NAME,
+          {
+            mode: 'exclusive',
+            signal: webLockAbortController.signal
+          },
+          () => new Promise(() => {})
+        ).catch(() => {
+          webLockAbortController = null;
+        });
+      } catch (e) {
+        webLockAbortController = null;
+      }
+    }
+
+    function releaseWebLock() {
+      if (!webLockAbortController) {
+        return;
+      }
+
+      try {
+        webLockAbortController.abort();
+      } catch (e) {}
+      webLockAbortController = null;
+    }
+
+    function ensureAudioElement() {
+      if (audioElement?.isConnected) {
+        return audioElement;
+      }
+
+      audioElement = document.getElementById(KEEPALIVE_AUDIO_ID);
+      if (!audioElement) {
+        audioElement = document.createElement('audio');
+        audioElement.id = KEEPALIVE_AUDIO_ID;
+        audioElement.hidden = true;
+        audioElement.playsInline = true;
+        audioElement.setAttribute('aria-hidden', 'true');
+        audioElement.style.display = 'none';
+        document.documentElement.appendChild(audioElement);
+      }
+
+      return audioElement;
+    }
+
+    async function startAudioPlayback() {
+      if (!isAndroidFirefox) {
+        return false;
+      }
+
+      try {
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextCtor) {
+          return false;
+        }
+
+        if (!audioContext || audioContext.state === 'closed') {
+          audioContext = new AudioContextCtor();
+          oscillatorNode = audioContext.createOscillator();
+          gainNode = audioContext.createGain();
+          mediaDestination = audioContext.createMediaStreamDestination();
+
+          oscillatorNode.type = 'sine';
+          oscillatorNode.frequency.value = KEEPALIVE_FREQUENCY_HZ;
+          gainNode.gain.value = KEEPALIVE_GAIN;
+
+          oscillatorNode.connect(gainNode);
+          gainNode.connect(mediaDestination);
+          oscillatorNode.start();
+        }
+
+        const element = ensureAudioElement();
+        if (element.srcObject !== mediaDestination.stream) {
+          element.srcObject = mediaDestination.stream;
+        }
+
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+
+        if (element.paused) {
+          await element.play();
+        }
+
+        return element.paused === false;
+      } catch (e) {
+        console.debug('[BetterSuno] Android Firefox keepalive audio start failed:', e?.message || e);
+        return false;
+      }
+    }
+
+    function stopAudioPlayback() {
+      try {
+        if (audioElement) {
+          try {
+            audioElement.pause();
+          } catch (e) {}
+
+          try {
+            const srcObject = audioElement.srcObject;
+            if (srcObject?.getTracks) {
+              srcObject.getTracks().forEach(track => {
+                try {
+                  track.stop();
+                } catch (e) {}
+              });
+            }
+          } catch (e) {}
+
+          audioElement.srcObject = null;
+          audioElement.remove();
+          audioElement = null;
+        }
+
+        if (oscillatorNode) {
+          try {
+            oscillatorNode.stop();
+          } catch (e) {}
+          try {
+            oscillatorNode.disconnect();
+          } catch (e) {}
+          oscillatorNode = null;
+        }
+
+        if (gainNode) {
+          try {
+            gainNode.disconnect();
+          } catch (e) {}
+          gainNode = null;
+        }
+
+        if (mediaDestination) {
+          try {
+            mediaDestination.disconnect();
+          } catch (e) {}
+          mediaDestination = null;
+        }
+
+        if (audioContext) {
+          try {
+            audioContext.close();
+          } catch (e) {}
+          audioContext = null;
+        }
+      } catch (e) {}
+    }
+
+    async function tick() {
+      if (!running) {
+        return false;
+      }
+
+      if (isOtherMediaPlaying()) {
+        clearOwnedMediaSession();
+        stopAudioPlayback();
+        clearGestureRetry();
+        return false;
+      }
+
+      const started = await startAudioPlayback();
+      if (started) {
+        setOwnedMediaSessionPlaying();
+        clearGestureRetry();
+      } else {
+        armGestureRetry();
+      }
+
+      return started;
+    }
+
+    async function start() {
+      if (!isAndroidFirefox) {
+        return false;
+      }
+
+      running = true;
+      await acquireWebLock();
+      const started = await tick();
+
+      if (resumeTimer) {
+        clearInterval(resumeTimer);
+      }
+      resumeTimer = setInterval(() => {
+        void tick();
+      }, KEEPALIVE_INTERVAL_MS);
+
+      return started;
+    }
+
+    function stop() {
+      running = false;
+
+      if (resumeTimer) {
+        clearInterval(resumeTimer);
+        resumeTimer = null;
+      }
+
+      clearGestureRetry();
+      clearOwnedMediaSession();
+      stopAudioPlayback();
+      releaseWebLock();
+    }
+
+    return {
+      start,
+      stop,
+      isRunning: () => running
+    };
+  })();
+
+  function updateAndroidFirefoxKeepAliveUi() {
+    const checkbox = document.getElementById('bettersuno-setting-android-keepalive');
+    const note = document.getElementById('bettersuno-setting-android-keepalive-note');
+    if (!checkbox || !note) {
+      return;
+    }
+
+    checkbox.disabled = !isAndroidFirefox;
+
+    if (!isAndroidFirefox) {
+      note.textContent = 'Available only on Firefox for Android. When enabled there, BetterSuno uses a silent media session to reduce MIUI and HyperOS tab reloads.';
+      return;
+    }
+
+    if (androidFirefoxKeepAliveEnabled && androidFirefoxKeepAliveIsOwner) {
+      note.textContent = 'Active in this tab. Android should show a BetterSuno media notification while Suno is idle. Battery use may increase.';
+      return;
+    }
+
+    if (androidFirefoxKeepAliveEnabled) {
+      note.textContent = 'Enabled, but another Suno tab currently owns the keepalive session.';
+      return;
+    }
+
+    note.textContent = 'Disabled. Enable this only if Firefox on Android keeps reloading Suno after app switching or screen-off.';
+  }
+
+  function applyAndroidFirefoxKeepAliveControl(control) {
+    androidFirefoxKeepAliveEnabled = control?.enabled === true;
+    androidFirefoxKeepAliveIsOwner = control?.isOwner === true;
+    androidFirefoxKeepAliveOwnerTabId = typeof control?.ownerTabId === 'number' ? control.ownerTabId : null;
+
+    updateAndroidFirefoxKeepAliveUi();
+
+    if (!isAndroidFirefox || !androidFirefoxKeepAliveEnabled || !androidFirefoxKeepAliveIsOwner) {
+      androidFirefoxKeepAliveManager.stop();
+      return;
+    }
+
+    void androidFirefoxKeepAliveManager.start();
+  }
+
+  function requestAndroidFirefoxKeepAliveState() {
+    if (!isAndroidFirefox || !isContextValid()) {
+      return;
+    }
+
+    try {
+      chrome.runtime.sendMessage({ type: 'contentSyncAndroidKeepAlive' }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          return;
+        }
+
+        applyAndroidFirefoxKeepAliveControl(response);
+      });
+    } catch (e) {
+      console.debug('[BetterSuno] Could not sync Android Firefox keepalive state');
+    }
+  }
+
+  updateAndroidFirefoxKeepAliveUi();
 
   function setActiveTab(tabName, activeButton = null) {
     currentTab = tabName;
@@ -323,6 +729,9 @@
         
         document.getElementById('bettersuno-setting-interval').value = (state.intervalMs || 120000) / 1000;
         document.getElementById('bettersuno-setting-desktop').checked = state.desktopNotificationsEnabled !== false;
+        document.getElementById('bettersuno-setting-android-keepalive').checked = state.androidFirefoxKeepAliveEnabled === true;
+        androidFirefoxKeepAliveEnabled = state.androidFirefoxKeepAliveEnabled === true;
+        updateAndroidFirefoxKeepAliveUi();
       });
     } catch (e) {
       console.debug('[BetterSuno] Extension context unavailable');
@@ -336,6 +745,18 @@
       const intervalSeconds = Number(document.getElementById('bettersuno-setting-interval').value);
       const intervalMs = intervalSeconds * 1000;
       const desktopNotifications = document.getElementById('bettersuno-setting-desktop').checked;
+      const androidFirefoxKeepAlive = document.getElementById('bettersuno-setting-android-keepalive').checked;
+
+      if (control.id === 'bettersuno-setting-android-keepalive') {
+        androidFirefoxKeepAliveEnabled = androidFirefoxKeepAlive;
+        updateAndroidFirefoxKeepAliveUi();
+
+        if (isAndroidFirefox && androidFirefoxKeepAlive) {
+          void androidFirefoxKeepAliveManager.start();
+        } else {
+          androidFirefoxKeepAliveManager.stop();
+        }
+      }
       
       try {
         chrome.runtime.sendMessage({
@@ -344,10 +765,14 @@
           settings: {
             enabled: true,
             intervalMs,
-            desktopNotificationsEnabled: desktopNotifications
+            desktopNotificationsEnabled: desktopNotifications,
+            androidFirefoxKeepAliveEnabled: androidFirefoxKeepAlive
           }
         }, (response) => {
           if (!chrome.runtime.lastError) {
+            if (response?.androidKeepAlive) {
+              applyAndroidFirefoxKeepAliveControl(response.androidKeepAlive);
+            }
             console.log('[BetterSuno] Settings updated');
           }
         });
@@ -726,6 +1151,7 @@
   async function refresh() {
     if (!isContextValid()) {
       clearInterval(refreshInterval);
+      androidFirefoxKeepAliveManager.stop();
       root.remove();
       return;
     }
@@ -747,6 +1173,11 @@
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'bettersunoProbeTab') {
       sendResponse({ ok: true });
+      return;
+    }
+
+    if (msg.type === 'androidKeepAliveControl') {
+      applyAndroidFirefoxKeepAliveControl(msg);
       return;
     }
 
@@ -841,6 +1272,30 @@
 
   // Initial fetch
   refresh();
+  requestAndroidFirefoxKeepAliveState();
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      requestAndroidFirefoxKeepAliveState();
+    }
+  }, { passive: true });
+
+  const releaseAndroidFirefoxKeepAlive = () => {
+    androidFirefoxKeepAliveManager.stop();
+
+    if (!androidFirefoxKeepAliveIsOwner || !isContextValid()) {
+      return;
+    }
+
+    try {
+      chrome.runtime.sendMessage({ type: 'contentReleaseAndroidKeepAlive' });
+    } catch (e) {
+      console.debug('[BetterSuno] Could not release Android Firefox keepalive state');
+    }
+  };
+
+  window.addEventListener('pagehide', releaseAndroidFirefoxKeepAlive, { passive: true });
+  window.addEventListener('beforeunload', releaseAndroidFirefoxKeepAlive, { passive: true });
 
   // Auto-load existing notifications if there are none stored yet
   try {

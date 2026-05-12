@@ -37,6 +37,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 ### ⚙️ Settings
 - **Customizable polling** - Choose how often to check for new notifications
 - **Desktop notifications toggle** - Enable/disable desktop alerts
+- **Android Firefox keepalive** - Experimental opt-in silent media session to reduce MIUI/HyperOS tab reloads on Firefox for Android
 - **Library actions** - Refetch library, stop fetch, or delete local library
 
 ## Installation
@@ -79,6 +80,7 @@ If you encounter issues:
 - Refresh the Suno.com page
 - Reload the extension in your browser's extension manager
 - Make sure you're logged in to Suno.com
+- On Firefox for Android, the experimental keepalive setting shows an Android media notification and may use more battery
 
 For bugs or feature requests, please open an issue on GitHub.
 

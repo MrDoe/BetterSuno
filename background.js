@@ -55,6 +55,7 @@ const stateReadyPromise = new Promise(r => { stateReady = r; });
 let offscreenCreating = false;
 let offscreenExists = false;
 let notificationsRefreshHostTabId = null;
+let androidFirefoxKeepAliveMasterTabId = null;
 
 // Initialize state and restart polling for any enabled collectors
 (async function init() {
@@ -90,6 +91,7 @@ const PERSIST_FIELDS = [
   'activatedAt',
   'notifications',
   'desktopNotificationsEnabled',
+  'androidFirefoxKeepAliveEnabled',
 ];
 
 async function saveState() {
@@ -139,6 +141,7 @@ function ensureTabState(tabId) {
       notifications: [],
       lastError: null,
       desktopNotificationsEnabled: true,
+      androidFirefoxKeepAliveEnabled: false,
       clerkSessionToken: null,
       clerkSessionExpiry: null
     };
@@ -178,6 +181,82 @@ async function claimNotificationsRefreshHost(tabId) {
 
   notificationsRefreshHostTabId = tabId;
   return { isOwner: true, ownerTabId: tabId };
+}
+
+async function resolveAndroidFirefoxKeepAliveMaster(preferredTabId) {
+  const globalSt = ensureTabState("global");
+  if (globalSt.androidFirefoxKeepAliveEnabled !== true) {
+    androidFirefoxKeepAliveMasterTabId = null;
+    return null;
+  }
+
+  const candidateIds = [];
+  const pushCandidate = (tabId) => {
+    if (typeof tabId !== 'number' || Number.isNaN(tabId)) {
+      return;
+    }
+    if (!candidateIds.includes(tabId)) {
+      candidateIds.push(tabId);
+    }
+  };
+
+  pushCandidate(androidFirefoxKeepAliveMasterTabId);
+  pushCandidate(preferredTabId);
+
+  try {
+    const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
+    sunoTabs
+      .filter(tab => typeof tab.id === 'number')
+      .sort((left, right) => {
+        const leftScore = (left.active ? 100 : 0) + (left.discarded ? -50 : 0) + (left.frozen ? -25 : 0);
+        const rightScore = (right.active ? 100 : 0) + (right.discarded ? -50 : 0) + (right.frozen ? -25 : 0);
+        return rightScore - leftScore;
+      })
+      .forEach(tab => pushCandidate(tab.id));
+  } catch (err) {
+    log('resolveAndroidFirefoxKeepAliveMaster: could not enumerate Suno tabs:', err.message);
+  }
+
+  for (const tabId of candidateIds) {
+    if (await hasLiveBetterSunoContentScript(tabId)) {
+      androidFirefoxKeepAliveMasterTabId = tabId;
+      return tabId;
+    }
+  }
+
+  androidFirefoxKeepAliveMasterTabId = null;
+  return null;
+}
+
+async function syncAndroidFirefoxKeepAliveState(preferredTabId = null) {
+  const globalSt = ensureTabState("global");
+  const enabled = globalSt.androidFirefoxKeepAliveEnabled === true;
+  const ownerTabId = enabled ? await resolveAndroidFirefoxKeepAliveMaster(preferredTabId) : null;
+
+  if (!enabled) {
+    androidFirefoxKeepAliveMasterTabId = null;
+  }
+
+  try {
+    const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
+    await Promise.all(
+      sunoTabs
+        .filter(tab => typeof tab.id === 'number')
+        .map(tab => safeTabsSendMessage(tab.id, {
+          type: 'androidKeepAliveControl',
+          enabled,
+          isOwner: enabled && tab.id === ownerTabId,
+          ownerTabId
+        }))
+    );
+  } catch (err) {
+    log('syncAndroidFirefoxKeepAliveState: could not broadcast state:', err.message);
+  }
+
+  return {
+    enabled,
+    ownerTabId
+  };
 }
 
 // ============================================================================
@@ -1447,7 +1526,43 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       enabled: st.enabled,
       intervalMs: st.intervalMs,
       desktopNotificationsEnabled: st.desktopNotificationsEnabled,
+      androidFirefoxKeepAliveEnabled: st.androidFirefoxKeepAliveEnabled === true,
       initialAfterUtc: st.initialAfterUtc
+    });
+    return true;
+  }
+
+  if (msg.type === "contentSyncAndroidKeepAlive") {
+    const senderTabId = sender.tab?.id;
+    syncAndroidFirefoxKeepAliveState(senderTabId).then(state => {
+      sendResponse({
+        ...state,
+        isOwner: typeof senderTabId === 'number' && state.ownerTabId === senderTabId
+      });
+    }).catch(err => {
+      sendResponse({
+        enabled: ensureTabState("global").androidFirefoxKeepAliveEnabled === true,
+        isOwner: false,
+        ownerTabId: androidFirefoxKeepAliveMasterTabId,
+        error: err.message
+      });
+    });
+    return true;
+  }
+
+  if (msg.type === "contentReleaseAndroidKeepAlive") {
+    const senderTabId = sender.tab?.id;
+    if (typeof senderTabId === 'number' && androidFirefoxKeepAliveMasterTabId === senderTabId) {
+      androidFirefoxKeepAliveMasterTabId = null;
+    }
+
+    syncAndroidFirefoxKeepAliveState(null).then(state => {
+      sendResponse({
+        ...state,
+        isOwner: false
+      });
+    }).catch(err => {
+      sendResponse({ ok: false, error: err.message });
     });
     return true;
   }
@@ -1597,13 +1712,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (settings.enabled !== undefined) st.enabled = settings.enabled;
     if (settings.intervalMs !== undefined) st.intervalMs = settings.intervalMs;
     if (settings.desktopNotificationsEnabled !== undefined) st.desktopNotificationsEnabled = settings.desktopNotificationsEnabled;
+    if (settings.androidFirefoxKeepAliveEnabled !== undefined) st.androidFirefoxKeepAliveEnabled = settings.androidFirefoxKeepAliveEnabled === true;
     if (settings.initialAfterUtc !== undefined) st.initialAfterUtc = settings.initialAfterUtc;
     
     log("contentUpdateSettings: updated settings for tab", msg.tabId, "- enabled:", st.enabled, "interval:", st.intervalMs);
     
     saveState();
-    
-    sendResponse({ ok: true, state: { ...st } });
+
+    const senderTabId = sender.tab?.id;
+    Promise.resolve().then(async () => {
+      let androidKeepAlive = null;
+      if (settings.androidFirefoxKeepAliveEnabled !== undefined) {
+        androidKeepAlive = await syncAndroidFirefoxKeepAliveState(senderTabId);
+      }
+
+      sendResponse({
+        ok: true,
+        state: { ...st },
+        androidKeepAlive: androidKeepAlive
+          ? {
+              ...androidKeepAlive,
+              isOwner: typeof senderTabId === 'number' && androidKeepAlive.ownerTabId === senderTabId
+            }
+          : null
+      });
+    }).catch(err => {
+      sendResponse({ ok: false, error: err.message, state: { ...st } });
+    });
     return true;
   }
 
@@ -2604,6 +2739,14 @@ chrome.tabs.onRemoved.addListener(tabId => {
   log("tab removed", tabId);
   if (notificationsRefreshHostTabId === tabId) {
     notificationsRefreshHostTabId = null;
+  }
+  if (androidFirefoxKeepAliveMasterTabId === tabId) {
+    androidFirefoxKeepAliveMasterTabId = null;
+    if (ensureTabState("global").androidFirefoxKeepAliveEnabled === true) {
+      syncAndroidFirefoxKeepAliveState(null).catch(err => {
+        log('tab removed: could not reassign Android Firefox keepalive owner:', err.message);
+      });
+    }
   }
   if (tabState[tabId]) {
     if (isFirefox) {
@@ -3776,47 +3919,93 @@ async function fetchPlaylistSongsFromPageHtml(playlistId) {
 
   return { ok: false, status: response.status, error: 'No playlist songs found on playlist page' };
 }
-// Fallback download for platforms without chrome.downloads (e.g. Firefox Android).
-// Fetches the resource in the background service worker (avoids CORS), converts to a
-// base64 data-URL, then injects a one-shot anchor-click into the active Suno tab.
-async function downloadViaInject(url, filename) {
-  const tab = await getSunoTab();
-  if (!tab?.id) throw new Error('No Suno tab found for in-page download.');
+async function getDownloadTargetTabId() {
+  const candidates = [downloadRequestorTabId, fetchRequestorTabId];
 
-  let dataUrl = url;
-  if (!url.startsWith('data:')) {
-    const token = await getApiTokenWithFallback('downloadViaInject');
-    const fetchOptions = {};
-    if (token) {
-      fetchOptions.headers = { Authorization: `Bearer ${token}` };
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'number' || Number.isNaN(candidate)) {
+      continue;
     }
-    const response = await fetch(url, fetchOptions);
-    if (!response.ok) throw new Error(`Fetch failed: HTTP ${response.status}`);
-    const buffer = await response.arrayBuffer();
-    const view = new Uint8Array(buffer);
-    // btoa() is available in service workers; process in chunks to avoid stack overflow
-    let binary = '';
-    const chunkSize = 8192;
-    for (let i = 0; i < view.length; i += chunkSize) {
-      binary += String.fromCharCode(...view.subarray(i, Math.min(i + chunkSize, view.length)));
+
+    if (await hasLiveBetterSunoContentScript(candidate)) {
+      return candidate;
     }
-    const mimeType = response.headers.get('content-type') || 'application/octet-stream';
-    dataUrl = `data:${mimeType};base64,${btoa(binary)}`;
   }
 
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: (dUrl, fname) => {
-      const a = document.createElement('a');
-      a.href = dUrl;
-      a.download = fname;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    },
-    args: [dataUrl, filename]
-  });
+  const tab = await getSunoTab();
+  return typeof tab?.id === 'number' ? tab.id : null;
+}
 
+async function fetchDownloadPayload(url) {
+  const isRemoteUrl = /^https?:/i.test(String(url || ''));
+  const token = isRemoteUrl ? await getApiTokenWithFallback('downloadViaInject') : null;
+  const fetchOptions = {};
+
+  if (token) {
+    fetchOptions.headers = { Authorization: `Bearer ${token}` };
+  }
+
+  const response = await fetch(url, fetchOptions);
+  if (!response.ok) throw new Error(`Fetch failed: HTTP ${response.status}`);
+
+  return {
+    bytes: await response.arrayBuffer(),
+    mimeType: response.headers.get('content-type') || 'application/octet-stream'
+  };
+}
+
+async function saveBytesInPage(tabId, bytes, mimeType, filename) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      action: 'save_file_in_page',
+      bytes,
+      mimeType,
+      filename
+    });
+
+    if (response?.ok) {
+      return true;
+    }
+
+    throw new Error(response?.error || 'Tab download helper did not acknowledge');
+  } catch (messageError) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (payload, type, fname) => {
+        const normalizedPayload = payload instanceof ArrayBuffer
+          ? payload
+          : (ArrayBuffer.isView(payload)
+            ? payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength)
+            : new Uint8Array(Array.isArray(payload) ? payload : []).buffer);
+        const blob = new Blob([normalizedPayload], { type: type || 'application/octet-stream' });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = typeof fname === 'string' ? fname : '';
+        anchor.rel = 'noopener';
+        anchor.style.display = 'none';
+        (document.body || document.documentElement).appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+      },
+      args: [bytes, mimeType, filename]
+    });
+
+    return true;
+  }
+}
+
+// Fallback download for platforms where the downloads API is unavailable or unreliable.
+// The resource is fetched in the background worker, then saved from the live Suno tab
+// with a page-native Blob URL download.
+async function downloadViaInject(url, filename) {
+  const tabId = await getDownloadTargetTabId();
+  if (typeof tabId !== 'number') throw new Error('No Suno tab found for in-page download.');
+
+  const payload = await fetchDownloadPayload(url);
+  await saveBytesInPage(tabId, payload.bytes, payload.mimeType, filename);
+  await sleep(150);
   return true;
 }
 
@@ -3942,6 +4131,10 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
   }
 
   async function downloadOneFile(url, filename) {
+    if (isAndroid && isFirefox) {
+      return await downloadViaInject(url, filename);
+    }
+
     if (!chrome.downloads?.download) {
       // Firefox Android doesn't support the downloads API; fall back to in-page download.
       return await downloadViaInject(url, filename);
@@ -3998,8 +4191,10 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
             conflictAction: "uniquify"
           });
         } catch (retryErr) {
-          settle(settleReject, retryErr);
-          await completionPromise;
+          clearTimeout(timeoutId);
+          chrome.downloads.onChanged.removeListener(listener);
+          settled = true;
+          return await downloadViaInject(url, filename);
         }
       } else {
         settle(settleReject, err);
@@ -4113,6 +4308,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
 
     const title = song.custom_title || song.title || `Untitled_${song.id}`;
     const safeTitle = sanitizeFilename(title);
+    let downloadedSomething = false;
     try {
     if (shouldDownloadMusic) {
         if (!song.audio_url) {
