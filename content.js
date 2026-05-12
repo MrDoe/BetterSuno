@@ -119,8 +119,8 @@
                 </div>
               </div>
               <div style="margin-top: 14px; display: flex; gap: 8px; justify-content: flex-end;">
-                <button id="downloadDialogCancelBtn" class="btn-secondary" type="button">Cancel</button>
-                <button id="downloadDialogConfirmBtn" class="btn-primary" type="button">Download</button>
+                <button id="downloadDialogCancelBtn" class="btn-secondary" style="margin-bottom: 1rem;" type="button">Cancel</button>
+                <button id="downloadDialogConfirmBtn" class="btn-primary" style="margin: 0 1rem 1rem 0;" type="button">Download</button>
               </div>
             </dialog>
           </div>

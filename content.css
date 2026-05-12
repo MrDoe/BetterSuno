@@ -1149,10 +1149,10 @@
 }
 
 #bettersuno-panel .song-action-btn {
-  background: #27272a !important;
-  border: 1px solid #3f3f46 !important;
+  background: var(--bettersuno-bg-hover) !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 4px !important;
-  color: #f4f4f5 !important;
+  color: var(--bettersuno-text) !important;
   width: 28px !important;
   height: 28px !important;
   display: flex !important;
@@ -1224,7 +1224,7 @@
 
 #bettersuno-panel #settingsPanel,
 #bettersuno-panel #songListContainer {
-  background: #18181b !important;
+  background: var(--bettersuno-bg) !important;
   padding: 12px !important;
   border-radius: 0 !important;
   display: flex !important;
@@ -1238,7 +1238,7 @@
   font-size: 12px !important;
   height: 80px !important;
   overflow-y: auto !important;
-  border: 1px solid #3f3f46 !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 6px !important;
   padding: 8px 10px !important;
   background: #111113 !important;
@@ -1268,11 +1268,11 @@
   width: 100% !important;
   padding: 8px 10px !important;
   margin-bottom: 4px !important;
-  border: 1px solid #3f3f46 !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 6px !important;
   font-size: 12px !important;
-  background: #27272a !important;
-  color: #f4f4f5 !important;
+  background: var(--bettersuno-bg-hover) !important;
+  color: var(--bettersuno-text) !important;
   font-family: inherit !important;
   box-sizing: border-box !important;
 }
@@ -1302,7 +1302,7 @@
   min-height: 0 !important;
   max-height: none !important;
   overflow-y: auto !important;
-  border: 1px solid #3f3f46 !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 6px !important;
   background: #111113 !important;
   margin-bottom: 10px !important;
@@ -1313,7 +1313,7 @@
 }
 
 #bettersuno-panel #songList::-webkit-scrollbar-thumb {
-  background: #3f3f46 !important;
+  background: var(--bettersuno-border) !important;
   border-radius: 3px !important;
 }
 
@@ -1535,8 +1535,9 @@
   padding-top: 0 !important;
   color: #f4f4f5 !important;
   font-size: 12px !important;
-  border-left: 1px solid #3f3f46 !important;
+  border-left: 1px solid var(--bettersuno-border) !important;
   padding-left: 2px !important;
+}
 }
 
 /* Playlist selector row */
@@ -1556,10 +1557,10 @@
 #bettersuno-panel #playlistFilter {
   flex: 1 1 0 !important;
   min-width: 0 !important;
-  background: #18181b !important;
-  border: 1px solid #3f3f46 !important;
+  background: var(--bettersuno-bg) !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 4px !important;
-  color: #f4f4f5 !important;
+  color: var(--bettersuno-text) !important;
   padding: 4px 8px !important;
   font-size: 12px !important;
   font-family: inherit !important;
@@ -1585,10 +1586,10 @@
 
 #bettersuno-playlist-dialog {
   display: none !important;
-  background: #18181b !important;
-  border: 1px solid #3f3f46 !important;
+  background: var(--bettersuno-bg) !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 10px !important;
-  color: #f4f4f5 !important;
+  color: var(--bettersuno-text) !important;
   padding: 0 !important;
   width: 90vw !important;
   height: 90vh !important;
@@ -1613,7 +1614,8 @@
   align-items: center !important;
   justify-content: space-between !important;
   padding: 10px 12px 8px !important;
-  border-bottom: 1px solid #3f3f46 !important;
+  border-bottom: 1px solid var(--bettersuno-border) !important;
+}
 }
 
 .playlist-dialog-title {
@@ -1636,8 +1638,8 @@
 }
 
 .playlist-dialog-close:hover {
-  color: #f4f4f5 !important;
-  background: #3f3f46 !important;
+  color: var(--bettersuno-text) !important;
+  background: var(--bettersuno-border) !important;
 }
 
 #bettersuno-playlist-dialog #playlistSearchControls {
@@ -1650,10 +1652,10 @@
 #bettersuno-playlist-dialog #playlistSearchInput {
   flex: 1 1 0 !important;
   min-width: 0 !important;
-  background: #27272a !important;
-  border: 1px solid #3f3f46 !important;
+  background: var(--bettersuno-bg-hover) !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 4px !important;
-  color: #f4f4f5 !important;
+  color: var(--bettersuno-text) !important;
   padding: 5px 8px !important;
   font-size: 12px !important;
   font-family: inherit !important;
@@ -1686,7 +1688,7 @@
 }
 
 #bettersuno-playlist-dialog #playlistSearchResults:not(:empty) {
-  border-color: #3f3f46 !important;
+  border-color: var(--bettersuno-border) !important;
   background: #111113 !important;
 }
 
@@ -1744,10 +1746,133 @@
   color: #a1a1aa !important;
 }
 
-#bettersuno-panel #songListContainer input[type="text"] {
-  background: #27272a !important;
-  border-color: #3f3f46 !important;
+/* ── Download dialog ──────────────────────────────────────────────────────── */
+
+#bettersuno-download-dialog {
+  display: none !important;
+  position: fixed !important;
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%) !important;
+  background: var(--bettersuno-bg) !important;
+  border: 1px solid var(--bettersuno-border) !important;
+  border-radius: 12px !important;
+  color: var(--bettersuno-text) !important;
+  padding: 0 !important;
+  width: 320px !important;
+  max-width: 90vw !important;
+  max-height: 90vh !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7) !important;
+  flex-direction: column !important;
+  z-index: 100000 !important;
+}
+
+#bettersuno-download-dialog[open] {
+  display: flex !important;
+}
+
+#bettersuno-download-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6) !important;
+}
+
+#bettersuno-download-dialog .playlist-dialog-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  padding: 16px 20px 12px !important;
+  border-bottom: 1px solid var(--bettersuno-border) !important;
+}
+}
+
+#bettersuno-download-dialog .playlist-dialog-title {
+  font-size: 16px !important;
+  font-weight: 600 !important;
   color: #f4f4f5 !important;
+}
+
+#bettersuno-download-dialog .playlist-dialog-close {
+  background: none !important;
+  border: none !important;
+  color: #a1a1aa !important;
+  font-size: 18px !important;
+  line-height: 1 !important;
+  padding: 4px 8px !important;
+  cursor: pointer !important;
+  border-radius: 6px !important;
+  min-height: unset !important;
+  letter-spacing: 0 !important;
+  transition: all 0.15s ease !important;
+}
+
+#bettersuno-download-dialog .playlist-dialog-close:hover {
+  color: var(--bettersuno-text) !important;
+  background: var(--bettersuno-border) !important;
+}
+
+#bettersuno-download-dialog #downloadTypeControls {
+  padding: 16px 20px !important;
+}
+
+#bettersuno-download-dialog #downloadTypeControls label {
+  display: block !important;
+  margin-bottom: 12px !important;
+  font-weight: 500 !important;
+  color: #f4f4f5 !important;
+}
+
+#bettersuno-download-dialog .checkbox-label {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  margin-bottom: 8px !important;
+  cursor: pointer !important;
+  font-weight: normal !important;
+}
+
+#bettersuno-download-dialog .checkbox-label input[type="checkbox"],
+#bettersuno-download-dialog .checkbox-label input[type="radio"] {
+  margin: 0 !important;
+  accent-color: #8b5cf6 !important;
+}
+
+#bettersuno-download-dialog #formatControls {
+  margin-top: 4px !important;
+}
+
+#bettersuno-download-dialog .btn-secondary,
+#bettersuno-download-dialog .btn-primary {
+  padding: 8px 16px !important;
+  font-size: 14px !important;
+  border-radius: 6px !important;
+  cursor: pointer !important;
+  transition: all 0.15s ease !important;
+  border: none !important;
+  font-weight: 500 !important;
+}
+
+#bettersuno-download-dialog .btn-secondary {
+  background: var(--bettersuno-border) !important;
+  color: var(--bettersuno-text) !important;
+}
+
+#bettersuno-download-dialog .btn-secondary:hover {
+  background: #52525b !important;
+}
+
+#bettersuno-download-dialog .btn-primary {
+  background: #8b5cf6 !important;
+  color: #ffffff !important;
+}
+
+#bettersuno-download-dialog .btn-primary:hover {
+  background: #7c3aed !important;
+  transform: translateY(-1px) !important;
+}
+
+#bettersuno-panel #songListContainer input[type="text"] {
+  background: var(--bettersuno-bg-hover) !important;
+  border-color: var(--bettersuno-border) !important;
+  color: var(--bettersuno-text) !important;
 }
 
 #bettersuno-panel #songListContainer input[type="text"]:focus {
