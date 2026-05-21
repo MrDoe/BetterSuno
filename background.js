@@ -2426,13 +2426,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         const html = await response.text();
-        const videoUrl = extractFirstVideoUrlFromHtml(html, songId);
+        const videos = extractCoverVideosFromHtml(html, songId);
+        const videoUrl = videos.processed || videos.uploaded || null;
         if (!videoUrl) {
           sendResponse({ ok: false, status: response.status, error: 'No cover video URL found on song page' });
           return;
         }
 
-        sendResponse({ ok: true, status: response.status, videoUrl });
+        sendResponse({ ok: true, status: response.status, videoUrl, processedVideoUrl: videos.processed || null, uploadedVideoUrl: videos.uploaded || null });
       } catch (e) {
         sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
       }
@@ -3778,14 +3779,16 @@ function findUuidLikeId(obj) {
   return null;
 }
 
-function extractFirstVideoUrlFromHtml(html, songId = '') {
+function extractCoverVideosFromHtml(html, songId = '') {
+  const result = { processed: null, uploaded: null };
   if (typeof html !== 'string' || !html.trim()) {
-    return null;
+    return result;
   }
 
   const derivedMatch = html.match(/video_gen_([0-9a-f-]{36})[^"'\s<>]*?(?:cover_snapshot|image\.jpe?g|video_upload)/i);
+  let derivedProcessedUrl = null;
   if (derivedMatch?.[1]) {
-    return `https://cdn1.suno.ai/video_gen_${derivedMatch[1]}_processed_video.mp4`;
+    derivedProcessedUrl = `https://cdn1.suno.ai/video_gen_${derivedMatch[1]}_processed_video.mp4`;
   }
 
   const urls = [];
@@ -3808,7 +3811,8 @@ function extractFirstVideoUrlFromHtml(html, songId = '') {
   }
 
   if (urls.length === 0) {
-    return null;
+    result.processed = derivedProcessedUrl;
+    return result;
   }
 
   const normalizedSongId = String(songId || '').trim().toLowerCase();
@@ -3816,33 +3820,46 @@ function extractFirstVideoUrlFromHtml(html, songId = '') {
     const normalized = String(url || '').toLowerCase();
     let score = 0;
 
-    // Strongly prefer URLs that are clearly tied to this song id.
     if (normalizedSongId) {
       if (normalized.includes(normalizedSongId)) score += 220;
       if (normalized.includes(`video_gen_${normalizedSongId}`)) score += 120;
     }
 
-    // Prefer Suno's generated final cover video.
     if (normalized.includes('processed_video')) score += 100;
     if (normalized.includes('video_gen_')) score += 60;
-
-    // De-prioritize generic uploads/snapshots and uncertain variants.
-    if (normalized.includes('video_upload')) score -= 35;
-    if (normalized.includes('cover_snapshot')) score -= 35;
-
-    // Generic UUID-only mp4 URLs are often not the actual song cover video.
-    if (/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.mp4(?:\?|$)/i.test(normalized)) {
-      score -= 80;
-    }
-
-    // Prefer mp4 for broad compatibility.
     if (normalized.includes('.mp4')) score += 10;
 
     return score;
   };
 
   urls.sort((a, b) => scoreUrl(b) - scoreUrl(a));
-  return urls[0] || null;
+
+  const bestUrl = urls[0] || null;
+
+  result.processed = derivedProcessedUrl || (bestUrl && !/[?&]type=upload/i.test(bestUrl)
+    ? bestUrl
+    : null);
+
+  const normalizedBest = String(bestUrl || '').toLowerCase();
+  const uploadedCandidates = urls.filter(u => {
+    const normalized = String(u || '').toLowerCase();
+    return normalized !== normalizedBest &&
+      (normalized.includes('video_upload') || normalized.includes('cover_snapshot'));
+  });
+
+  uploadedCandidates.sort((a, b) => scoreUrl(b) - scoreUrl(a));
+  result.uploaded = uploadedCandidates[0] || null;
+
+  if (result.processed && result.uploaded && result.processed === result.uploaded) {
+    result.uploaded = null;
+  }
+
+  return result;
+}
+
+function extractFirstVideoUrlFromHtml(html, songId = '') {
+  const videos = extractCoverVideosFromHtml(html, songId);
+  return videos.processed || videos.uploaded || null;
 }
 
 function extractSongIdFromPlaylistEntry(entry) {

@@ -894,6 +894,7 @@
     let playerTabCurrentSong = null;
     let playerTabCurrentSongIdForMedia = null;
     const playerTabResolvedVideoUrlCache = new Map();
+    const playerTabResolvedUploadedVideoUrlCache = new Map();
     const isAndroidDevice = /Android/i.test(navigator.userAgent || '');
     const isDesktopBrowser = !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
     const PLAYER_TAB_MEDIA_SWIPE_THRESHOLD_PX = 48;
@@ -1003,7 +1004,15 @@
 
     function canTogglePlayerTabVideo(song) {
         if (!song) return false;
-        return !!(getPlayerTabDirectVideoUrl(song) || playerTabResolvedVideoUrlCache.get(song.id) || song.id);
+        return !!(getPlayerTabDirectVideoUrl(song) || playerTabResolvedVideoUrlCache.get(song.id) || playerTabResolvedUploadedVideoUrlCache.get(song.id) || song.id);
+    }
+
+    function getPlayerTabVideoUrlForMode(song, mode) {
+        if (!song) return null;
+        if (mode === 'video2') {
+            return playerTabResolvedUploadedVideoUrlCache.get(song.id) || null;
+        }
+        return getPlayerTabDirectVideoUrl(song) || playerTabResolvedVideoUrlCache.get(song.id) || null;
     }
 
     function updatePlayerTabMediaControls(song = playerTabCurrentSong) {
@@ -1012,18 +1021,43 @@
         if (playerTabMediaToggle) {
             const shouldShowButton = !isAndroidDevice && canToggleVideo;
             playerTabMediaToggle.style.display = shouldShowButton ? 'inline-flex' : 'none';
-            const showImage = playerTabCurrentMediaMode === 'video';
-            playerTabMediaToggle.textContent = showImage ? '≪' : '≫';
-            playerTabMediaToggle.setAttribute('aria-label', showImage ? 'Show cover image' : 'Show cover video');
-            playerTabMediaToggle.setAttribute('title', showImage ? 'Show cover image' : 'Show cover video');
+
+            const availableModes = getPlayerTabAvailableVideoModes(song);
+            const hasVideo2 = availableModes.includes('video2');
+            const mode = playerTabCurrentMediaMode;
+
+            if (mode === 'image') {
+                playerTabMediaToggle.textContent = '≫';
+                playerTabMediaToggle.setAttribute('aria-label', 'Show cover video');
+                playerTabMediaToggle.setAttribute('title', 'Show cover video');
+            } else if (mode === 'video' && hasVideo2) {
+                playerTabMediaToggle.textContent = '≫';
+                playerTabMediaToggle.setAttribute('aria-label', 'Show uploaded video');
+                playerTabMediaToggle.setAttribute('title', 'Show uploaded video');
+            } else {
+                playerTabMediaToggle.textContent = '≪';
+                playerTabMediaToggle.setAttribute('aria-label', 'Show cover image');
+                playerTabMediaToggle.setAttribute('title', 'Show cover image');
+            }
         }
 
         if (playerTabMediaHint) {
             const shouldShowHint = isAndroidDevice && canToggleVideo;
             playerTabMediaHint.style.display = shouldShowHint ? 'block' : 'none';
-            playerTabMediaHint.textContent = playerTabCurrentMediaMode === 'video'
-                ? 'Swipe right to return to the cover image.'
-                : 'Swipe left to load the cover video.';
+
+            const availableModes = getPlayerTabAvailableVideoModes(song);
+            const hasVideo2 = availableModes.includes('video2');
+            const mode = playerTabCurrentMediaMode;
+
+            if (mode === 'image') {
+                playerTabMediaHint.textContent = 'Swipe left to load the cover video.';
+            } else if (mode === 'video' && hasVideo2) {
+                playerTabMediaHint.textContent = 'Swipe left for uploaded video, right for cover image.';
+            } else if (mode === 'video') {
+                playerTabMediaHint.textContent = 'Swipe right to return to the cover image.';
+            } else {
+                playerTabMediaHint.textContent = 'Swipe right to return to the cover image.';
+            }
         }
 
         if (playerTabArtWrapper) {
@@ -1031,8 +1065,27 @@
         }
     }
 
+    function getPlayerTabAvailableVideoModes(song) {
+        const modes = [];
+        const directUrl = getPlayerTabDirectVideoUrl(song);
+        const cachedProcessed = song?.id ? playerTabResolvedVideoUrlCache.get(song.id) : null;
+        const cachedUploaded = song?.id ? playerTabResolvedUploadedVideoUrlCache.get(song.id) : null;
+
+        if (directUrl || cachedProcessed) {
+            modes.push('video');
+        }
+        if (cachedUploaded) {
+            modes.push('video2');
+        }
+        if (!modes.length) {
+            modes.push('video');
+        }
+        return modes;
+    }
+
     function setPlayerTabMediaMode(mode) {
-        const nextMode = mode === 'video' ? 'video' : 'image';
+        const validModes = ['image', 'video', 'video2'];
+        const nextMode = validModes.includes(mode) ? mode : 'image';
         if (playerTabCurrentMediaMode === nextMode) {
             updatePlayerTabMediaControls();
             return;
@@ -1043,6 +1096,48 @@
 
         if (playerTabCurrentSong) {
             updatePlayerTabUi(playerTabCurrentSong);
+        }
+    }
+
+    function cyclePlayerTabMediaModeForward() {
+        const song = playerTabCurrentSong;
+        const sequence = ['image', 'video', 'video2'];
+        const currentIdx = sequence.indexOf(playerTabCurrentMediaMode);
+        const availableModes = getPlayerTabAvailableVideoModes(song);
+        const hasVideo2 = availableModes.includes('video2');
+
+        let nextIdx = currentIdx + 1;
+        if (nextIdx >= sequence.length) nextIdx = 0;
+
+        while (nextIdx !== currentIdx) {
+            const candidate = sequence[nextIdx];
+            if (candidate === 'image' || candidate === 'video' || (candidate === 'video2' && hasVideo2)) {
+                setPlayerTabMediaMode(candidate);
+                return;
+            }
+            nextIdx++;
+            if (nextIdx >= sequence.length) nextIdx = 0;
+        }
+    }
+
+    function cyclePlayerTabMediaModeBackward() {
+        const song = playerTabCurrentSong;
+        const sequence = ['image', 'video', 'video2'];
+        const currentIdx = sequence.indexOf(playerTabCurrentMediaMode);
+        const availableModes = getPlayerTabAvailableVideoModes(song);
+        const hasVideo2 = availableModes.includes('video2');
+
+        let prevIdx = currentIdx - 1;
+        if (prevIdx < 0) prevIdx = sequence.length - 1;
+
+        while (prevIdx !== currentIdx) {
+            const candidate = sequence[prevIdx];
+            if (candidate === 'image' || candidate === 'video' || (candidate === 'video2' && hasVideo2)) {
+                setPlayerTabMediaMode(candidate);
+                return;
+            }
+            prevIdx--;
+            if (prevIdx < 0) prevIdx = sequence.length - 1;
         }
     }
 
@@ -1170,7 +1265,7 @@
     if (playerTabMediaToggle) {
         playerTabMediaToggle.addEventListener('click', () => {
             if (!canTogglePlayerTabVideo(playerTabCurrentSong)) return;
-            setPlayerTabMediaMode(playerTabCurrentMediaMode === 'video' ? 'image' : 'video');
+            cyclePlayerTabMediaModeForward();
         });
     }
     if (playerTabViewCover && isAndroidDevice) {
@@ -1205,9 +1300,9 @@
             }
 
             if (deltaX < 0) {
-                setPlayerTabMediaMode('video');
+                cyclePlayerTabMediaModeForward();
             } else {
-                setPlayerTabMediaMode('image');
+                cyclePlayerTabMediaModeBackward();
             }
         }, { passive: true });
     }
@@ -1821,19 +1916,23 @@
         const thumbnailUrl = getPlayerTabCoverImageUrl(song);
         const directVideoUrl = getPlayerTabDirectVideoUrl(song);
         const cachedResolvedVideoUrl = song.id ? playerTabResolvedVideoUrlCache.get(song.id) || null : null;
-        const videoUrl = cachedResolvedVideoUrl || directVideoUrl;
+        const cachedUploadedVideoUrl = song.id ? playerTabResolvedUploadedVideoUrlCache.get(song.id) || null : null;
+        const videoUrl = getPlayerTabVideoUrlForMode(song, playerTabCurrentMediaMode);
         updatePlayerTabMediaControls(song);
 
         if (playerTabVideo) {
-            if (playerTabCurrentMediaMode === 'video' && videoUrl) {
+            if ((playerTabCurrentMediaMode === 'video' || playerTabCurrentMediaMode === 'video2') && videoUrl) {
                 showVideo(videoUrl, thumbnailUrl);
             } else {
                 showNoMedia();
             }
 
-            // Resolve preferred cover video from the Suno song page only after
-            // the user explicitly switches to video mode.
-            if (playerTabCurrentMediaMode === 'video' && !videoUrl && song.id) {
+            // Resolve cover videos from the Suno song page when user switches to a video mode
+            // and the needed URL isn't available yet.
+            const needsResolution = (playerTabCurrentMediaMode === 'video' && !videoUrl && !cachedResolvedVideoUrl)
+                || (playerTabCurrentMediaMode === 'video2' && !videoUrl && !cachedUploadedVideoUrl);
+
+            if (needsResolution && song.id) {
                 void (async () => {
                     try {
                         const response = await sendMessageWithRetry({
@@ -1845,16 +1944,28 @@
                             return;
                         }
 
-                        const resolvedUrl = (response?.ok && typeof response.videoUrl === 'string')
-                            ? response.videoUrl
-                            : null;
-
-                        if (resolvedUrl) {
-                            playerTabResolvedVideoUrlCache.set(song.id, resolvedUrl);
+                        if (response?.ok) {
+                            if (response.processedVideoUrl) {
+                                playerTabResolvedVideoUrlCache.set(song.id, response.processedVideoUrl);
+                            }
+                            if (response.uploadedVideoUrl) {
+                                playerTabResolvedUploadedVideoUrlCache.set(song.id, response.uploadedVideoUrl);
+                            }
                         }
 
-                        if (resolvedUrl && (!videoUrl || resolvedUrl !== videoUrl)) {
+                        // Also handle legacy response format
+                        if (response?.ok && !response.processedVideoUrl && !response.uploadedVideoUrl && typeof response.videoUrl === 'string') {
+                            playerTabResolvedVideoUrlCache.set(song.id, response.videoUrl);
+                        }
+
+                        const resolvedUrl = getPlayerTabVideoUrlForMode(song, playerTabCurrentMediaMode);
+
+                        if (resolvedUrl) {
+                            updatePlayerTabMediaControls(song);
                             showVideo(resolvedUrl, thumbnailUrl);
+                        } else if (playerTabCurrentMediaMode === 'video2') {
+                            // No uploaded video found, cycle back to cover image
+                            setPlayerTabMediaMode('image');
                         }
                     } catch (e) {
                         // Keep existing image/fallback display if resolving cover video fails.
