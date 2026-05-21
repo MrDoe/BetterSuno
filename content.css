@@ -886,9 +886,9 @@
 
 .player-tab-lyrics-edit {
   width: 100% !important;
-  min-height: 120px !important;
-  max-height: 300px !important;
-  resize: vertical !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  resize: none !important;
   font-size: 13px !important;
   color: var(--bettersuno-text) !important;
   line-height: 1.8 !important;
@@ -899,6 +899,7 @@
   font-family: inherit !important;
   white-space: pre-wrap !important;
   word-break: break-word !important;
+  box-sizing: border-box !important;
 }
 
 .player-tab-lyrics-edit:focus {
