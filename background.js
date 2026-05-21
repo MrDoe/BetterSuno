@@ -2631,9 +2631,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const songId = typeof msg.songId === 'string' ? msg.songId.trim() : '';
         const title = typeof msg.title === 'string' ? msg.title.trim() : '';
+        const lyrics = typeof msg.lyrics === 'string' ? msg.lyrics : undefined;
 
-        if (!songId || !title) {
-          sendResponse({ ok: false, error: 'Missing songId or title' });
+        if (!songId || (!title && lyrics === undefined)) {
+          sendResponse({ ok: false, error: 'Missing songId or fields to update' });
           return;
         }
 
@@ -2643,6 +2644,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
 
+        const body = {};
+        if (title) body.title = title;
+        if (lyrics !== undefined) body.lyrics = lyrics;
+
         const url = `https://studio-api.prod.suno.com/api/gen/${encodeURIComponent(songId)}/set_metadata/`;
         const response = await fetch(url, {
           method: 'POST',
@@ -2650,7 +2655,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`
           },
-          body: JSON.stringify({ title })
+          body: JSON.stringify(body)
         });
 
         let responseBody = null;

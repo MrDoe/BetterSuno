@@ -863,6 +863,11 @@
     const playerTabMediaToggle = document.getElementById('player-tab-media-toggle');
     const playerTabMediaHint = document.getElementById('player-tab-media-hint');
     const playerTabLyrics = document.getElementById('player-tab-lyrics');
+    const playerTabLyricsEdit = document.getElementById('player-tab-lyrics-edit');
+    const playerTabLyricsEditActions = document.getElementById('player-tab-lyrics-edit-actions');
+    const playerTabLyricsSave = document.getElementById('player-tab-lyrics-save');
+    const playerTabLyricsCancel = document.getElementById('player-tab-lyrics-cancel');
+    const playerTabEditLyricsBtn = document.getElementById('player-tab-edit-lyrics-btn');
     const playerTabViewCover = document.getElementById('player-tab-view-cover');
     const playerTabViewLyrics = document.getElementById('player-tab-view-lyrics');
     const playerTabViewComments = document.getElementById('player-tab-view-comments');
@@ -1079,6 +1084,89 @@
     if (playerTabSubtabComments) {
         playerTabSubtabComments.addEventListener('click', () => setPlayerTabView('comments'));
     }
+
+    // ---- Edit Lyrics ----
+    let isEditingLyrics = false;
+
+    function enterLyricsEditMode() {
+        if (!playerTabLyrics || !playerTabLyricsEdit || !playerTabLyricsEditActions || !playerTabEditLyricsBtn) return;
+        isEditingLyrics = true;
+        const song = playerTabCurrentSong;
+        playerTabLyricsEdit.value = song?.lyrics || '';
+        playerTabLyrics.style.display = 'none';
+        playerTabLyricsEdit.style.display = 'block';
+        playerTabLyricsEditActions.style.display = 'flex';
+        playerTabEditLyricsBtn.style.display = 'none';
+        playerTabLyricsEdit.focus();
+    }
+
+    function exitLyricsEditMode() {
+        if (!playerTabLyrics || !playerTabLyricsEdit || !playerTabLyricsEditActions || !playerTabEditLyricsBtn) return;
+        isEditingLyrics = false;
+        playerTabLyrics.style.display = '';
+        playerTabLyricsEdit.style.display = 'none';
+        playerTabLyricsEditActions.style.display = 'none';
+        const song = playerTabCurrentSong;
+        if (song && !isSongFromOtherArtist(song)) {
+            playerTabEditLyricsBtn.style.display = 'block';
+        }
+    }
+
+    if (playerTabEditLyricsBtn) {
+        playerTabEditLyricsBtn.addEventListener('click', () => {
+            enterLyricsEditMode();
+        });
+    }
+
+    if (playerTabLyricsCancel) {
+        playerTabLyricsCancel.addEventListener('click', () => {
+            exitLyricsEditMode();
+        });
+    }
+
+    if (playerTabLyricsSave) {
+        playerTabLyricsSave.addEventListener('click', async () => {
+            const song = playerTabCurrentSong;
+            if (!song || !song.id) return;
+            const newLyrics = playerTabLyricsEdit ? playerTabLyricsEdit.value : '';
+            playerTabLyricsSave.disabled = true;
+            playerTabLyricsSave.textContent = 'Saving...';
+            try {
+                const response = await api.runtime.sendMessage({
+                    action: 'set_song_metadata',
+                    songId: song.id,
+                    lyrics: newLyrics
+                });
+                if (!response || !response.ok) {
+                    playerTabLyricsSave.textContent = 'Save';
+                    playerTabLyricsSave.disabled = false;
+                    alert('Failed to update lyrics: ' + (response?.error || 'unknown error'));
+                    return;
+                }
+                // Update local song data
+                song.lyrics = newLyrics;
+                const updateLyrics = (collection) => {
+                    if (!Array.isArray(collection)) return;
+                    const item = collection.find(s => s.id === song.id);
+                    if (item) item.lyrics = newLyrics;
+                };
+                updateLyrics(allSongs);
+                updateLyrics(playlistSongs);
+                if (playerTabLyrics) {
+                    playerTabLyrics.textContent = newLyrics || 'No lyrics available.';
+                }
+                void saveToStorage();
+                exitLyricsEditMode();
+            } catch (err) {
+                console.debug('[Downloader] set_song_metadata (lyrics) failed', err);
+                alert('Failed to update lyrics.');
+            } finally {
+                playerTabLyricsSave.textContent = 'Save';
+                playerTabLyricsSave.disabled = false;
+            }
+        });
+    }
+
     if (playerTabMediaToggle) {
         playerTabMediaToggle.addEventListener('click', () => {
             if (!canTogglePlayerTabVideo(playerTabCurrentSong)) return;
@@ -1620,6 +1708,12 @@
 
     function updatePlayerTabUi(song) {
         if (!playerTabSong || !playerTabNoSong) return;
+
+        // Reset lyrics edit mode when switching songs
+        if (isEditingLyrics && playerTabCurrentSong && song && playerTabCurrentSong.id !== song.id) {
+            exitLyricsEditMode();
+        }
+
         playerTabCurrentSong = song || null;
 
         const hideVideo = () => {
@@ -1689,6 +1783,8 @@
             hideVideo();
             if (playerTabCoverImage) playerTabCoverImage.style.display = 'none';
             updatePlayerTabMediaControls(null);
+            if (playerTabEditLyricsBtn) playerTabEditLyricsBtn.style.display = 'none';
+            if (isEditingLyrics) exitLyricsEditMode();
             return;
         }
 
@@ -1711,6 +1807,15 @@
         if (playerTabLyrics) {
             const lyrics = song.lyrics || '';
             playerTabLyrics.textContent = lyrics || 'No lyrics available.';
+        }
+
+        // Show/hide Edit Lyrics button for owned songs
+        if (playerTabEditLyricsBtn) {
+            if (!isSongFromOtherArtist(song)) {
+                playerTabEditLyricsBtn.style.display = 'block';
+            } else {
+                playerTabEditLyricsBtn.style.display = 'none';
+            }
         }
 
         const thumbnailUrl = getPlayerTabCoverImageUrl(song);

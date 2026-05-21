@@ -212,7 +212,13 @@
             <div class="player-tab-view" id="player-tab-view-lyrics" style="display: none;">
               <div class="player-tab-lyrics-wrapper">
                 <div class="player-tab-lyrics" id="player-tab-lyrics">No lyrics available.</div>
+                <textarea class="player-tab-lyrics-edit" id="player-tab-lyrics-edit" style="display: none;"></textarea>
               </div>
+              <div class="player-tab-lyrics-edit-actions" id="player-tab-lyrics-edit-actions" style="display: none;">
+                <button type="button" class="btn-primary" id="player-tab-lyrics-save">Save</button>
+                <button type="button" class="btn-secondary" id="player-tab-lyrics-cancel">Cancel</button>
+              </div>
+              <button type="button" class="player-tab-edit-lyrics-btn" id="player-tab-edit-lyrics-btn" style="display: none;">Edit Lyrics</button>
             </div>
             <div class="player-tab-view" id="player-tab-view-comments" style="display: none;">
               <div class="player-tab-comments-wrapper">
