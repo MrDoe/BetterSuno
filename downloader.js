@@ -2938,7 +2938,17 @@
             }
 
             // Sort alphabetically by name
-            const normalizedPlaylists = allPlaylists.map(normalizePlaylistMetadata);
+            // Playlists from /api/playlist/me are the current user's own playlists.
+            // The API may not return is_owned_by_current_user or may return it as false,
+            // so default it to true for playlists from this endpoint.
+            const normalizedPlaylists = allPlaylists.map(pl => {
+                const normalized = normalizePlaylistMetadata(pl);
+                if (normalized.is_owned_by_current_user !== false && normalized.is_owned !== false) {
+                    normalized.is_owned_by_current_user = true;
+                    normalized.is_owned = true;
+                }
+                return normalized;
+            });
             const persistedExternalPlaylists = Array.isArray(persistedPlaylists)
                 ? persistedPlaylists.filter(isPlaylistOtherArtist)
                 : [];
@@ -3383,22 +3393,29 @@
     }
 
     async function addSelectedSongsToPlaylist() {
-        const selectedPlaylist = getSelectedPlaylistMetadata();
-        if (!selectedPlaylist?.id) {
-            statusDiv.innerText = 'Select a playlist first, then add selected songs.';
-            return;
-        }
-        if (!canModifyPlaylist(selectedPlaylist)) {
-            statusDiv.innerText = 'Songs can only be added to your own playlists.';
-            return;
-        }
-
         const selectedSongs = getSelectedSongsAcrossLibrary();
-        if (!selectedSongs.length) return;
+        if (!selectedSongs.length) {
+            statusDiv.innerText = 'No songs selected!';
+            return;
+        }
 
         const songIds = selectedSongs.map(song => song.id).filter(Boolean);
         if (!songIds.length) {
             statusDiv.innerText = 'Selected songs are missing valid IDs.';
+            return;
+        }
+
+        // If no playlist is selected in the dropdown, open the picker dialog
+        let selectedPlaylist = getSelectedPlaylistMetadata();
+        if (!selectedPlaylist?.id) {
+            selectedPlaylist = await pickOwnPlaylistFromDialog();
+            if (!selectedPlaylist?.id) {
+                return; // User cancelled the picker
+            }
+        }
+
+        if (!canModifyPlaylist(selectedPlaylist)) {
+            statusDiv.innerText = 'Songs can only be added to your own playlists.';
             return;
         }
 
@@ -4648,19 +4665,23 @@
         const selectedPlaylist = getSelectedPlaylistMetadata();
         const canEditSelectedPlaylist = canModifyPlaylist(selectedPlaylist);
         const canRemove = hasVisibleSelection && canEditSelectedPlaylist;
+        const isInPlaylistView = Array.isArray(playlistSongs);
 
         if (addToPlaylistBtn) {
-            addToPlaylistBtn.disabled = !hasAnySelection || !canEditSelectedPlaylist;
-            if (!selectedPlaylist?.id) {
-                addToPlaylistBtn.title = 'Select a playlist first to add songs';
-            } else if (!canEditSelectedPlaylist) {
-                addToPlaylistBtn.title = 'Cannot add songs to playlists you do not own';
+            // Show "Add to PL" only when NOT in a playlist view (i.e. "All My Songs")
+            addToPlaylistBtn.style.display = isInPlaylistView ? 'none' : '';
+            // Enable when songs are selected — no playlist required (picker opens on click)
+            addToPlaylistBtn.disabled = !hasAnySelection;
+            if (!hasAnySelection) {
+                addToPlaylistBtn.title = 'Select songs first, then add them to a playlist';
             } else {
-                addToPlaylistBtn.title = 'Add selected songs to the current playlist';
+                addToPlaylistBtn.title = 'Add selected songs to a playlist';
             }
         }
 
         if (removeFromPlaylistBtn) {
+            // Show "Remove from PL" only when in a playlist view
+            removeFromPlaylistBtn.style.display = isInPlaylistView ? '' : 'none';
             removeFromPlaylistBtn.disabled = !canRemove;
             if (!selectedPlaylist?.id) {
                 removeFromPlaylistBtn.title = 'Select a playlist first to remove songs';
