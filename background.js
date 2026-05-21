@@ -2006,7 +2006,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           'Content-Type': 'application/json'
         };
         // Using the POST endpoint and payload as specified
-        const url = `https://studio-api-prod.suno.com/api/search/`;
+        const url = `https://studio-api.prod.suno.com/api/search/`;
         const body = JSON.stringify({
           search_queries: [
             {
@@ -4079,9 +4079,9 @@ function buildPlaylistMutationCandidates(playlistId, data, mode) {
     };
   }
 
-  if (isReorder || isRemove) {
+  if (isReorder) {
     return [
-      { label: 'update_clips', method: 'POST', url: 'https://studio-api-prod.suno.com/api/playlist/update_clips/', body: updateClipsBody }
+      { label: 'update_clips', method: 'POST', url: 'https://studio-api.prod.suno.com/api/playlist/update_clips/', body: updateClipsBody }
     ];
   }
 
@@ -4093,7 +4093,7 @@ function buildPlaylistMutationCandidates(playlistId, data, mode) {
 
   if (isAdd) {
     return [
-      { label: 'update_clips', method: 'POST', url: 'https://studio-api-prod.suno.com/api/playlist/update_clips/', body: updateClipsBody },
+      { label: 'update_clips', method: 'POST', url: 'https://studio-api.prod.suno.com/api/playlist/update_clips/', body: updateClipsBody },
       { label: 'v2-songs-post-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/songs`, body: songIdsBody },
       { label: 'v1-songs-post-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/songs`, body: songIdsBody },
       { label: 'v2-clips-post-clip_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/clips`, body: clipIdsBody },
@@ -4107,8 +4107,9 @@ function buildPlaylistMutationCandidates(playlistId, data, mode) {
     ];
   }
 
+  // isRemove — waterfall through multiple endpoint variants
   return [
-    { label: 'update_clips', method: 'POST', url: 'https://studio-api-prod.suno.com/api/playlist/update_clips/', body: updateClipsBody },
+    { label: 'update_clips', method: 'POST', url: 'https://studio-api.prod.suno.com/api/playlist/update_clips/', body: updateClipsBody },
     { label: 'v2-songs-delete-song_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/songs`, body: songIdsBody },
     { label: 'v1-songs-delete-song_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/songs`, body: songIdsBody },
     { label: 'v2-clips-delete-clip_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/clips`, body: clipIdsBody },
