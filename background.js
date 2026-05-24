@@ -2822,6 +2822,94 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       safeRuntimeSendMessage({ action: "log", text: msg.text });
     }
   }
+
+  // ========== Create Tab Handlers ==========
+
+  if (msg.action === "save_prompt") {
+    (async () => {
+      try {
+        await IDBStore.savePrompt(msg.prompt);
+        sendResponse({ ok: true });
+      } catch (e) {
+        console.error('[BetterSuno] save_prompt error:', e);
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "get_prompts") {
+    (async () => {
+      try {
+        const prompts = await IDBStore.getAllPrompts();
+        sendResponse({ ok: true, prompts });
+      } catch (e) {
+        console.error('[BetterSuno] get_prompts error:', e);
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "delete_prompt") {
+    (async () => {
+      try {
+        await IDBStore.deletePrompt(msg.id);
+        sendResponse({ ok: true });
+      } catch (e) {
+        console.error('[BetterSuno] delete_prompt error:', e);
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.action === "generate_song") {
+    (async () => {
+      try {
+        const token = await getApiTokenWithFallback('generate_song');
+        if (!token) { sendResponse({ ok: false, error: "No auth token" }); return; }
+
+        const payload = {
+          mv: msg.mv || 'chirp-fenix',
+          gpt_description_prompt: msg.stylePrompt || '',
+          prompt: msg.lyrics || '',
+          make_instrumental: msg.instrumental || false,
+          title: msg.title || '',
+          tags: msg.tags || '',
+          negative_tags: msg.negativeTags || '',
+          generation_type: 'TEXT',
+          continue_at: null,
+          continue_clip_id: null,
+          task: null
+        };
+
+        const response = await fetch('https://studio-api.prod.suno.com/api/generate/v2/', {
+          method: 'POST',
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify(payload)
+        });
+
+        let data = null;
+        try { data = await response.json(); } catch (e) {}
+
+        if (!response.ok) {
+          sendResponse({ ok: false, status: response.status, error: data?.detail || 'Generation failed', data });
+          return;
+        }
+
+        sendResponse({ ok: true, data });
+      } catch (e) {
+        console.error('[BetterSuno] generate_song error:', e);
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
 });
 
 // ============================================================================

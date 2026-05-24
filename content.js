@@ -28,6 +28,7 @@
       <div id="bettersuno-tabs">
         <button class="bettersuno-tab active" data-tab="library">Song Library</button>
         <button class="bettersuno-tab" data-tab="player">Player</button>
+        <button class="bettersuno-tab" data-tab="create">Create</button>
         <button class="bettersuno-tab" data-tab="notifications">Notifications</button>
         <button class="bettersuno-tab" data-tab="settings">Settings</button>
       </div>
@@ -142,6 +143,9 @@
           <div id="status" role="status" aria-live="polite">Ready...</div>
           <div id="versionFooter" class="version-footer"></div>
         </div>
+      </div>
+      <div id="bettersuno-create-content" class="bettersuno-content" style="display: none;">
+        <!-- create.js will populate this -->
       </div>
       <div id="bettersuno-settings-content" class="bettersuno-content" style="display: none;">
         <div class="bettersuno-settings-form">
@@ -287,6 +291,7 @@
   const settingsContent = root.querySelector('#bettersuno-settings-content');
   const libraryContent = root.querySelector('#bettersuno-download-content');
   const playerContent = root.querySelector('#bettersuno-player-content');
+  const createContent = root.querySelector('#bettersuno-create-content');
 
   const androidFirefoxKeepAliveManager = (() => {
     const KEEPALIVE_AUDIO_ID = 'bettersuno-android-keepalive-audio';
@@ -686,6 +691,7 @@
       notifications: list,
       library: libraryContent,
       player: playerContent,
+      create: createContent,
       settings: settingsContent
     };
 
@@ -699,6 +705,10 @@
     if (tabName === 'settings') {
       loadSettings();
       document.dispatchEvent(new CustomEvent('bettersuno:settings-opened'));
+    }
+
+    if (tabName === 'create') {
+      document.dispatchEvent(new CustomEvent('bettersuno:create-tab-opened'));
     }
   }
   

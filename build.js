@@ -13,6 +13,7 @@ const SHARED_FILES = [
   'content-idb.js',
   'content.css',
   'content-fetcher.js',
+  'create.js',
   'downloader.js',
   'idb-store.js',
   'idb-helpers.js',

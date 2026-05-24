@@ -3,7 +3,7 @@
 import { requestToPromise, withStore } from './idb-helpers.js';
 
 const DB_NAME = 'BetterSunoicationsDB';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbInstance = null;
 
@@ -55,6 +55,12 @@ async function initDB() {
       if (!db.objectStoreNames.contains('audioCache')) {
         db.createObjectStore('audioCache', { keyPath: 'songId' });
         console.log('[IDB] Created audioCache store');
+      }
+
+      if (!db.objectStoreNames.contains('promptLibrary')) {
+        const promptStore = db.createObjectStore('promptLibrary', { keyPath: 'id' });
+        promptStore.createIndex('savedAt', 'savedAt', { unique: false });
+        console.log('[IDB] Created promptLibrary store');
       }
     };
   });
@@ -352,6 +358,64 @@ async function clearAllAudioBlobs() {
   }
 }
 
+/**
+ * Save a prompt to the library (upsert)
+ * @param {Object} prompt - Prompt object with fields: id, name, stylePrompt, lyrics, instrumental,
+ *   excludeStyle, weirdness, styleInfluence, audioInfluence, model, sourceSongId, sourceSongTitle,
+ *   tags, rating, savedAt, updatedAt
+ */
+async function savePrompt(prompt) {
+  const promptToSave = {
+    ...prompt,
+    savedAt: prompt.savedAt || Date.now(),
+    updatedAt: Date.now()
+  };
+
+  try {
+    await withStore(initDB, 'promptLibrary', 'readwrite', (store) => {
+      store.put(promptToSave);
+    });
+    console.log('[IDB] Prompt saved:', prompt.id);
+  } catch (error) {
+    console.error('[IDB] Error saving prompt:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get all saved prompts, sorted by savedAt descending (newest first)
+ */
+async function getAllPrompts() {
+  try {
+    return await withStore(initDB, 'promptLibrary', 'readonly', (store) => {
+      return requestToPromise(store.getAll(), (result) => {
+        const prompts = result || [];
+        prompts.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+        return prompts;
+      });
+    });
+  } catch (error) {
+    console.error('[IDB] Error getting all prompts:', error);
+    throw error;
+  }
+}
+
+/**
+ * Delete a prompt by id
+ * @param {string} id
+ */
+async function deletePrompt(id) {
+  try {
+    await withStore(initDB, 'promptLibrary', 'readwrite', (store) => {
+      store.delete(id);
+    });
+    console.log('[IDB] Prompt deleted:', id);
+  } catch (error) {
+    console.error('[IDB] Error deleting prompt:', error);
+    throw error;
+  }
+}
+
 // ES6 exports for use in background.js and other modules
 export {
   initDB,
@@ -372,5 +436,8 @@ export {
   getAudioBlob,
   getAllCachedSongIds,
   deleteAudioBlob,
-  clearAllAudioBlobs
+  clearAllAudioBlobs,
+  savePrompt,
+  getAllPrompts,
+  deletePrompt
 };
