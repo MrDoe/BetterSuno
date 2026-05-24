@@ -51,25 +51,24 @@ const stateReadyPromise = new Promise(r => { stateReady = r; });
 let offscreenCreating = false;
 let offscreenExists = false;
 let notificationsRefreshHostTabId = null;
+let notificationsRefreshHostHeartbeatAt = 0;
 let androidFirefoxKeepAliveMasterTabId = null;
+let syncAndroidFirefoxKeepAliveStatePromise = null;
+
+const COLLECTOR_STATE_KEY = 'global';
+// 70s keeps a host lease across timer throttling while still allowing quick failover.
+const REFRESH_HOST_LEASE_MS = 70000;
 
 // Initialize state and restart polling for any enabled collectors
 (async function init() {
   log("Initializing background...");
   await loadState();
   stateReady();
-
-  for (const [tabId, st] of Object.entries(tabState)) {
-    if (st.enabled) {
-      log('init: restarting polling for', tabId);
-      await ensureOffscreen();
-      await sendToOffscreen({
-        type: "offscreenSetState",
-        tabId,
-        state: { ...st }
-      });
-    }
-  }
+  setTimeout(() => {
+    syncNotificationWorkerState().catch(err => {
+      log('init: could not synchronize notification worker:', err.message);
+    });
+  }, 0);
 
   log("Background initialization complete.");
 })();
@@ -114,9 +113,30 @@ async function loadState() {
       }
       log('loadState: restored', (fields.notifications || []).length, 'notifications for', tabId);
     }
+
+    if (!states[COLLECTOR_STATE_KEY]) {
+      const fallback = Object.values(states)
+        .filter(Boolean)
+        .sort((left, right) => {
+          const tsDiff = (right.timestamp || 0) - (left.timestamp || 0);
+          if (tsDiff !== 0) return tsDiff;
+          return String(right.tabId || '').localeCompare(String(left.tabId || ''));
+        })[0];
+      if (fallback) {
+        const globalSt = ensureTabState(COLLECTOR_STATE_KEY);
+        for (const f of PERSIST_FIELDS) {
+          if (fallback[f] !== undefined) globalSt[f] = fallback[f];
+        }
+        log('loadState: migrated legacy collector settings to global worker');
+      }
+    }
   } catch (err) {
     log('loadState error:', err.message);
   }
+}
+
+function notificationWorkerState() {
+  return ensureTabState(COLLECTOR_STATE_KEY);
 }
 
 function ensureTabState(tabId) {
@@ -163,19 +183,30 @@ async function claimNotificationsRefreshHost(tabId) {
     return { isOwner: false, ownerTabId: null };
   }
 
+  const now = Date.now();
   if (notificationsRefreshHostTabId === tabId) {
+    notificationsRefreshHostHeartbeatAt = now;
     return { isOwner: true, ownerTabId: tabId };
   }
 
   if (typeof notificationsRefreshHostTabId === 'number') {
+    if (notificationsRefreshHostHeartbeatAt <= 0) {
+      notificationsRefreshHostHeartbeatAt = now;
+    }
+    if ((now - notificationsRefreshHostHeartbeatAt) < REFRESH_HOST_LEASE_MS) {
+      return { isOwner: false, ownerTabId: notificationsRefreshHostTabId };
+    }
     const ownerIsAlive = await hasLiveBetterSunoContentScript(notificationsRefreshHostTabId);
     if (ownerIsAlive) {
+      notificationsRefreshHostHeartbeatAt = now;
       return { isOwner: false, ownerTabId: notificationsRefreshHostTabId };
     }
     notificationsRefreshHostTabId = null;
+    notificationsRefreshHostHeartbeatAt = 0;
   }
 
   notificationsRefreshHostTabId = tabId;
+  notificationsRefreshHostHeartbeatAt = now;
   return { isOwner: true, ownerTabId: tabId };
 }
 
@@ -225,6 +256,11 @@ async function resolveAndroidFirefoxKeepAliveMaster(preferredTabId) {
 }
 
 async function syncAndroidFirefoxKeepAliveState(preferredTabId = null) {
+  if (syncAndroidFirefoxKeepAliveStatePromise) {
+    return syncAndroidFirefoxKeepAliveStatePromise;
+  }
+
+  syncAndroidFirefoxKeepAliveStatePromise = (async () => {
   const globalSt = ensureTabState("global");
   const enabled = globalSt.androidFirefoxKeepAliveEnabled === true;
   const ownerTabId = enabled ? await resolveAndroidFirefoxKeepAliveMaster(preferredTabId) : null;
@@ -253,6 +289,13 @@ async function syncAndroidFirefoxKeepAliveState(preferredTabId = null) {
     enabled,
     ownerTabId
   };
+  })();
+
+  try {
+    return await syncAndroidFirefoxKeepAliveStatePromise;
+  } finally {
+    syncAndroidFirefoxKeepAliveStatePromise = null;
+  }
 }
 
 // ============================================================================
@@ -604,6 +647,32 @@ async function keepTabAlive(tabId) {
     log("✗ Keep-alive failed for tab", tabId, ":", err.message);
     return false;
   }
+}
+
+async function pickPreferredSunoTabId(preferredTabId = null) {
+  try {
+    const sunoTabs = await findSunoTabsForTokenRefresh(preferredTabId);
+    if (typeof preferredTabId === 'number' && sunoTabs.some(tab => tab.id === preferredTabId)) {
+      return preferredTabId;
+    }
+    const preferredTab = sunoTabs.find(tab => typeof tab.id === 'number');
+    return preferredTab?.id ?? null;
+  } catch (err) {
+    log('pickPreferredSunoTabId: could not select Suno tab:', err.message);
+    return null;
+  }
+}
+
+function preferredAndroidKeepAliveTabId() {
+  return typeof androidFirefoxKeepAliveMasterTabId === 'number' ? androidFirefoxKeepAliveMasterTabId : null;
+}
+
+async function keepAnySunoTabAlive(preferredTabId = null) {
+  const tabId = await pickPreferredSunoTabId(preferredTabId);
+  if (typeof tabId !== 'number') {
+    return false;
+  }
+  return keepTabAlive(tabId);
 }
 
 /**
@@ -1108,6 +1177,35 @@ function ffHandleMessage(msg) {
     ffClearTab(msg.tabId);
     return;
   }
+}
+
+async function syncNotificationWorkerState() {
+  const st = notificationWorkerState();
+
+  if (!st.enabled) {
+    if (isFirefox) {
+      ffClearTab(COLLECTOR_STATE_KEY);
+      return;
+    }
+    await sendToOffscreen({ type: "offscreenClearTab", tabId: COLLECTOR_STATE_KEY });
+    return;
+  }
+
+  if (isFirefox) {
+    ffHandleMessage({
+      type: "offscreenSetState",
+      tabId: COLLECTOR_STATE_KEY,
+      state: { ...st }
+    });
+    return;
+  }
+
+  await ensureOffscreen();
+  await sendToOffscreen({
+    type: "offscreenSetState",
+    tabId: COLLECTOR_STATE_KEY,
+    state: { ...st }
+  });
 }
 
 // ============================================================================
@@ -1631,7 +1729,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "setConfig") {
-    const st = ensureTabState(msg.tabId);
+    const st = notificationWorkerState();
 
     const oldEnabled = st.enabled;
     st.enabled = msg.enabled;
@@ -1652,10 +1750,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         st.requestCount = 0;
         st.totalRequests = 0;
         
-        log("✓ Collector activated for tab", msg.tabId);
+        log("✓ Collector activated for worker", COLLECTOR_STATE_KEY);
         
         // Token sofort holen (nicht auf Alarm warten)
-        ensureValidToken(msg.tabId).then(token => {
+        ensureValidToken(COLLECTOR_STATE_KEY).then(token => {
           if (token) {
             log("✓ Initial token fetch successful");
             // On first activation, load existing notifications from Suno
@@ -1671,13 +1769,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     saveState();
-
-    ensureOffscreen().then(() => {
-      sendToOffscreen({
-        type: "offscreenSetState",
-        tabId: msg.tabId,
-        state: { ...st }
-      });
+    syncNotificationWorkerState().catch(err => {
+      log('setConfig: could not synchronize notification worker:', err.message);
     });
 
     sendResponse({ state: { ...st } });
@@ -1685,15 +1778,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "clearNotifications") {
-    const st = ensureTabState(msg.tabId);
+    const st = notificationWorkerState();
     st.notifications = [];
 
     saveState();
-
-    sendToOffscreen({
-      type: "offscreenSetState",
-      tabId: msg.tabId,
-      state: { ...st }
+    syncNotificationWorkerState().catch(err => {
+      log('clearNotifications: could not synchronize notification worker:', err.message);
     });
 
     sendResponse({ state: { ...st } });
@@ -1702,8 +1792,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Content script updates settings
   if (msg.type === "contentUpdateSettings") {
-    const st = ensureTabState(msg.tabId || "global");
+    const st = notificationWorkerState();
     const settings = msg.settings || {};
+    const shouldSyncNotificationWorker = (
+      settings.enabled !== undefined ||
+      settings.intervalMs !== undefined ||
+      settings.initialAfterUtc !== undefined ||
+      settings.desktopNotificationsEnabled !== undefined
+    );
     
     if (settings.enabled !== undefined) st.enabled = settings.enabled;
     if (settings.intervalMs !== undefined) st.intervalMs = settings.intervalMs;
@@ -1717,6 +1813,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     const senderTabId = sender.tab?.id;
     Promise.resolve().then(async () => {
+      if (shouldSyncNotificationWorker) {
+        await syncNotificationWorkerState();
+      }
+
       let androidKeepAlive = null;
       if (settings.androidFirefoxKeepAliveEnabled !== undefined) {
         androidKeepAlive = await syncAndroidFirefoxKeepAliveState(senderTabId);
@@ -1741,10 +1841,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "offscreenKeepalivePing") {
     // Keepalive is now handled via Chrome Alarms
     // This handler remains for manual triggers
-    for (const [tabId, st] of Object.entries(tabState)) {
-      if (st.enabled) {
-        keepTabAlive(Number(tabId));
-      }
+    const st = notificationWorkerState();
+    if (st.enabled) {
+      const preferredTabId = preferredAndroidKeepAliveTabId();
+      keepAnySunoTabAlive(preferredTabId).catch(err => {
+        log('offscreenKeepalivePing: keepalive failed:', err.message);
+      });
     }
     sendResponse({ ok: true });
     return true;
@@ -2922,6 +3024,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
   log("tab removed", tabId);
   if (notificationsRefreshHostTabId === tabId) {
     notificationsRefreshHostTabId = null;
+    notificationsRefreshHostHeartbeatAt = 0;
   }
   if (androidFirefoxKeepAliveMasterTabId === tabId) {
     androidFirefoxKeepAliveMasterTabId = null;
@@ -4996,37 +5099,28 @@ chrome.alarms.create('ensureOffscreenAlive', {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   await stateReadyPromise;
+  const st = notificationWorkerState();
 
   if (alarm.name === 'tokenRefresh') {
     log("⏰ ALARM: Token Refresh triggered");
-    for (const [tabId, st] of Object.entries(tabState)) {
-      if (st.enabled) {
-        log("⏰ Refreshing token for active collector", tabId);
-        await ensureValidTokenViaClerkSession(tabId);
-      }
+    if (st.enabled) {
+      log("⏰ Refreshing token for active collector", COLLECTOR_STATE_KEY);
+      await ensureValidTokenViaClerkSession(COLLECTOR_STATE_KEY);
     }
   }
 
   if (alarm.name === 'keepAlive') {
     log("⏰ ALARM: Keep-Alive triggered");
-    for (const [tabId, st] of Object.entries(tabState)) {
-      if (st.enabled) {
-        await keepTabAlive(typeof tabId === 'string' ? Number(tabId) : tabId);
-      }
+    if (st.enabled) {
+      const preferredTabId = preferredAndroidKeepAliveTabId();
+      await keepAnySunoTabAlive(preferredTabId);
     }
   }
 
   if (alarm.name === 'ensureOffscreenAlive') {
-    for (const [tabId, st] of Object.entries(tabState)) {
-      if (st.enabled) {
-        log('⏰ WATCHDOG: ensuring offscreen is alive for', tabId);
-        await ensureOffscreen();
-        await sendToOffscreen({
-          type: "offscreenSetState",
-          tabId,
-          state: { ...st }
-        });
-      }
+    if (st.enabled) {
+      log('⏰ WATCHDOG: ensuring offscreen is alive for', COLLECTOR_STATE_KEY);
+      await syncNotificationWorkerState();
     }
   }
 });
