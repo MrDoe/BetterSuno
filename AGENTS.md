@@ -58,6 +58,47 @@ Database: `BetterSunoicationsDB` (version 3)
 | `audioCache` | `songId` | Blobs for offline playback |
 | `imageCache` | `songId` | Cover image blobs |
 
+## Suno API — Song Generation
+
+Endpoint: `POST https://studio-api.prod.suno.com/api/generate/v2-web/`
+
+**Two mutually exclusive modes:**
+
+| Mode | `gpt_description_prompt` | `prompt` | `tags` | `metadata.create_mode` | Behavior |
+|------|--------------------------|----------|--------|------------------------|----------|
+| **Inspiration** (auto-generate) | style/description text | `""` | — | `"inspiration"` | Suno writes lyrics from description |
+| **Custom** (user lyrics) | `""` **(must be empty)** | lyrics text | style/genre tags | `"custom"` | Suno uses provided lyrics verbatim |
+
+**Critical rule:** Putting style text in `gpt_description_prompt` forces inspiration mode and Suno will auto-generate lyrics, ignoring the `prompt` field entirely. This is true even if `metadata.create_mode` is set to `"custom"`. The `gpt_description_prompt` field is the real mode switch.
+
+**Control sliders** (optional, in `metadata.control_sliders`):
+- `style_weight` — 0.0 to 1.0 (mapped from UI slider 0–100 ÷ 100)
+- `weirdness_constraint` — 0.0 to 1.0
+- `audio_weight` — 0.0 to 1.0
+
+Also set `metadata.can_control_sliders` to an array of the slider keys used.
+
+**Full custom-mode payload:**
+```json
+{
+  "mv": "chirp-fenix",
+  "gpt_description_prompt": "",
+  "prompt": "[Verse]\nActual lyrics...",
+  "make_instrumental": false,
+  "title": "Song Title",
+  "tags": "pop, upbeat, synths",
+  "negative_tags": "metal, heavy",
+  "generation_type": "TEXT",
+  "metadata": {
+    "web_client_pathname": "/create",
+    "create_mode": "custom",
+    "create_session_token": "<uuid>",
+    "control_sliders": { "style_weight": 0.5, "weirdness_constraint": 0.5 },
+    "can_control_sliders": ["style_weight", "weirdness_constraint"]
+  }
+}
+```
+
 ## Notable Quirks
 
 - `content-idb.js` (frontend IDB) and `idb-store.js` (background IDB) both use the same DB name but are separate wrappers — they coexist in different JS contexts.

@@ -2972,21 +2972,50 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const token = await getApiTokenWithFallback('generate_song');
         if (!token) { sendResponse({ ok: false, error: "No auth token" }); return; }
 
+        const hasLyrics = msg.lyrics && msg.lyrics.trim();
+        if (!hasLyrics) { sendResponse({ ok: false, error: "Lyrics are required" }); return; }
+
+        const stylePrompt = msg.stylePrompt && msg.stylePrompt.trim();
+
+        // Control sliders: convert 0-100 UI values to 0.0-1.0 API values
+        const controlSliders = {};
+        const canControl = [];
+        if (typeof msg.styleInfluence === 'number' && !isNaN(msg.styleInfluence)) {
+          controlSliders.style_weight = msg.styleInfluence / 100;
+          canControl.push('style_weight');
+        }
+        if (typeof msg.weirdness === 'number' && !isNaN(msg.weirdness)) {
+          controlSliders.weirdness_constraint = msg.weirdness / 100;
+          canControl.push('weirdness_constraint');
+        }
+        if (typeof msg.audioInfluence === 'number' && !isNaN(msg.audioInfluence)) {
+          controlSliders.audio_weight = msg.audioInfluence / 100;
+          canControl.push('audio_weight');
+        }
+
+        // Custom mode: style goes in tags, gpt_description_prompt must be empty
         const payload = {
           mv: msg.mv || 'chirp-fenix',
-          gpt_description_prompt: msg.stylePrompt || '',
-          prompt: msg.lyrics || '',
+          gpt_description_prompt: '',
+          prompt: msg.lyrics,
           make_instrumental: msg.instrumental || false,
           title: msg.title || '',
-          tags: msg.tags || '',
+          tags: stylePrompt || msg.tags || '',
           negative_tags: msg.negativeTags || '',
           generation_type: 'TEXT',
           continue_at: null,
           continue_clip_id: null,
-          task: null
+          task: null,
+          metadata: {
+            web_client_pathname: '/create',
+            create_mode: 'custom',
+            create_session_token: crypto.randomUUID(),
+            ...(Object.keys(controlSliders).length > 0 ? { control_sliders: controlSliders } : {}),
+            ...(canControl.length > 0 ? { can_control_sliders: canControl } : {})
+          }
         };
 
-        const response = await fetch('https://studio-api.prod.suno.com/api/generate/v2/', {
+        const response = await fetch('https://studio-api.prod.suno.com/api/generate/v2-web/', {
           method: 'POST',
           cache: 'no-store',
           headers: {

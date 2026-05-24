@@ -251,8 +251,8 @@
     var btn = document.getElementById('create-generate-btn');
     var status = document.getElementById('create-status');
     
-    if (!data.stylePrompt && !data.lyrics) {
-      showStatus('Please enter a music style or lyrics', 'error');
+    if (!data.lyrics) {
+      showStatus('Please enter lyrics', 'error');
       return;
     }
 
