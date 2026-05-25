@@ -2966,6 +2966,77 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // ========== Persona / Voice Handlers ==========
+
+  if (msg.action === "fetch_personas") {
+    (async () => {
+      try {
+        const token = await getApiTokenWithFallback('fetch_personas');
+        if (!token) { sendResponse({ ok: false, error: 'No auth token' }); return; }
+
+        const browserToken = btoa(JSON.stringify({ timestamp: Date.now() }));
+
+        let deviceId = null;
+        try { const s = await chrome.storage.local.get('sunoDeviceId'); deviceId = s?.sunoDeviceId || null; } catch (e) {}
+        if (!deviceId || typeof deviceId !== 'string') {
+          deviceId = crypto.randomUUID();
+          try { await chrome.storage.local.set({ sunoDeviceId: deviceId }); } catch (e) {}
+        }
+
+        const continuationToken = msg.continuationToken || null;
+        const page = msg.page || 1;
+
+        let url = `https://studio-api.prod.suno.com/api/persona/get-personas/?page=${page}`;
+        if (continuationToken) {
+          url = `https://studio-api.prod.suno.com/api/persona/get-personas/?continuation_token=${encodeURIComponent(continuationToken)}`;
+        }
+
+        const response = await fetch(url, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'browser-token': `{"token":"${browserToken}"}`,
+            'device-id': deviceId,
+            'Origin': 'https://suno.com',
+            'Referer': 'https://suno.com/',
+            'Accept': 'application/json'
+          }
+        });
+
+        if (!response.ok) {
+          sendResponse({ ok: false, error: `Personas API HTTP ${response.status}` });
+          return;
+        }
+
+        const data = await response.json();
+        const personas = (data?.personas || [])
+          .filter(p => p && typeof p.id === 'string' && typeof p.name === 'string')
+          .map(p => ({
+            id: p.id,
+            name: p.name.trim(),
+            image_url: p.image_s3_id || p.image_url || (p.clip?.image_url) || '',
+            is_vox_persona: !!p.is_vox_persona,
+            persona_type: p.persona_type || 'vox',
+            clip_count: typeof p.clip_count === 'number' ? p.clip_count : 0
+          }));
+
+        sendResponse({
+          ok: true,
+          personas,
+          current_page: data.current_page || page,
+          total_results: data.total_results || 0,
+          continuation_token: data.continuation_token || null,
+          has_more: !!data.continuation_token
+        });
+      } catch (e) {
+        console.error('[BetterSuno] fetch_personas error:', e);
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "generate_song") {
     (async () => {
       try {
@@ -3006,6 +3077,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           continue_at: null,
           continue_clip_id: null,
           task: null,
+          ...(msg.personaId ? { persona_id: msg.personaId, ...(msg.personaModel ? { persona_model: msg.personaModel } : {}) } : {}),
           metadata: {
             web_client_pathname: '/create',
             create_mode: 'custom',

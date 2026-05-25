@@ -17,6 +17,7 @@
 
     buildUI(container);
     loadPrompts();
+    loadPersonas();
   }
 
   function buildUI(container) {
@@ -39,6 +40,15 @@
             <option value="chirp-crow">v5.0</option>
             <option value="chirp-bluejay">v4.5+</option>
           </select>
+        </div>
+
+        <div class="create-section">
+          <label class="create-label">Voice/Persona</label>
+          <button id="create-persona-btn" class="create-persona-btn" type="button">
+            <span id="create-persona-label">-- None --</span>
+          </button>
+          <input type="hidden" id="create-persona" value="" />
+          <input type="hidden" id="create-persona-model" value="" />
         </div>
 
         <div class="create-section">
@@ -90,6 +100,23 @@
 
         <div id="create-status"></div>
       </div>
+
+      <div id="persona-dialog-overlay" class="persona-dialog-overlay" style="display:none;">
+        <div class="persona-dialog">
+          <div class="persona-dialog-header">
+            <span class="persona-dialog-title">Select Voice/Persona</span>
+            <button id="persona-dialog-close" class="persona-dialog-close" type="button">&times;</button>
+          </div>
+          <div class="persona-dialog-body">
+            <div id="persona-dialog-grid" class="persona-grid"></div>
+            <div id="persona-dialog-loading" class="persona-dialog-loading" style="display:none;">Loading...</div>
+          </div>
+          <div class="persona-dialog-footer">
+            <button id="persona-dialog-none" class="persona-dialog-none-btn" type="button">None (no voice)</button>
+            <button id="persona-dialog-more" class="persona-dialog-more-btn" type="button" style="display:none;">Load more...</button>
+          </div>
+        </div>
+      </div>
     `;
 
     wireEvents();
@@ -139,6 +166,16 @@
 
     // Save prompt button
     document.getElementById('create-save-btn').addEventListener('click', saveCurrentPrompt);
+
+    // Persona dialog
+    var personaDialogOverlay = document.getElementById('persona-dialog-overlay');
+    document.getElementById('create-persona-btn').addEventListener('click', openPersonaDialog);
+    document.getElementById('persona-dialog-close').addEventListener('click', closePersonaDialog);
+    document.getElementById('persona-dialog-none').addEventListener('click', selectNoPersona);
+    document.getElementById('persona-dialog-more').addEventListener('click', loadMorePersonas);
+    personaDialogOverlay.addEventListener('click', function(e) {
+      if (e.target === personaDialogOverlay) closePersonaDialog();
+    });
   }
 
   function getFormData() {
@@ -151,7 +188,9 @@
       instrumental: document.getElementById('create-instrumental').checked,
       weirdness: parseInt(document.getElementById('create-weirdness').value),
       styleInfluence: parseInt(document.getElementById('create-style-influence').value),
-      audioInfluence: parseInt(document.getElementById('create-audio-influence').value)
+      audioInfluence: parseInt(document.getElementById('create-audio-influence').value),
+      personaId: document.getElementById('create-persona').value,
+      personaModel: document.getElementById('create-persona-model').value || undefined
     };
   }
 
@@ -174,6 +213,14 @@
       document.getElementById('create-audio-influence').value = data.audioInfluence;
       document.getElementById('create-audio-influence-value').textContent = data.audioInfluence;
     }
+    if (data.personaId !== undefined) {
+      document.getElementById('create-persona').value = data.personaId || '';
+      document.getElementById('create-persona-model').value = data.personaModel || '';
+      personaState.selectedId = data.personaId || '';
+      personaState.selectedName = data.personaName || data.personaId || '';
+      personaState.selectedModel = data.personaModel || '';
+      updatePersonaDisplay();
+    }
   }
 
   function loadPrompts() {
@@ -193,6 +240,173 @@
     });
   }
 
+  // Persona dialog state
+  var personaState = {
+    personas: [],
+    continuationToken: null,
+    hasMore: false,
+    loading: false,
+    selectedId: '',
+    selectedName: '',
+    selectedModel: ''
+  };
+
+  function openPersonaDialog() {
+    document.getElementById('persona-dialog-overlay').style.display = 'flex';
+    // Load page 1 if no personas loaded yet
+    if (personaState.personas.length === 0 && !personaState.loading) {
+      loadPersonasPage(1, null);
+    }
+  }
+
+  function closePersonaDialog() {
+    document.getElementById('persona-dialog-overlay').style.display = 'none';
+  }
+
+  function selectPersona(id, name, model) {
+    personaState.selectedId = id;
+    personaState.selectedName = name;
+    personaState.selectedModel = model || 'style_persona';
+    document.getElementById('create-persona').value = id;
+    document.getElementById('create-persona-model').value = model || 'style_persona';
+    updatePersonaDisplay();
+    closePersonaDialog();
+    // Highlight selected card
+    var cards = document.querySelectorAll('.persona-card');
+    cards.forEach(function(c) { c.classList.remove('persona-card-selected'); });
+    var selected = document.getElementById('persona-card-' + id);
+    if (selected) selected.classList.add('persona-card-selected');
+  }
+
+  function selectNoPersona() {
+    personaState.selectedId = '';
+    personaState.selectedName = '';
+    personaState.selectedModel = '';
+    document.getElementById('create-persona').value = '';
+    document.getElementById('create-persona-model').value = '';
+    updatePersonaDisplay();
+    closePersonaDialog();
+    var cards = document.querySelectorAll('.persona-card');
+    cards.forEach(function(c) { c.classList.remove('persona-card-selected'); });
+  }
+
+  function updatePersonaDisplay() {
+    var label = document.getElementById('create-persona-label');
+    if (personaState.selectedId && personaState.selectedName) {
+      label.textContent = personaState.selectedName + (personaState.selectedModel === 'voice_persona' ? ' (Voice)' : '');
+    } else {
+      label.textContent = '-- None --';
+    }
+  }
+
+  function loadPersonas() {
+    // Initial load: fetch page 1
+    loadPersonasPage(1, null);
+  }
+
+  function loadPersonasPage(page, continuationToken) {
+    if (personaState.loading) return;
+    personaState.loading = true;
+
+    var loadingEl = document.getElementById('persona-dialog-loading');
+    if (loadingEl) loadingEl.style.display = 'block';
+
+    api.runtime.sendMessage({
+      action: 'fetch_personas',
+      page: page,
+      continuationToken: continuationToken || undefined
+    }, function(response) {
+      personaState.loading = false;
+      if (loadingEl) loadingEl.style.display = 'none';
+
+      if (!response || !response.ok) return;
+
+      var newPersonas = response.personas || [];
+      if (page === 1) personaState.personas = [];
+      personaState.personas = personaState.personas.concat(newPersonas);
+      personaState.continuationToken = response.continuation_token || null;
+      personaState.hasMore = response.has_more || false;
+
+      renderPersonaCards(newPersonas);
+
+      var moreBtn = document.getElementById('persona-dialog-more');
+      if (moreBtn) moreBtn.style.display = personaState.hasMore ? 'block' : 'none';
+
+      // Re-highlight if selected
+      if (personaState.selectedId) {
+        var sel = document.getElementById('persona-card-' + personaState.selectedId);
+        if (sel) sel.classList.add('persona-card-selected');
+      }
+
+      // Re-apply selected prompt's persona (race condition fix)
+      if (page === 1) {
+        var promptSelect = document.getElementById('create-prompt-select');
+        if (promptSelect && promptSelect.value) {
+          loadPromptIntoForm(promptSelect.value);
+        }
+      }
+    });
+  }
+
+  function loadMorePersonas() {
+    if (!personaState.hasMore || personaState.loading) return;
+    loadPersonasPage(0, personaState.continuationToken);
+  }
+
+  function renderPersonaCards(personas) {
+    var grid = document.getElementById('persona-dialog-grid');
+    if (!grid) return;
+
+    personas.forEach(function(p) {
+      var card = document.createElement('div');
+      card.className = 'persona-card';
+      card.id = 'persona-card-' + p.id;
+      card.title = p.name;
+      card.setAttribute('data-persona-id', p.id);
+      card.setAttribute('data-persona-model', p.is_vox_persona ? 'voice_persona' : 'style_persona');
+
+      if (p.image_url) {
+        var img = document.createElement('img');
+        img.className = 'persona-card-img';
+        img.src = p.image_url;
+        img.alt = p.name;
+        img.loading = 'lazy';
+        card.appendChild(img);
+      } else {
+        var placeholder = document.createElement('div');
+        placeholder.className = 'persona-card-noimg';
+        placeholder.textContent = p.name.charAt(0);
+        card.appendChild(placeholder);
+      }
+
+      var nameEl = document.createElement('span');
+      nameEl.className = 'persona-card-name';
+      nameEl.textContent = p.name;
+      card.appendChild(nameEl);
+
+      if (p.is_vox_persona) {
+        var badge = document.createElement('span');
+        badge.className = 'persona-card-badge';
+        badge.textContent = 'V';
+        card.appendChild(badge);
+      }
+
+      card.addEventListener('click', function() {
+        selectPersona(
+          card.getAttribute('data-persona-id'),
+          p.name,
+          card.getAttribute('data-persona-model')
+        );
+      });
+
+      if (p.id === personaState.selectedId) {
+        card.classList.add('persona-card-selected');
+      }
+
+      grid.appendChild(card);
+    });
+  }
+
   function loadPromptIntoForm(id) {
     api.runtime.sendMessage({ action: 'get_prompts' }, function(response) {
       if (!response || !response.ok) return;
@@ -208,7 +422,10 @@
         instrumental: prompt.instrumental,
         weirdness: prompt.weirdness,
         styleInfluence: prompt.styleInfluence,
-        audioInfluence: prompt.audioInfluence
+        audioInfluence: prompt.audioInfluence,
+        personaId: prompt.personaId,
+        personaModel: prompt.personaModel,
+        personaName: prompt.personaName || ''
       });
     });
   }
@@ -227,6 +444,9 @@
       weirdness: data.weirdness,
       styleInfluence: data.styleInfluence,
       audioInfluence: data.audioInfluence,
+      personaId: data.personaId,
+      personaModel: data.personaModel,
+      personaName: personaState.selectedName,
       model: data.model,
       sourceSongId: null,
       sourceSongTitle: name,
@@ -271,7 +491,9 @@
       tags: undefined,
       weirdness: data.weirdness,
       styleInfluence: data.styleInfluence,
-      audioInfluence: data.audioInfluence
+      audioInfluence: data.audioInfluence,
+      personaId: data.personaId || undefined,
+      personaModel: data.personaModel || undefined
     }, function(response) {
       btn.disabled = false;
       btn.textContent = '🎵 Generate';
@@ -315,6 +537,7 @@
   // Listen for tab opened event from content.js
   document.addEventListener('bettersuno:create-tab-opened', function() {
     loadPrompts();
+    loadPersonas();
   });
 
   // Start initialization
