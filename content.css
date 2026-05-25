@@ -497,13 +497,13 @@
 #bettersuno-panel input[type="number"] {
   width: 100% !important;
   padding: 8px !important;
-  border: 1px solid #ddd !important;
+  border: 1px solid var(--bettersuno-border) !important;
   border-radius: 3px !important;
   font-size: 12px !important;
   font-family: inherit !important;
   box-sizing: border-box !important;
-  background: #fff !important;
-  color: #333 !important;
+  background: var(--bettersuno-bg) !important;
+  color: var(--bettersuno-text) !important;
 }
 
 #bettersuno-panel input[type="text"]:focus,
@@ -2150,6 +2150,7 @@
   resize: vertical;
   min-height: 100px;
   line-height: 1.5;
+  height: 22vh;
 }
 
 .create-select {

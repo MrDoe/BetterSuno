@@ -30,20 +30,17 @@
               <option value="">-- Select a saved prompt --</option>
             </select>
             <button id="create-delete-prompt-btn" class="btn-danger create-small-btn" title="Delete selected prompt" type="button" disabled>🗑</button>
-          </div>
-        </div>
-
-        <div class="create-section">
-          <label class="create-label" for="create-model">Model</label>
+          <label class="create-label ml-5" for="create-model">Model</label>
           <select id="create-model" class="create-select">
             <option value="chirp-fenix">v5.5</option>
             <option value="chirp-crow">v5.0</option>
             <option value="chirp-bluejay">v4.5+</option>
           </select>
+          </div>
         </div>
 
         <div class="create-section">
-          <label class="create-label">Voice/Persona</label>
+          <label class="create-label">Voice</label>
           <button id="create-persona-btn" class="create-persona-btn" type="button">
             <span id="create-persona-label">-- None --</span>
           </button>
@@ -58,17 +55,17 @@
 
         <div class="create-section">
           <label class="create-label" for="create-style">Music Style</label>
-          <input type="text" id="create-style" class="create-input" placeholder="e.g., upbeat pop with synth and female vocals" maxlength="200" />
+          <textarea id="create-style" class="create-textarea" placeholder="e.g., upbeat pop with synth and female vocals" maxlength="1000"></textarea>
         </div>
 
         <div class="create-section">
           <label class="create-label" for="create-exclude">Exclude Style</label>
-          <input type="text" id="create-exclude" class="create-input" placeholder="e.g., heavy metal, opera" maxlength="200" />
+          <input type="text" id="create-exclude" class="create-input" placeholder="e.g., heavy metal, opera" maxlength="1000" />
         </div>
 
         <div class="create-section">
           <label class="create-label" for="create-lyrics">Lyrics</label>
-          <textarea id="create-lyrics" class="create-textarea" placeholder="[Verse]\nYour lyrics here...\n\n[Chorus]\nMore lyrics..." rows="8" maxlength="5000"></textarea>
+          <textarea id="create-lyrics" class="create-textarea" placeholder="[Verse]\nYour lyrics here...\n\n[Chorus]\nMore lyrics..." rows="10" maxlength="5000"></textarea>
         </div>
 
         <div class="create-section">
@@ -104,7 +101,7 @@
       <div id="persona-dialog-overlay" class="persona-dialog-overlay" style="display:none;">
         <div class="persona-dialog">
           <div class="persona-dialog-header">
-            <span class="persona-dialog-title">Select Voice/Persona</span>
+            <span class="persona-dialog-title">Select Voice</span>
             <button id="persona-dialog-close" class="persona-dialog-close" type="button">&times;</button>
           </div>
           <div class="persona-dialog-body">
