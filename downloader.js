@@ -3914,14 +3914,8 @@
             await clearStorage();
             // Also wipe the audio and image caches
             try {
-                const db = await getDB();
-                await new Promise((res, rej) => {
-                    const tx = db.transaction(['audioCache', 'imageCache'], 'readwrite');
-                    tx.objectStore('audioCache').clear();
-                    tx.objectStore('imageCache').clear();
-                    tx.oncomplete = res;
-                    tx.onerror = () => rej(tx.error);
-                });
+                await idbApi.clearStore('audioCache');
+                await idbApi.clearStore('imageCache');
             } catch (e) { /* non-fatal */ }
             allSongs = [];
             playlistSongs = null;

@@ -856,10 +856,6 @@
     return div.innerHTML;
   }
 
-  function escapeAttr(str) {
-    return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
   // ---- Time formatting ----
   function formatAgo(ts) {
     if (!ts) return '';

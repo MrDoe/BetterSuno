@@ -5,8 +5,7 @@
   "scripts": {
     "build": "node build.js"
   },
-  "dependencies": {
-    "bunx": "^0.1.0",
-    "eslint": "^10.0.2"
+  "devDependencies": {
+    "eslint": "^9.0.0"
   }
 }

@@ -273,7 +273,18 @@
         return estimateValueSize(songs) + estimateValueSize(preferences) + estimateValueSize(audioCache) + estimateValueSize(imageCache);
     }
 
+    async function clearStore(storeName) {
+        try {
+            await withObjectStore(storeName, 'readwrite', (store) => {
+                store.clear();
+            });
+        } catch (e) {
+            console.error(`[IDB] Failed to clear store ${storeName}:`, e);
+        }
+    }
+
     window.BetterSunoIDB = {
+        clearStore,
         deleteAudioBlobFromIDB,
         deleteImageBlobFromIDB,
         deletePreferenceFromIDB,
