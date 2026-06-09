@@ -90,9 +90,9 @@
               <button id="stopDownloadBtn" class="btn-stop hidden" type="button">Stop</button>
               <button id="addToPlaylistBtn" class="btn-secondary" type="button" title="Add selected songs to one of your playlists">Add to PL</button>
               <button id="removeFromPlaylistBtn" class="btn-danger" type="button" title="Remove selected songs from the current playlist">Remove from PL</button>
-              <button id="cacheAllBtn" class="btn-secondary" title="Download selected songs as M4A into the browser database for offline playback">Save to DB</button>
+              <button id="cacheAllBtn" class="btn-secondary hidden" title="Download selected songs as M4A into the browser database for offline playback">Save to DB</button>
               <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
-              <button id="deleteCachedBtn" class="btn-danger" title="Delete the selected songs from the browser database">Delete from DB</button>
+              <button id="deleteCachedBtn" class="btn-danger hidden" title="Delete the selected songs from the browser database">Delete from DB</button>
               <button id="syncNewBtn" class="btn-secondary" title="Refresh metadata for all songs (likes, privacy status, etc.)">Refresh</button>
               <span id="songCount">0 songs</span>
             </span>

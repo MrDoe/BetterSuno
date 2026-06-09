@@ -4988,6 +4988,18 @@
         }
 
         updatePlaylistActionButtons(selectedSongs);
+
+        // Show/Hide Save to DB / Delete from DB based on cached status of selected songs
+        if (selectedSongs.length === 0) {
+            if (cacheAllBtn) cacheAllBtn.classList.add('hidden');
+            if (deleteCachedBtn) deleteCachedBtn.classList.add('hidden');
+        } else {
+            const hasUncached = selectedSongs.some(song => song.audio_url && !cachedSongIds.has(song.id));
+            const hasCached = selectedSongs.some(song => cachedSongIds.has(song.id));
+
+            if (cacheAllBtn) cacheAllBtn.classList.toggle('hidden', !hasUncached);
+            if (deleteCachedBtn) deleteCachedBtn.classList.toggle('hidden', !hasCached);
+        }
     }
 
     function formatDate(dateStr) {
