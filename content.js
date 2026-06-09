@@ -86,10 +86,10 @@
 
             <span id="selectControls">
               <button id="selectAll" class="btn-secondary" type="button" aria-pressed="false">Select All</button>
-              <button id="downloadBtn" class="btn-secondary" type="button" title="Download selected songs">Download</button>
+              <button id="downloadBtn" class="btn-secondary hidden" type="button" title="Download selected songs">Download</button>
               <button id="stopDownloadBtn" class="btn-stop hidden" type="button">Stop</button>
-              <button id="addToPlaylistBtn" class="btn-secondary" type="button" title="Add selected songs to one of your playlists">Add to PL</button>
-              <button id="removeFromPlaylistBtn" class="btn-danger" type="button" title="Remove selected songs from the current playlist">Remove from PL</button>
+              <button id="addToPlaylistBtn" class="btn-secondary hidden" type="button" title="Add selected songs to one of your playlists">Add to PL</button>
+              <button id="removeFromPlaylistBtn" class="btn-danger hidden" type="button" title="Remove selected songs from the current playlist">Remove from PL</button>
               <button id="cacheAllBtn" class="btn-secondary hidden" title="Download selected songs as M4A into the browser database for offline playback">Save to DB</button>
               <button id="stopCacheBtn" class="btn-stop hidden">Stop</button>
               <button id="deleteCachedBtn" class="btn-danger hidden" title="Delete the selected songs from the browser database">Delete from DB</button>

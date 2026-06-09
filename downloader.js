@@ -4940,8 +4940,7 @@
 
         if (addToPlaylistBtn) {
             // Show "Add to PL" only when NOT in a playlist view (i.e. "All My Songs")
-            addToPlaylistBtn.style.display = isInPlaylistView ? 'none' : '';
-            // Enable when songs are selected — no playlist required (picker opens on click)
+            addToPlaylistBtn.classList.toggle('hidden', isInPlaylistView || !hasAnySelection);
             addToPlaylistBtn.disabled = !hasAnySelection;
             if (!hasAnySelection) {
                 addToPlaylistBtn.title = 'Select songs first, then add them to a playlist';
@@ -4951,8 +4950,8 @@
         }
 
         if (removeFromPlaylistBtn) {
-            // Show "Remove from PL" only when in a playlist view
-            removeFromPlaylistBtn.style.display = isInPlaylistView ? '' : 'none';
+            // Show "Remove from PL" only when in a playlist view with removable songs
+            removeFromPlaylistBtn.classList.toggle('hidden', !isInPlaylistView || !canRemove);
             removeFromPlaylistBtn.disabled = !canRemove;
             if (!selectedPlaylist?.id) {
                 removeFromPlaylistBtn.title = 'Select a playlist first to remove songs';
@@ -4975,10 +4974,12 @@
         selectAllButton.setAttribute('aria-pressed', String(isPressed));
         selectAllButton.textContent = isPressed ? 'Clear All' : 'Select All';
 
-        // Disable Download button if any selected song is from "Other artist"
+        // Show/hide & disable Download button based on selection + other-artist check
         const selectedSongs = filteredSongs.filter(song => selectedSongIds.has(song.id));
+        const hasAnySelectionCount = selectedSongIds.size > 0;
         const fromOtherArtist = selectedSongs.some(song => isSongFromOtherArtist(song));
         if (downloadBtn) {
+            downloadBtn.classList.toggle('hidden', !hasAnySelectionCount);
             downloadBtn.disabled = fromOtherArtist;
             if (fromOtherArtist) {
                 downloadBtn.title = "Cannot download as files - Songs of other artists can only be saved to local database";
