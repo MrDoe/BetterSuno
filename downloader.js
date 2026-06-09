@@ -2198,6 +2198,7 @@
     const filterStems = document.getElementById("filterStems");
     const filterPublic = document.getElementById("filterPublic");
     const filterOffline = document.getElementById("filterOffline");
+    const sortSelect = document.getElementById("sortSelect");
     const playlistFilter = document.getElementById("playlistFilter");
     const deletePlaylistBtn = document.getElementById("deletePlaylistBtn");
     const selectAllButton = document.getElementById("selectAll");
@@ -2661,6 +2662,7 @@
                 songListContainer.style.display = "block";
                 filterInput.value = "";
                 await loadFilterPreferences();
+                await loadSortPreference();
                 applyFilter();
 
                 scheduleVisibleSongRefresh();
@@ -2737,6 +2739,14 @@
         }
     }
 
+    async function saveSortPreference() {
+        try {
+            await savePreferenceToIDB('sunoSortMode', sortSelect ? sortSelect.value : 'date-desc');
+        } catch (e) {
+            console.error('Failed to save sort preference:', e);
+        }
+    }
+
     async function loadFilterPreferences() {
         try {
             const liked = await loadPreferenceFromIDB('sunoFilterLiked');
@@ -2756,6 +2766,17 @@
             if (filterOffline) {
                 filterOffline.checked = false;
             }
+        }
+    }
+
+    async function loadSortPreference() {
+        try {
+            const sortMode = await loadPreferenceFromIDB('sunoSortMode');
+            if (sortMode && sortSelect) {
+                sortSelect.value = sortMode;
+            }
+        } catch (e) {
+            console.error('Failed to load sort preference:', e);
         }
     }
 
@@ -3086,6 +3107,13 @@
         filterOffline.addEventListener("change", () => {
             applyFilter();
             saveFilterPreferences();
+        });
+    }
+
+    if (sortSelect) {
+        sortSelect.addEventListener("change", () => {
+            applyFilter();
+            saveSortPreference();
         });
     }
 
@@ -4791,6 +4819,10 @@
         });
     }
 
+    function getSortMode() {
+        return sortSelect ? sortSelect.value : 'date-desc';
+    }
+
     function sortSongsForDisplay(songs) {
         if (Array.isArray(playlistSongs)) {
             const playlistOrder = new Map(playlistSongs.map((song, index) => [song.id, index]));
@@ -4802,6 +4834,35 @@
                 }
                 if (typeof aIndex === 'number') return -1;
                 if (typeof bIndex === 'number') return 1;
+                return (a.title || '').localeCompare(b.title || '');
+            });
+        }
+
+        const mode = getSortMode();
+
+        if (mode === 'likes-desc') {
+            return [...songs].sort((a, b) => {
+                const aLikes = a.upvote_count || 0;
+                const bLikes = b.upvote_count || 0;
+                if (bLikes !== aLikes) return bLikes - aLikes;
+                return (a.title || '').localeCompare(b.title || '');
+            });
+        }
+
+        if (mode === 'likes-asc') {
+            return [...songs].sort((a, b) => {
+                const aLikes = a.upvote_count || 0;
+                const bLikes = b.upvote_count || 0;
+                if (aLikes !== bLikes) return aLikes - bLikes;
+                return (a.title || '').localeCompare(b.title || '');
+            });
+        }
+
+        if (mode === 'date-asc') {
+            return [...songs].sort((a, b) => {
+                const aTs = getSongTimestamp(a);
+                const bTs = getSongTimestamp(b);
+                if (aTs !== bTs) return aTs - bTs;
                 return (a.title || '').localeCompare(b.title || '');
             });
         }

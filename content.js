@@ -73,6 +73,13 @@
               <label class="checkbox-label" style="margin: 0; padding: 0">
                 <input type="checkbox" id="filterOffline" /> 💾 Offline
               </label>
+              <label style="margin-left: 12px !important">Sort:</label>
+              <select id="sortSelect" style="background:#3f3f46;color:#f4f4f5;border:1px solid #52525b;border-radius:4px;padding:2px 4px;font-size:12px;cursor:pointer">
+                <option value="date-desc">Newest</option>
+                <option value="date-asc">Oldest</option>
+                <option value="likes-desc">Most Liked</option>
+                <option value="likes-asc">Least Liked</option>
+              </select>
             </div>
 
             <input type="text" id="filterInput" placeholder="🔍 Search songs by title..." />
