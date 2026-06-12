@@ -1,0 +1,56 @@
+{
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://127.0.0.1:11434/api",
+    "model": "embeddinggemma:latest",
+    "timeoutMs": 30000
+  },
+  "indexing": {
+    "minFileSizeBytes": 0,
+    "includeExtensions": [
+      ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+      ".py", ".java", ".go",
+      ".md", ".mdx",
+      ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hxx",
+      ".cs", ".aspx", ".razor", ".cshtml",
+      ".json",
+      ".html", ".htm", ".css",
+      ".xml", ".csproj", ".sln",
+      ".rs", ".rb", ".kt", ".kts", ".swift",
+      ".tex", ".pdf", ".docx", ".doc", ".xls", ".xlsx"
+    ],
+    "excludeDirs": [".opencode", "node_modules", ".git", "dist", "build", "__pycache__", ".venv", ".agents", ".commandcode"],
+    "chunkOverlap": 0
+  },
+  "vectorStore": {
+    "path": "./.opencode/rag_db"
+  },
+  "retrieval": {
+    "topK": 10,
+    "minScore": 0.5,
+    "hybridSearch": {
+      "enabled": true,
+      "keywordWeight": 0.4
+    }
+  },
+  "openCode": {
+    "enabled": true,
+    "maxContextChunks": 10,
+    "readOverride": true,
+    "autoIndex": {
+      "enabled": true,
+      "debounceMs": 2000,
+      "intervalMs": 300000
+    },
+    "autoInject": {
+      "enabled": true,
+      "minScore": 0.75,
+      "maxChunks": 3,
+      "maxTokens": 2000
+    }
+  },
+  "logging": {
+    "level": "info",
+    "logFilePath": "./.opencode/opencode-rag.log"
+  }
+}
