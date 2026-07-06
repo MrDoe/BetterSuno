@@ -1487,7 +1487,7 @@
             replyIndicator.className = 'player-tab-reply-indicator';
             playerTabCommentSubmit.parentNode.insertBefore(replyIndicator, playerTabCommentSubmit);
         }
-        replyIndicator.innerHTML = `Replying to @${author} <span id="player-tab-cancel-reply">✕</span>`;
+        replyIndicator.innerHTML = `Replying to @${escapeHtml(author)} <span id="player-tab-cancel-reply">✕</span>`;
         
         const cancelBtn = document.getElementById('player-tab-cancel-reply');
         if (cancelBtn) {

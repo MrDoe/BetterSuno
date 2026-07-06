@@ -64,6 +64,20 @@ const REFRESH_HOST_LEASE_MS = 70000;
   log("Initializing background...");
   await loadState();
   stateReady();
+
+  // Recover download state after potential service-worker restart
+  readPersistedDownloadState().then(saved => {
+    if (saved && saved.isDownloading) {
+      log("Detected stale download state from before SW restart. Marking as stopped.");
+      isDownloading = false;
+      stopDownloadRequested = false;
+      currentDownloadJobId = 0;
+      activeDownloadIds = new Set();
+      broadcastDownloadState();
+      persistDownloadState({ finishedAt: Date.now(), stopped: true, reason: 'SW restart' });
+    }
+  });
+
   setTimeout(() => {
     syncNotificationWorkerState().catch(err => {
       log('init: could not synchronize notification worker:', err.message);
@@ -501,7 +515,7 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
             sunoTab,
             async () => {
               const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-              const pageWindow = window.wrappedJSObject || window;
+              const pageWindow = window;
               const maxRetries = 10;
               const delayMs = 100;
 
@@ -560,6 +574,8 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
   return null;
 }
 
+const TOKEN_MAX_AGE_MS = 45 * 60 * 1000;
+
 /**
  * Main function: provide token with automatic refresh.
  * Requires a reachable Suno tab because Clerk now refreshes inside page context.
@@ -571,34 +587,46 @@ async function ensureValidTokenViaClerkSession(tabId) {
   const now = Date.now();
 
   // Check if we have a valid cached token
-  if (st.token && st.tokenTimestamp && (now - st.tokenTimestamp < 45 * 60 * 1000)) {
+  if (st.token && st.tokenTimestamp && (now - st.tokenTimestamp < TOKEN_MAX_AGE_MS)) {
     log("Returning CACHED token (age:", Math.floor((now - st.tokenTimestamp) / 60000), "min)");
     return st.token;
   }
 
+  // Deduplicate: if a refresh is already in flight, wait for it
+  if (st.tokenRefreshPromise) {
+    log("Token refresh already in progress, waiting...");
+    return st.tokenRefreshPromise;
+  }
+
   log("Token expired or missing - fetching new token via Clerk session in Suno tab");
 
-  // Step 1: Get session token from cookie for session continuity/debugging
-  const sessionToken = await getClerkSessionFromCookies();
-  if (!sessionToken) {
-    log("No Clerk Session Cookie found - continuing with live Clerk session only");
-  }
+  st.tokenRefreshPromise = (async () => {
+    // Step 1: Get session token from cookie for session continuity/debugging
+    const sessionToken = await getClerkSessionFromCookies();
+    if (!sessionToken) {
+      log("No Clerk Session Cookie found - continuing with live Clerk session only");
+    }
 
-  // Step 2: Get new Bearer Token via Clerk session inside a Suno tab
-  const tokenData = await refreshTokenViaClerkAPI(sessionToken, tabId);
-  if (!tokenData) {
-    log("ERROR: Clerk session token refresh failed - at least one usable Suno tab is required");
-    return null;
-  }
+    // Step 2: Get new Bearer Token via Clerk session inside a Suno tab
+    const tokenData = await refreshTokenViaClerkAPI(sessionToken, tabId);
+    if (!tokenData) {
+      log("ERROR: Clerk session token refresh failed - at least one usable Suno tab is required");
+      st.tokenRefreshPromise = null;
+      return null;
+    }
 
-  // Step 3: Cache token
-  st.token = tokenData.token;
-  st.tokenTimestamp = now;
-  st.clerkSessionToken = sessionToken;
-  st.clerkSessionExpiry = tokenData.expiresAt;
+    // Step 3: Cache token
+    st.token = tokenData.token;
+    st.tokenTimestamp = Date.now();
+    st.clerkSessionToken = sessionToken;
+    st.clerkSessionExpiry = tokenData.expiresAt;
 
-  log("Token successfully refreshed and cached");
-  return tokenData.token;
+    log("Token successfully refreshed and cached");
+    st.tokenRefreshPromise = null;
+    return tokenData.token;
+  })();
+
+  return st.tokenRefreshPromise;
 }
 
 // ============================================================================
@@ -695,7 +723,7 @@ async function fetchTokenDirect(tabId) {
       target: { tabId },
       func: async () => {
         const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        const pageWindow = window.wrappedJSObject || window;
+        const pageWindow = window;
 
         const getClerkToken = async () => {
           const getToken = pageWindow?.Clerk?.session?.getToken;
@@ -768,7 +796,7 @@ async function fetchCurrentUserIdentityDirect(tabId) {
       target: { tabId },
       func: () => {
         try {
-          const pageWindow = window.wrappedJSObject || window;
+          const pageWindow = window;
           const clerk = pageWindow.Clerk;
           const user = clerk?.user || clerk?.session?.user || null;
           if (!user) {
@@ -910,10 +938,9 @@ async function ensureValidToken(tabId) {
 
   // STRATEGY 2: Fallback to MAIN world (legacy approach)
   const st = ensureTabState(tabId);
-  const MAX_AGE = 50 * 60 * 1000;
 
   // Check cache
-  if (st.token && st.tokenTimestamp && Date.now() - st.tokenTimestamp < MAX_AGE) {
+  if (st.token && st.tokenTimestamp && Date.now() - st.tokenTimestamp < TOKEN_MAX_AGE_MS) {
     log("✓ Returning cached token from MAIN world method");
     return st.token;
   }
@@ -1547,6 +1574,13 @@ async function fetchOlderNotifications(beforeUtc) {
 // ============================================================================
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // All msg.action handlers must come from a content script (i.e. have a tab).
+  // Offscreen messages use msg.type with an "offscreen" prefix, not msg.action.
+  if (msg.action && !sender.tab?.id) {
+    log("Blocked action message from untrusted sender:", msg.action);
+    sendResponse({ ok: false, error: 'Forbidden' });
+    return true;
+  }
   if (msg.type === "offscreenRequestToken") {
     log("[NVO] offscreenRequestToken received for tab", msg.tabId);
     ensureValidToken(msg.tabId).then(token => {
@@ -1889,12 +1923,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "fetch_songs_by_ids") {
     (async () => {
       try {
-        let token = msg.token;
+        const token = await getApiTokenWithFallback('fetch_songs_by_ids');
         const songIds = Array.isArray(msg.songIds) ? msg.songIds.filter(id => id !== null && id !== undefined).map(String) : [];
-
-        if (!token) {
-          token = await getApiTokenWithFallback('fetch_songs_by_ids');
-        }
 
         if (!token || songIds.length === 0) {
           sendResponse({ ok: false, status: 0, error: "Missing token or song IDs" });
@@ -1976,7 +2006,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "fetch_feed_page") {
     (async () => {
       try {
-        const token = msg.token;
+        const token = await getApiTokenWithFallback('fetch_feed_page');
         const cursorValue = msg.cursor || null;
         const isPublicOnly = !!msg.isPublicOnly;
         const userId = msg.userId || null;
