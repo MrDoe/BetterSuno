@@ -2635,6 +2635,11 @@
                 ...(savedSyncMeta || {})
             };
             console.log('[Downloader] Loaded', savedSongs?.length || 0, 'songs,', cachedSongIds.size, 'cached audio blobs from IndexedDB');
+            
+            // Evict stale blobs on startup (fire-and-forget)
+            if (typeof evictStaleBlobs === 'function') {
+                evictStaleBlobs().catch(() => {});
+            }
             void refreshDbUsageDisplay();
 
             // Load saved format preference first
@@ -3730,6 +3735,18 @@
         if (!indices.length) {
             statusDiv.innerText = 'Selected songs are not in the current playlist.';
             return;
+        }
+
+        const REMOVE_CONFIRM_THRESHOLD = 5;
+        if (indices.length >= REMOVE_CONFIRM_THRESHOLD) {
+            const confirmed = confirm(
+                `Remove ${indices.length} song(s) from "${selectedPlaylist.name}"?\n` +
+                `This cannot be undone.`
+            );
+            if (!confirmed) {
+                statusDiv.innerText = 'Removal cancelled.';
+                return;
+            }
         }
 
         if (removeFromPlaylistBtn) removeFromPlaylistBtn.disabled = true;

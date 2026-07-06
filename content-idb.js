@@ -129,6 +129,7 @@
             await withObjectStore('audioCache', 'readwrite', (store) => {
                 store.put({ songId, blob, timestamp: Date.now() });
             });
+            scheduleEviction();
         } catch (e) {
             console.error('[IDB] Failed to save audio blob:', e);
         }
@@ -172,6 +173,7 @@
             await withObjectStore('imageCache', 'readwrite', (store) => {
                 store.put({ songId, blob, timestamp: Date.now() });
             });
+            scheduleEviction();
         } catch (e) {
             console.error('[IDB] Failed to save image blob:', e);
         }
@@ -194,6 +196,82 @@
             });
         } catch (e) {
             // ignore
+        }
+    }
+
+    // ---- Blob eviction ----
+
+    const AUDIO_BLOB_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+    const IMAGE_BLOB_MAX_AGE_MS = 30 * 60 * 1000;
+    const MAX_DB_SIZE_BYTES = 500 * 1024 * 1024;
+    const EVICT_BATCH_SIZE = 100;
+
+    let evictionTimer = null;
+
+    function scheduleEviction() {
+        if (evictionTimer) return;
+        evictionTimer = setTimeout(() => {
+            evictionTimer = null;
+            evictStaleBlobs();
+            evictBySize();
+        }, 5000);
+    }
+
+    async function evictStaleBlobs() {
+        const now = Date.now();
+        let evicted = 0;
+
+        for (const [storeName, maxAge] of [
+            ['audioCache', AUDIO_BLOB_MAX_AGE_MS],
+            ['imageCache', IMAGE_BLOB_MAX_AGE_MS],
+        ]) {
+            try {
+                const records = await getAllRecordsFromStore(storeName);
+                const stale = records
+                    .filter(r => !r.timestamp || (now - r.timestamp) > maxAge)
+                    .slice(0, EVICT_BATCH_SIZE);
+
+                for (const r of stale) {
+                    try {
+                        if (storeName === 'audioCache') await deleteAudioBlobFromIDB(r.songId);
+                        if (storeName === 'imageCache') await deleteImageBlobFromIDB(r.songId);
+                        evicted++;
+                    } catch (e) {
+                        // skip individual failures
+                    }
+                }
+            } catch (e) {
+                console.error(`[IDB] Eviction failed for ${storeName}:`, e);
+            }
+        }
+
+        if (evicted > 0) {
+            console.log(`[IDB] Evicted ${evicted} stale blob(s)`);
+        }
+        return evicted;
+    }
+
+    async function evictBySize() {
+        try {
+            const totalBytes = await estimateDbUsageBytes();
+            if (totalBytes < MAX_DB_SIZE_BYTES) return 0;
+
+            const records = await getAllRecordsFromStore('audioCache');
+            records.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+            const toEvict = records.slice(0, Math.ceil(records.length * 0.2));
+            for (const r of toEvict) {
+                try {
+                    await deleteAudioBlobFromIDB(r.songId);
+                } catch (e) {
+                    // skip individual failures
+                }
+            }
+            console.log(`[IDB] Evicted ${toEvict.length} blob(s) by size (${totalBytes} bytes > ${MAX_DB_SIZE_BYTES} limit)`);
+            return toEvict.length;
+        } catch (e) {
+            console.error('[IDB] Size eviction failed:', e);
+            return 0;
         }
     }
 
@@ -289,6 +367,8 @@
         deleteImageBlobFromIDB,
         deletePreferenceFromIDB,
         estimateDbUsageBytes,
+        evictStaleBlobs,
+        evictBySize,
         getAllCachedSongIdsFromIDB,
         getAudioBlobFromIDB,
         getImageBlobFromIDB,
