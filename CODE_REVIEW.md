@@ -306,18 +306,18 @@ BetterSuno is a mature, feature-rich browser extension with broadly sound archit
 
 ## Recommendations — Prioritized
 
-| Priority | Action | Est. effort |
-|----------|--------|-------------|
-| **P0**   | Fix [H1]: escape `author` in `setupReplyMode` | 5 min |
-| **P0**   | Fix [H2]: add sender validation to all message handlers | 1 hour |
-| **P0**   | Fix [H3]: remove `msg.token` acceptance from all handlers | 1 hour |
-| **P1**   | Fix [M1]: refactor message handler into named function map | 4 hours |
-| **P1**   | Fix [M2]: deduplicate concurrent token refresh calls | 2 hours |
-| **P1**   | Fix [M4]: consolidate TTL constants | 15 min |
-| **P2**   | Fix [M3]: persist download state for SW restart survivability | 3 hours |
-| **P2**   | Fix [M5]: add confirmation for destructive playlist ops | 2 hours |
-| **P3**   | Fix [L1]: implement blob eviction | 2 hours |
-| **P3**   | Fix [L2]/[L4]: clean up fragile patterns (wrappedJSObject, SVG innerHTML) | 1 hour |
+| Priority | Action | Est. effort | Status |
+|----------|--------|-------------|--------|
+| **P0**   | Fix [H1]: escape `author` in `setupReplyMode` | 5 min | ✅ Fixed |
+| **P0**   | Fix [H2]: add sender validation to all message handlers | 1 hour | ✅ Fixed |
+| **P0**   | Fix [H3]: remove `msg.token` acceptance from all handlers | 1 hour | ✅ Fixed |
+| **P1**   | Fix [M2]: deduplicate concurrent token refresh calls | 2 hours | ✅ Fixed |
+| **P1**   | Fix [M4]: consolidate TTL constants | 15 min | ✅ Fixed |
+| **P2**   | Fix [M3]: persist download state for SW restart survivability | 3 hours | ✅ Fixed |
+| **P2**   | Fix [M5]: add confirmation for destructive playlist ops | 2 hours | ✅ Fixed |
+| **P3**   | Fix [L1]: implement blob eviction | 2 hours | ✅ Fixed |
+| **P3**   | Fix [L2]/[L4]: clean up fragile patterns (wrappedJSObject, SVG innerHTML) | 1 hour | ✅ Fixed |
+| **P1**   | Fix [M1]: refactor message handler into named function map | 4 hours | 🚧 Reference file created (`bg-handlers.js`), not wired |
 
 ---
 
