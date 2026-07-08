@@ -445,8 +445,15 @@ async function updateTabWithTimeout(tabId, updateInfo, timeoutMs = 1500) {
 }
 
 async function findSunoTabsForTokenRefresh(preferredTabId) {
-  const sunoTabs = await chrome.tabs.query({ url: 'https://suno.com/*' });
-  const filteredTabs = sunoTabs.filter(tab => typeof tab.id === 'number');
+  let filteredTabs = (await chrome.tabs.query({ url: ['https://suno.com/*', 'https://*.suno.com/*'] }))
+    .filter(tab => typeof tab.id === 'number');
+
+  if (preferredTabId && !filteredTabs.some(t => t.id === preferredTabId)) {
+    try {
+      const known = await chrome.tabs.get(preferredTabId);
+      if (known && known.url && known.url.includes('suno.com')) filteredTabs.unshift(known);
+    } catch { /* tab gone */ }
+  }
 
   filteredTabs.sort((left, right) => {
     const leftPreferred = left.id === preferredTabId ? 1 : 0;
@@ -515,7 +522,7 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
             sunoTab,
             async () => {
               const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-              const pageWindow = window;
+              const pageWindow = (typeof wrappedJSObject !== 'undefined') ? wrappedJSObject : window;
               const maxRetries = 10;
               const delayMs = 100;
 
@@ -723,7 +730,7 @@ async function fetchTokenDirect(tabId) {
       target: { tabId },
       func: async () => {
         const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        const pageWindow = window;
+        const pageWindow = (typeof wrappedJSObject !== 'undefined') ? wrappedJSObject : window;
 
         const getClerkToken = async () => {
           const getToken = pageWindow?.Clerk?.session?.getToken;
@@ -3920,7 +3927,13 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
     }
   };
   try {
-    const tab = await getSunoTab();
+    let tab = null;
+    if (fetchRequestorTabId) {
+      try { tab = await chrome.tabs.get(fetchRequestorTabId); } catch { tab = null; }
+    }
+    if (!tab?.id || !tab.url || !tab.url.includes('suno.com')) {
+      tab = await getSunoTab();
+    }
     if (!tab?.id || !tab.url || !tab.url.includes("suno.com")) {
       notifyTab({ action: "fetch_error", error: "❌ Error: Please open Suno.com in the active tab." });
       return;
