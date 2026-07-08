@@ -2155,28 +2155,8 @@
   #bettersuno-panel #downloadTypeControls,
   #bettersuno-panel #filterControls,
   #bettersuno-panel #playlistControls {
-    padding: 6px 8px !important;
-    margin-bottom: 4px !important;
-  }
-
-  #bettersuno-panel #filterControls {
-    display: grid !important;
-    grid-template-columns: auto 1fr !important;
-    gap: 6px !important;
-    align-items: center !important;
-  }
-
-  #bettersuno-panel #filterControls label:first-child {
-    grid-column: 1 / -1 !important;
-  }
-
-  #bettersuno-panel #filterControls .checkbox-label {
-    flex: 1 !important;
-  }
-
-  #bettersuno-panel #filterControls label:has(select),
-  #bettersuno-panel #filterControls select {
-    grid-column: 1 / -1 !important;
+    padding: 2px 8px !important;
+    margin-bottom: 2px !important;
   }
 
   #bettersuno-panel #selectControls {
@@ -2237,22 +2217,22 @@
 
   #bettersuno-panel .song-item {
     gap: 12px !important;
-    padding: 12px 0 !important;
+    padding: 6px !important;
   }
 
   #bettersuno-panel .song-thumbnail {
     width: 52px !important;
-    height: 52px !important;
+    height: 80px !important;
   }
 
   /* ---- WS-1: 44px touch targets ---- */
   .bettersuno-tab {
-    min-height: 44px !important;
+    min-height: 22px !important;
     padding: 12px 8px !important;
   }
 
   .player-tab-subtab {
-    min-height: 44px !important;
+    min-height: 22px !important;
     padding: 10px 12px !important;
   }
 
@@ -2282,7 +2262,7 @@
   }
 
   #bettersuno-panel .checkbox-label {
-    min-height: 44px !important;
+    min-height: 22px !important;
     display: inline-flex !important;
     align-items: center !important;
   }
