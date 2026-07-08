@@ -1,9 +1,11 @@
 {
   "name": "bettersuno",
-  "version": "2.2.2",
+  "version": "2.2.3",
   "description": "Enhanced Suno.com experience with notifications and song downloads",
   "scripts": {
-    "build": "node build.js"
+    "build": "node build.js",
+    "publish": "npm version patch --no-git-tag-version && node build.js",
+    "sign-firefox": "npm version patch --no-git-tag-version && node build.js firefox"
   },
   "devDependencies": {
     "eslint": "^9.0.0"
