@@ -109,26 +109,14 @@ Also set `metadata.can_control_sliders` to an array of the slider keys used.
 - `eslint` listed in `package.json` dependencies but no config file found — not configured.
 - `package-lock.json` is in `.gitignore`.
 
-## OpenCodeRAG Plugin
+<!-- BEGIN opencode-rag -->
+## Code Navigation
 
-This workspace has OpenCodeRAG installed for semantic code retrieval.
+ALWAYS use OpenCodeRAG tools before reading or editing:
+- **Search first** — `search_semantic(query)` instead of grep/glob
+- **Skeleton before read** — `get_file_skeleton(filePath)` then read specific lines
+- **Usages before edit** — `find_usages(symbolName)` before modifying any symbol
+- **Images via describe** — `describe_image(filePath)` — never read raw bytes
 
-### `opencode-rag-context` tool
-Before planning, editing, or answering questions, use this tool to retrieve relevant
-code chunks with file paths, line ranges, and surrounding implementation.
-- `query` (required) — narrow, specific search, e.g. `"authentication middleware setup"`
-- `pathHints` (optional) — up to 10 path filters, e.g. `["src/auth/"]`
-- `languageHints` (optional) — up to 10 language filters, e.g. `["typescript"]`
-- `topK` (optional) — result count (1–25, default 10)
-
-### File suggestions
-After each user message, a `chat.message` hook appends up to 10 relevant file
-suggestions. Look for lines like `src/file.ts (typescript, lines 10-42)` at the
-bottom of user input.
-
-### Indexing
-- Changed files are auto-indexed in the background (debounced 5 s).
-- If searches return no results, the workspace may not be indexed yet —
-  run `opencode-rag index` from the terminal (or `npx opencode-rag-plugin`).
-- Files under 1 KB, excluded extensions, and excluded directories
-  (`node_modules`, `.git`, `.opencode`, `dist`, etc.) are silently skipped.
+If no results, run `opencode-rag index`.
+<!-- END opencode-rag -->
