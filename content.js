@@ -19,6 +19,13 @@
   let androidFirefoxKeepAliveIsOwner = false;
   let androidFirefoxKeepAliveOwnerTabId = null;
 
+  /* Light haptic feedback on Android (silently ignored elsewhere) */
+  function haptic(ms = 10) {
+    if (isAndroidFirefox && navigator.vibrate) {
+      try { navigator.vibrate(ms); } catch (_) { /* noop */ }
+    }
+  }
+
   function getPanelMarkup() {
     return `
     <div id="bettersuno-panel">
@@ -53,7 +60,7 @@
                 <button id="playlistDialogCloseBtn" class="playlist-dialog-close" type="button" aria-label="Close">✕</button>
               </div>
               <div id="playlistSearchControls">
-                <input type="text" id="playlistSearchInput" placeholder="Search playlist by name or paste URL/ID..." autocomplete="off" />
+                <input type="text" id="playlistSearchInput" placeholder="Search playlist by name or paste URL/ID..." autocomplete="off" inputmode="search" enterkeyhint="search" />
                 <button id="playlistSearchBtn" class="btn-secondary" type="button">Search</button>
               </div>
               <div id="playlistSearchResults"></div>
@@ -82,7 +89,7 @@
               </select>
             </div>
 
-            <input type="text" id="filterInput" placeholder="🔍 Search songs by title..." />
+            <input type="text" id="filterInput" placeholder="🔍 Search songs by title..." inputmode="search" enterkeyhint="search" autocomplete="off" />
 
             <span id="selectControls">
               <button id="selectAll" class="btn-secondary" type="button" aria-pressed="false">Select All</button>
@@ -161,7 +168,7 @@
           </div>
           <div class="bettersuno-setting-row">
             <label>Polling Interval (seconds):</label>
-            <input type="number" id="bettersuno-setting-interval" class="bettersuno-setting" data-key="intervalMs" min="10" step="10" value="120">
+            <input type="number" id="bettersuno-setting-interval" class="bettersuno-setting" data-key="intervalMs" min="10" step="10" value="120" inputmode="numeric" autocomplete="off">
           </div>
           <div class="bettersuno-setting-row">
             <label>
@@ -184,7 +191,7 @@
           </div>
           <div class="bettersuno-setting-row">
             <label>Download Folder:</label>
-            <input type="text" id="folder" class="bettersuno-setting" data-key="downloadFolder" value="Suno_Songs" placeholder="Folder name in Downloads" style="flex: 1;" />
+            <input type="text" id="folder" class="bettersuno-setting" data-key="downloadFolder" value="Suno_Songs" placeholder="Folder name in Downloads" style="flex: 1;" inputmode="text" autocomplete="off" />
           </div>
           <div class="bettersuno-setting-row">
             <label>Local DB Usage:</label>
@@ -687,6 +694,7 @@
   updateAndroidFirefoxKeepAliveUi();
 
   function setActiveTab(tabName, activeButton = null) {
+    haptic(8);
     currentTab = tabName;
     title.textContent = 'BetterSuno';
 

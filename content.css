@@ -86,6 +86,10 @@
   transform: scale(1.08) !important;
 }
 
+#bettersuno-bell:active {
+  transform: scale(0.95) !important;
+}
+
 #bettersuno-bell svg {
   width: 24px !important;
   height: 24px !important;
@@ -173,6 +177,9 @@
 #bettersuno-refresh:hover {
   color: var(--bettersuno-accent) !important;
 }
+#bettersuno-refresh:active {
+  color: var(--bettersuno-accent-hover) !important;
+}
 #bettersuno-refresh:disabled {
   opacity: 0.4 !important;
   cursor: default !important;
@@ -224,6 +231,10 @@
   opacity: 0.8 !important;
 }
 
+.bettersuno-list-sentinel.is-loadmore:active {
+  opacity: 0.6 !important;
+}
+
 /* Individual notification row */
 .bettersuno-item {
   display: flex !important;
@@ -237,6 +248,10 @@
 
 .bettersuno-item:hover {
   background: var(--bettersuno-bg-hover) !important;
+}
+
+.bettersuno-item:active {
+  background: var(--bettersuno-border) !important;
 }
 
 .bettersuno-item img.bettersuno-avatar {
@@ -312,6 +327,10 @@
   color: var(--bettersuno-text) !important;
 }
 
+#bettersuno-footer button:active {
+  background: var(--bettersuno-border) !important;
+}
+
 #bettersuno-footer button + button {
   border-left: 1px solid var(--bettersuno-border) !important;
 }
@@ -339,11 +358,16 @@
     background 0.1s !important;
   font-weight: 500 !important;
   pointer-events: auto !important;
+  touch-action: manipulation !important;
 }
 
 .bettersuno-tab:hover {
   background: var(--bettersuno-bg-hover) !important;
   color: var(--bettersuno-text) !important;
+}
+
+.bettersuno-tab:active {
+  background: var(--bettersuno-border) !important;
 }
 
 .bettersuno-tab.active {
@@ -539,6 +563,7 @@
   font-size: 13px !important;
   letter-spacing: 0.3px !important;
   font-family: inherit !important;
+  touch-action: manipulation !important;
 }
 
 #bettersuno-panel .player-tab-buttons > button {
@@ -560,6 +585,11 @@
   box-shadow: 0 6px 12px rgba(102, 126, 234, 0.3) !important;
 }
 
+#bettersuno-panel .btn-primary:active:not(:disabled) {
+  transform: translateY(0) scale(0.98) !important;
+  box-shadow: none !important;
+}
+
 #bettersuno-panel .btn-stop {
   background: #ef5350 !important;
   color: white !important;
@@ -569,6 +599,11 @@
   background: #e53935 !important;
 }
 
+#bettersuno-panel .btn-stop:active:not(:disabled) {
+  background: #c62828 !important;
+  transform: scale(0.98) !important;
+}
+
 #bettersuno-panel .btn-danger {
   background: #7f1d1d !important;
   color: white !important;
@@ -576,6 +611,11 @@
 
 #bettersuno-panel .btn-danger:hover:not(:disabled) {
   background: #991b1b !important;
+}
+
+#bettersuno-panel .btn-danger:active:not(:disabled) {
+  background: #7f1d1d !important;
+  transform: scale(0.98) !important;
 }
 
 #bettersuno-panel .btn-success {
@@ -588,6 +628,11 @@
 #bettersuno-panel .btn-success:hover:not(:disabled) {
   transform: translateY(-1px) !important;
   box-shadow: 0 6px 12px rgba(38, 194, 129, 0.3) !important;
+}
+
+#bettersuno-panel .btn-success:active:not(:disabled) {
+  transform: translateY(0) scale(0.98) !important;
+  box-shadow: none !important;
 }
 
 #bettersuno-panel .btn-secondary {
@@ -626,10 +671,19 @@
   font-size: 20px !important;
   flex-shrink: 0 !important;
   font-variant-emoji: text !important;
+  touch-action: manipulation !important;
 }
 
 .player-btn:hover {
   background: var(--bettersuno-accent-hover) !important;
+}
+
+.player-btn:active {
+  transform: scale(0.92) !important;
+}
+
+.player-btn-large:active {
+  transform: scale(0.92) !important;
 }
 
 .player-info {
@@ -695,6 +749,31 @@
   font-variant-numeric: tabular-nums !important;
 }
 
+/* On touch devices, make the progress handle always visible and enlarge the hit area */
+@media (hover: none) {
+  #player-progress-handle {
+    opacity: 1 !important;
+    width: 16px !important;
+    height: 16px !important;
+  }
+
+  .player-progress-container {
+    min-height: 24px !important;
+    touch-action: none !important;
+  }
+
+  #player-tab-progress-handle {
+    opacity: 1 !important;
+    width: 16px !important;
+    height: 16px !important;
+  }
+
+  #player-tab-progress-container {
+    min-height: 24px !important;
+    touch-action: none !important;
+  }
+}
+
 /* ---- Player Tab ---- */
 #bettersuno-player-content {
   flex-direction: column !important;
@@ -750,6 +829,10 @@
   font-size: 12px !important;
   font-weight: 600 !important;
   cursor: pointer !important;
+}
+
+.player-tab-subtab:active {
+  background: var(--bettersuno-border) !important;
 }
 
 .player-tab-subtab.active {
@@ -852,6 +935,10 @@
   background: rgba(0, 0, 0, 0.3) !important;
   color: rgba(255, 255, 255, 0.92) !important;
   opacity: 1 !important;
+}
+
+.player-tab-media-toggle:active:not(:disabled) {
+  transform: translateY(-50%) scale(0.92) !important;
 }
 
 .player-tab-media-hint {
@@ -1108,10 +1195,15 @@
   transition: transform 0.1s ease !important;
   -webkit-user-select: none !important;
   user-select: none !important;
+  touch-action: manipulation !important;
 }
 
 .emoji-item:hover {
   transform: scale(1.3) !important;
+}
+
+.emoji-item:active {
+  transform: scale(1.5) !important;
 }
 
 .player-tab-comments-input-area textarea {
@@ -1125,7 +1217,7 @@
   color: var(--bettersuno-text) !important;
   border-radius: 6px !important;
   padding: 8px !important;
-  font-size: 13px !important;
+  font-size: 16px !important;
   font-family: inherit !important;
 }
 
@@ -1217,12 +1309,17 @@
   font-size: 14px !important;
   padding: 0 !important;
   transition: all 0.2s !important;
+  touch-action: manipulation !important;
 }
 
 #bettersuno-panel .song-action-btn:hover {
   background: var(--bettersuno-accent) !important;
   border-color: var(--bettersuno-accent) !important;
   color: white !important;
+}
+
+#bettersuno-panel .song-action-btn:active {
+  transform: scale(0.9) !important;
 }
 
 /* Specific styling for play button when active */
@@ -1234,6 +1331,10 @@
 
 #bettersuno-panel .btn-secondary:hover:not(:disabled) {
   background: #efefef !important;
+}
+
+#bettersuno-panel .btn-secondary:active:not(:disabled) {
+  transform: scale(0.98) !important;
 }
 
 #bettersuno-panel .btn-row {
@@ -1387,8 +1488,60 @@
   border-bottom: none !important;
 }
 
+#bettersuno-panel .song-item {
+  touch-action: pan-y !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
 #bettersuno-panel .song-item:hover {
   background: #27272a !important;
+}
+
+#bettersuno-panel .song-item:active {
+  background: #3f3f46 !important;
+}
+
+.song-item-pressed {
+  transform: scale(0.98) !important;
+  transition: transform 80ms ease !important;
+}
+
+.song-item-swipe-actions {
+  position: absolute !important;
+  right: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  background: var(--bettersuno-bg) !important;
+  padding: 0 8px !important;
+  z-index: 5 !important;
+  border-left: 1px solid var(--bettersuno-border) !important;
+  transform: translateX(100%) !important;
+  transition: transform 150ms ease !important;
+}
+
+.song-item-swipe-actions.is-revealed {
+  transform: translateX(0) !important;
+}
+
+.song-item-swipe-action-btn {
+  background: var(--bettersuno-accent) !important;
+  color: #fff !important;
+  border: none !important;
+  border-radius: 6px !important;
+  padding: 6px 10px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  white-space: nowrap !important;
+  touch-action: manipulation !important;
+}
+
+.song-item-swipe-action-btn:active {
+  transform: scale(0.95) !important;
 }
 
 #bettersuno-panel .song-item input[type="checkbox"] {
@@ -1695,6 +1848,10 @@
   background: var(--bettersuno-border) !important;
 }
 
+.playlist-dialog-close:active {
+  color: var(--bettersuno-accent) !important;
+}
+
 #bettersuno-playlist-dialog #playlistSearchControls {
   display: flex !important;
   gap: 6px !important;
@@ -1756,6 +1913,10 @@
 
 #bettersuno-panel .playlist-search-item:hover {
   background: #27272a !important;
+}
+
+#bettersuno-panel .playlist-search-item:active {
+  background: #3f3f46 !important;
 }
 
 #bettersuno-panel .playlist-search-thumb {
@@ -1861,6 +2022,10 @@
   background: var(--bettersuno-border) !important;
 }
 
+#bettersuno-download-dialog .playlist-dialog-close:active {
+  color: var(--bettersuno-accent) !important;
+}
+
 #bettersuno-download-dialog #downloadTypeControls {
   padding: 16px 20px !important;
 }
@@ -1912,6 +2077,10 @@
 
 #bettersuno-download-dialog .btn-secondary:hover {
   background: #52525b !important;
+}
+
+#bettersuno-download-dialog .btn-secondary:active {
+  transform: scale(0.98) !important;
 }
 
 #bettersuno-download-dialog .btn-primary {
@@ -1990,6 +2159,37 @@
     margin-bottom: 4px !important;
   }
 
+  #bettersuno-panel #filterControls {
+    display: grid !important;
+    grid-template-columns: auto 1fr !important;
+    gap: 6px !important;
+    align-items: center !important;
+  }
+
+  #bettersuno-panel #filterControls label:first-child {
+    grid-column: 1 / -1 !important;
+  }
+
+  #bettersuno-panel #filterControls .checkbox-label {
+    flex: 1 !important;
+  }
+
+  #bettersuno-panel #filterControls label:has(select),
+  #bettersuno-panel #filterControls select {
+    grid-column: 1 / -1 !important;
+  }
+
+  #bettersuno-panel #selectControls {
+    gap: 4px !important;
+    padding: 4px 8px !important;
+  }
+
+  #bettersuno-panel #selectControls #songCount {
+    width: 100% !important;
+    text-align: right !important;
+    margin: 2px 0 !important;
+  }
+
   #bettersuno-panel #filterInput,
   #bettersuno-panel #selectControls,
   #bettersuno-panel .btn-row {
@@ -2043,6 +2243,145 @@
   #bettersuno-panel .song-thumbnail {
     width: 52px !important;
     height: 52px !important;
+  }
+
+  /* ---- WS-1: 44px touch targets ---- */
+  .bettersuno-tab {
+    min-height: 44px !important;
+    padding: 12px 8px !important;
+  }
+
+  .player-tab-subtab {
+    min-height: 44px !important;
+    padding: 10px 12px !important;
+  }
+
+  .player-btn {
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+
+  .player-btn-large {
+    min-width: 48px !important;
+    min-height: 48px !important;
+  }
+
+  .emoji-item {
+    min-width: 44px !important;
+    min-height: 44px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  #bettersuno-panel .song-action-btn {
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
+    min-height: 36px !important;
+  }
+
+  #bettersuno-panel .checkbox-label {
+    min-height: 44px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+  }
+
+  #bettersuno-panel #selectControls button {
+    min-height: 36px !important;
+    padding: 8px 12px !important;
+    font-size: 13px !important;
+  }
+
+  #bettersuno-panel #playlistControls button {
+    min-height: 36px !important;
+    min-width: 36px !important;
+  }
+
+  .playlist-dialog-close {
+    min-width: 44px !important;
+    min-height: 44px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .player-tab-media-toggle {
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+
+  #bettersuno-panel .btn-row-actions button {
+    min-height: 36px !important;
+  }
+
+  /* Prevent iOS zoom on focus: inputs need ≥16px */
+  #bettersuno-panel input,
+  #bettersuno-panel textarea,
+  .create-input,
+  .create-textarea {
+    font-size: 16px !important;
+  }
+
+  /* WS-7: Safe-area polish */
+  .player-tab-buttons {
+    padding-bottom: max(12px, env(safe-area-inset-bottom)) !important;
+  }
+
+  .player-tab-comments-input-area {
+    padding-bottom: max(10px, env(safe-area-inset-bottom)) !important;
+  }
+
+  #bettersuno-download-dialog {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    top: 0 !important;
+    left: 0 !important;
+    transform: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    padding-top: env(safe-area-inset-top) !important;
+    padding-bottom: env(safe-area-inset-bottom) !important;
+  }
+
+  #bettersuno-playlist-dialog {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+  }
+
+}
+
+/* Landscape on mobile: hide album art, prioritise list/controls */
+@media (max-width: 768px) and (orientation: landscape) {
+  #player-tab-art-wrapper {
+    display: none !important;
+  }
+  .player-tab-title {
+    display: none !important;
+  }
+  .player-tab-media-controls {
+    display: none !important;
+  }
+  #player-tab-subtabs {
+    display: none !important;
+  }
+  .player-tab-song {
+    flex-direction: column !important;
+  }
+  .player-tab-view {
+    flex: 1 !important;
+  }
+  #player-tab-view-lyrics {
+    display: flex !important;
+  }
+  #player-tab-view-comments {
+    display: flex !important;
   }
 }
 
@@ -2131,6 +2470,14 @@
   font-family: inherit;
   box-sizing: border-box;
   transition: border-color 150ms ease-out;
+}
+
+@media (max-width: 768px) {
+  .create-input,
+  .create-select,
+  .create-textarea {
+    font-size: 16px !important;
+  }
 }
 
 .create-input:focus,
@@ -2264,6 +2611,9 @@
 .create-persona-btn:hover {
   border-color: var(--bettersuno-accent);
 }
+.create-persona-btn:active {
+  background: #3f3f46;
+}
 .create-persona-btn span {
   display: block;
   overflow: hidden;
@@ -2315,6 +2665,9 @@
 .persona-dialog-close:hover {
   color: var(--bettersuno-text);
 }
+.persona-dialog-close:active {
+  color: var(--bettersuno-accent);
+}
 
 .persona-dialog-body {
   flex: 1;
@@ -2350,6 +2703,9 @@
 .persona-card:hover {
   border-color: var(--bettersuno-accent);
   background: rgba(139, 92, 246, 0.08);
+}
+.persona-card:active {
+  background: rgba(139, 92, 246, 0.2);
 }
 .persona-card-selected {
   border-color: var(--bettersuno-accent);
@@ -2423,4 +2779,8 @@
 .persona-dialog-none-btn:hover,
 .persona-dialog-more-btn:hover {
   border-color: var(--bettersuno-accent);
+}
+.persona-dialog-none-btn:active,
+.persona-dialog-more-btn:active {
+  background: #3f3f46;
 }

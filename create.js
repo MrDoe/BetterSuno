@@ -50,17 +50,17 @@
 
         <div class="create-section">
           <label class="create-label" for="create-title">Song Title</label>
-          <input type="text" id="create-title" class="create-input" placeholder="My Song" maxlength="200" />
+          <input type="text" id="create-title" class="create-input" placeholder="My Song" maxlength="200" inputmode="text" autocomplete="off" />
         </div>
 
         <div class="create-section">
           <label class="create-label" for="create-style">Music Style</label>
-          <textarea id="create-style" class="create-textarea" placeholder="e.g., upbeat pop with synth and female vocals" maxlength="1000"></textarea>
+          <textarea id="create-style" class="create-textarea" placeholder="e.g., upbeat pop with synth and female vocals" maxlength="1000" inputmode="text" autocomplete="off"></textarea>
         </div>
 
         <div class="create-section">
           <label class="create-label" for="create-exclude">Exclude Style</label>
-          <input type="text" id="create-exclude" class="create-input" placeholder="e.g., heavy metal, opera" maxlength="1000" />
+          <input type="text" id="create-exclude" class="create-input" placeholder="e.g., heavy metal, opera" maxlength="1000" inputmode="text" autocomplete="off" />
         </div>
 
         <div class="create-section">

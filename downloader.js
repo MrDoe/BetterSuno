@@ -897,6 +897,13 @@
     const playerTabResolvedUploadedVideoUrlCache = new Map();
     const isAndroidDevice = /Android/i.test(navigator.userAgent || '');
     const isDesktopBrowser = !/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+
+    /* Light haptic feedback on Android (silently ignored elsewhere) */
+    function haptic(ms = 10) {
+        if (isAndroidDevice && navigator.vibrate) {
+            try { navigator.vibrate(ms); } catch (_) { /* noop */ }
+        }
+    }
     const PLAYER_TAB_MEDIA_SWIPE_THRESHOLD_PX = 48;
     const COMMON_EMOJIS = [
         '😀', '😃', '😄', '😁', '😆', '🤣', '😂', '🙂', '🙃', '😉', '😊', '😇',
@@ -1709,9 +1716,11 @@
 
         if (currentPlayingSongId === song.id) {
             if (audioElement.paused) {
+                haptic();
                 audioElement.play();
                 playPauseBtn.textContent = '■';
             } else {
+                haptic();
                 audioElement.pause();
                 playPauseBtn.textContent = '▶';
             }
@@ -1995,6 +2004,7 @@
 
     if (playPauseBtn) {
         playPauseBtn.addEventListener('click', () => {
+            haptic();
             if (audioElement.paused) {
                 audioElement.play();
                 playPauseBtn.textContent = '■';
@@ -4623,6 +4633,7 @@
         applyReactionButtonState(reactionBtn, getSongReactionState(song));
         reactionBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
+            haptic(8);
             const previousReactionState = getSongReactionState(song);
             const nextReactionState = getNextSongReactionState(previousReactionState);
             applyReactionButtonState(reactionBtn, nextReactionState);
@@ -4724,6 +4735,59 @@
         item.appendChild(thumbnail);
         item.appendChild(songInfo);
         item.appendChild(actionsDiv);
+
+        /* ---- Touch gesture recognizer (long-press + swipe, Android) ---- */
+        if (isAndroidDevice) {
+            let gs = { startX: 0, startY: 0, startTime: 0, longPressTimer: null, moved: false };
+
+            const clearGesture = () => {
+                if (gs.longPressTimer) { clearTimeout(gs.longPressTimer); gs.longPressTimer = null; }
+                item.classList.remove('song-item-pressed');
+                gs.moved = false;
+            };
+
+            item.addEventListener('touchstart', (e) => {
+                if (e.touches.length !== 1) return;
+                const t = e.touches[0];
+                gs.startX = t.clientX;
+                gs.startY = t.clientY;
+                gs.startTime = Date.now();
+                gs.moved = false;
+                gs.longPressTimer = setTimeout(() => {
+                    /* Long-press: check the box and enter selection mode */
+                    if (gs.moved) return;
+                    item.classList.add('song-item-pressed');
+                    if (!checkbox.checked) {
+                        checkbox.checked = true;
+                        selectedSongIds.add(song.id);
+                        updateSelectedCount();
+                        /* Scroll the action bar into view if needed */
+                        const sc = document.getElementById('selectControls');
+                        sc?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }
+                }, 500);
+            }, { passive: true });
+
+            item.addEventListener('touchmove', (e) => {
+                if (e.touches.length !== 1) return;
+                const t = e.touches[0];
+                const dx = Math.abs(t.clientX - gs.startX);
+                const dy = Math.abs(t.clientY - gs.startY);
+                if (dx > 10 || dy > 10) {
+                    gs.moved = true;
+                    if (gs.longPressTimer) { clearTimeout(gs.longPressTimer); gs.longPressTimer = null; }
+                    item.classList.remove('song-item-pressed');
+                }
+            }, { passive: true });
+
+            item.addEventListener('touchend', (e) => {
+                clearGesture();
+            }, { passive: true });
+
+            item.addEventListener('touchcancel', () => {
+                clearGesture();
+            }, { passive: true });
+        }
 
         return item;
     }
