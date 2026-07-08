@@ -1919,11 +1919,14 @@
 
         // Show/hide Edit Lyrics button for owned songs
         if (playerTabEditLyricsBtn) {
-            if (!isSongFromOtherArtist(song)) {
+            if (!isSongFromOtherArtist(song) && !isEditingLyrics) {
                 playerTabEditLyricsBtn.style.display = 'block';
             } else {
                 playerTabEditLyricsBtn.style.display = 'none';
             }
+        }
+        if (playerTabLyricsEditActions && !isEditingLyrics) {
+            playerTabLyricsEditActions.style.display = 'none';
         }
 
         const thumbnailUrl = getPlayerTabCoverImageUrl(song);
