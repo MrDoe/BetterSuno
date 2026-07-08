@@ -1325,7 +1325,11 @@
             if (response?.ok && response.data) {
                 renderComments(response.data);
             } else {
-                playerTabCommentsList.innerHTML = `<div class="player-tab-comments-empty">Failed to load comments (${response?.status || 'Error'})</div>`;
+                playerTabCommentsList.textContent = '';
+                const emptyMsg = document.createElement('div');
+                emptyMsg.className = 'player-tab-comments-empty';
+                emptyMsg.textContent = `Failed to load comments (${response?.status || 'Error'})`;
+                playerTabCommentsList.appendChild(emptyMsg);
             }
         } catch (err) {
             console.error('[BetterSuno] loadSongComments error:', err);
@@ -4703,7 +4707,7 @@
         const gotoBtn = document.createElement("button");
         gotoBtn.className = "song-action-btn goto-btn";
         gotoBtn.title = "Open song in new tab";
-        gotoBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 5c-7.633 0-12 7-12 7s4.367 7 12 7 12-7 12-7-4.367-7-12-7zm0 12a5 5 0 1 1 .001-10.001A5 5 0 0 1 12 17zm0-8a3 3 0 1 0 .001 6.001A3 3 0 0 0 12 9z"/></svg>`;
+        gotoBtn.insertAdjacentHTML('beforeend', `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 5c-7.633 0-12 7-12 7s4.367 7 12 7 12-7 12-7-4.367-7-12-7zm0 12a5 5 0 1 1 .001-10.001A5 5 0 0 1 12 17zm0-8a3 3 0 1 0 .001 6.001A3 3 0 0 0 12 9z"/></svg>`);
         gotoBtn.onclick = (e) => {
             e.stopPropagation();
             window.open(`https://suno.com/song/${song.id}`, '_blank', 'noopener');
