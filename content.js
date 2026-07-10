@@ -32,17 +32,17 @@
       <div id="bettersuno-header">
         <h3 id="bettersuno-title">BetterSuno</h3>
       </div>
-      <div id="bettersuno-tabs">
-        <button class="bettersuno-tab active" data-tab="library">Song Library</button>
-        <button class="bettersuno-tab" data-tab="player">Player</button>
-        <button class="bettersuno-tab" data-tab="create">Create</button>
-        <button class="bettersuno-tab" data-tab="notifications">Notifications</button>
-        <button class="bettersuno-tab" data-tab="settings">Settings</button>
+      <div id="bettersuno-tabs" role="tablist" aria-label="Sections">
+        <button class="bettersuno-tab active" data-tab="library" role="tab" aria-selected="true" aria-controls="bettersuno-download-content">Song Library</button>
+        <button class="bettersuno-tab" data-tab="player" role="tab" aria-selected="false" aria-controls="bettersuno-player-content">Player</button>
+        <button class="bettersuno-tab" data-tab="create" role="tab" aria-selected="false" aria-controls="bettersuno-create-content">Create</button>
+        <button class="bettersuno-tab" data-tab="notifications" role="tab" aria-selected="false" aria-controls="bettersuno-list">Notifications</button>
+        <button class="bettersuno-tab" data-tab="settings" role="tab" aria-selected="false" aria-controls="bettersuno-settings-content">Settings</button>
       </div>
-      <div id="bettersuno-list" class="bettersuno-content" style="display: none;">
+      <div id="bettersuno-list" class="bettersuno-content" style="display: none;" role="tabpanel" aria-label="Notifications">
         <div class="bettersuno-empty">No notifications yet</div>
       </div>
-      <div id="bettersuno-download-content" class="bettersuno-content" style="display: flex;">
+      <div id="bettersuno-download-content" class="bettersuno-content" style="display: flex;" role="tabpanel" aria-label="Song Library">
         <div id="bettersuno-downloader-wrapper">
           <div id="songListContainer">
             <div id="playlistControls">
@@ -81,7 +81,7 @@
                 <input type="checkbox" id="filterOffline" /> 💾 Offline
               </label>
               <label style="margin-left: 12px !important">Sort:</label>
-              <select id="sortSelect" style="background:#3f3f46;color:#f4f4f5;border:1px solid #52525b;border-radius:4px;padding:2px 4px;font-size:12px;cursor:pointer">
+              <select id="sortSelect" class="bettersuno-select">
                 <option value="date-desc">Newest</option>
                 <option value="date-asc">Oldest</option>
                 <option value="likes-desc">Most Liked</option>
@@ -122,7 +122,7 @@
                 <label class="checkbox-label">
                   <input type="checkbox" id="downloadImage" checked />Cover Image
                 </label>
-                <hr style="border-color: #3f3f46; margin: 10px 0;" />
+                <hr style="border-color: var(--bettersuno-border); margin: 10px 0;" />
                 <label style="display: block; margin-bottom: 5px; font-weight: bold;">Format:</label>
                 <div id="formatControls" style="display: flex; gap: 6px; align-items: center">
                   <label class="checkbox-label">
@@ -158,13 +158,20 @@
           <div id="versionFooter" class="version-footer"></div>
         </div>
       </div>
-      <div id="bettersuno-create-content" class="bettersuno-content" style="display: none;">
+      <div id="bettersuno-create-content" class="bettersuno-content" style="display: none;" role="tabpanel" aria-label="Create">
         <!-- create.js will populate this -->
       </div>
-      <div id="bettersuno-settings-content" class="bettersuno-content" style="display: none;">
+      <div id="bettersuno-settings-content" class="bettersuno-content" style="display: none;" role="tabpanel" aria-label="Settings">
         <div class="bettersuno-settings-form">
           <div class="bettersuno-setting-row">
             <h4>Notification Settings</h4>
+          </div>
+          <div class="bettersuno-setting-row">
+            <label>Theme:</label>
+            <label class="checkbox-label" style="margin: 0; padding: 0">
+              <input type="checkbox" id="bettersuno-setting-theme" />
+              ☀️ Light mode
+            </label>
           </div>
           <div class="bettersuno-setting-row">
             <label>Polling Interval (seconds):</label>
@@ -204,7 +211,7 @@
           </div>
         </div>
       </div>
-      <div id="bettersuno-player-content" class="bettersuno-content" style="display: none;">
+      <div id="bettersuno-player-content" class="bettersuno-content" style="display: none;" role="tabpanel" aria-label="Player">
         <div class="player-tab-inner">
           <div class="player-tab-no-song" id="player-tab-no-song">
             <div class="player-tab-no-song-icon">♪</div>
@@ -281,9 +288,9 @@
         </div>
       </div>
     </div>
-    <button id="bettersuno-bell" title="BetterSuno">
+    <button id="bettersuno-bell" title="BetterSuno" aria-label="Toggle BetterSuno panel">
       <svg viewBox="0 0 24 24"><path d="m12 17.27 6.18 3.73-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-      <span id="bettersuno-badge">0</span>
+      <span id="bettersuno-badge" aria-live="polite">0</span>
     </button>
   `;
   }
@@ -306,6 +313,11 @@
   const libraryContent = root.querySelector('#bettersuno-download-content');
   const playerContent = root.querySelector('#bettersuno-player-content');
   const createContent = root.querySelector('#bettersuno-create-content');
+
+  const savedTheme = localStorage.getItem('bettersuno-theme');
+  if (savedTheme === 'light') {
+    root.setAttribute('data-bettersuno-theme', 'light');
+  }
 
   const androidFirefoxKeepAliveManager = (() => {
     const KEEPALIVE_AUDIO_ID = 'bettersuno-android-keepalive-audio';
@@ -693,6 +705,11 @@
 
   updateAndroidFirefoxKeepAliveUi();
 
+  function applyTheme(isLight) {
+    root.toggleAttribute('data-bettersuno-theme', isLight);
+    localStorage.setItem('bettersuno-theme', isLight ? 'light' : 'dark');
+  }
+
   function setActiveTab(tabName, activeButton = null) {
     haptic(8);
     currentTab = tabName;
@@ -700,6 +717,7 @@
 
     tabButtons.forEach(button => {
       button.classList.toggle('active', button === activeButton);
+      button.setAttribute('aria-selected', button === activeButton ? 'true' : 'false');
     });
 
     const sections = {
@@ -753,6 +771,18 @@
     }
   });
 
+  // Close panel with Escape key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panelOpen) {
+      const activeDialog = root.querySelector('dialog[open]');
+      if (!activeDialog) {
+        panelOpen = false;
+        panel.classList.remove('open');
+        bell.focus();
+      }
+    }
+  });
+
   // ---- Tab switching ----
   tabButtons.forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -771,6 +801,13 @@
         document.getElementById('bettersuno-setting-interval').value = (state.intervalMs || 120000) / 1000;
         document.getElementById('bettersuno-setting-desktop').checked = state.desktopNotificationsEnabled !== false;
         document.getElementById('bettersuno-setting-android-keepalive').checked = state.androidFirefoxKeepAliveEnabled === true;
+        const savedTheme = localStorage.getItem('bettersuno-theme');
+        const isLight = savedTheme === 'light';
+        const themeCheckbox = document.getElementById('bettersuno-setting-theme');
+        if (themeCheckbox) {
+          themeCheckbox.checked = isLight;
+          applyTheme(isLight);
+        }
         androidFirefoxKeepAliveEnabled = state.androidFirefoxKeepAliveEnabled === true;
         updateAndroidFirefoxKeepAliveUi();
       });
@@ -822,6 +859,14 @@
       }
     });
   });
+
+  // ---- Theme toggle ----
+  const themeCheckbox = document.getElementById('bettersuno-setting-theme');
+  if (themeCheckbox) {
+    themeCheckbox.addEventListener('change', () => {
+      applyTheme(themeCheckbox.checked);
+    });
+  }
 
   // ---- Fetch Songs button ----
   const fetchSongsBtn = root.querySelector('#bettersuno-fetch-songs-btn');

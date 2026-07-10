@@ -193,12 +193,21 @@
             clip.video_cdn_url,
             clip.mp4_url,
             clip.cover_video_url,
+            clip.cover_snapshot_url,
+            clip.video_upload_url,
+            clip.uploaded_video_url,
             clip.metadata?.video_url,
             clip.metadata?.video_cdn_url,
             clip.metadata?.mp4_url,
+            clip.metadata?.cover_snapshot_url,
+            clip.metadata?.video_upload_url,
+            clip.metadata?.uploaded_video_url,
             clip.meta?.video_url,
             clip.meta?.video_cdn_url,
-            clip.meta?.mp4_url
+            clip.meta?.mp4_url,
+            clip.meta?.cover_snapshot_url,
+            clip.meta?.video_upload_url,
+            clip.meta?.uploaded_video_url
         ];
 
         for (const candidate of directCandidates) {

@@ -36,7 +36,7 @@
     const URL_CANDIDATE_KEYS = ['url', 'src', 'image_url', 'image', 'cover_url', 'cover_image_url', 'thumbnail_url', 'artwork_url'];
     const SONG_CLIP_FIELD_PATHS = {
         audio: ['audio_url', 'stream_audio_url', 'song_path'],
-        video: ['video_url', 'video_cdn_url', 'mp4_url', 'metadata.video_url'],
+        video: ['video_url', 'video_cdn_url', 'mp4_url', 'metadata.video_url', 'cover_snapshot_url', 'video_upload_url', 'uploaded_video_url', 'metadata.cover_snapshot_url', 'metadata.video_upload_url', 'metadata.uploaded_video_url'],
         image: ['image_url', 'image', 'image_large_url', 'cover_url', 'cover_image_url', 'thumbnail_url', 'artwork_url', 'metadata.image_url', 'metadata.cover_image_url', 'meta.image_url'],
         lyrics: ['lyrics', 'display_lyrics', 'full_lyrics', 'raw_lyrics', 'prompt', 'metadata.lyrics', 'metadata.prompt', 'meta.lyrics'],
         ownerUserId: ['user_id', 'owner_user_id', 'user.id', 'user.user_id']
@@ -1030,17 +1030,16 @@
             playerTabMediaToggle.style.display = shouldShowButton ? 'inline-flex' : 'none';
 
             const availableModes = getPlayerTabAvailableVideoModes(song);
-            const hasVideo2 = availableModes.includes('video2');
             const mode = playerTabCurrentMediaMode;
 
             if (mode === 'image') {
                 playerTabMediaToggle.textContent = '≫';
-                playerTabMediaToggle.setAttribute('aria-label', 'Show cover video');
-                playerTabMediaToggle.setAttribute('title', 'Show cover video');
-            } else if (mode === 'video' && hasVideo2) {
-                playerTabMediaToggle.textContent = '≫';
                 playerTabMediaToggle.setAttribute('aria-label', 'Show uploaded video');
                 playerTabMediaToggle.setAttribute('title', 'Show uploaded video');
+            } else if (mode === 'video2') {
+                playerTabMediaToggle.textContent = '≫';
+                playerTabMediaToggle.setAttribute('aria-label', 'Show cover video');
+                playerTabMediaToggle.setAttribute('title', 'Show cover video');
             } else {
                 playerTabMediaToggle.textContent = '≪';
                 playerTabMediaToggle.setAttribute('aria-label', 'Show cover image');
@@ -1057,13 +1056,15 @@
             const mode = playerTabCurrentMediaMode;
 
             if (mode === 'image') {
-                playerTabMediaHint.textContent = 'Swipe left to load the cover video.';
+                playerTabMediaHint.textContent = 'Swipe left to load the uploaded video.';
+            } else if (mode === 'video2' && hasVideo2) {
+                playerTabMediaHint.textContent = 'Swipe left for the cover video, right for the cover image.';
+            } else if (mode === 'video2') {
+                playerTabMediaHint.textContent = 'Swipe right to return to the cover image.';
             } else if (mode === 'video' && hasVideo2) {
-                playerTabMediaHint.textContent = 'Swipe left for uploaded video, right for cover image.';
-            } else if (mode === 'video') {
-                playerTabMediaHint.textContent = 'Swipe right to return to the cover image.';
+                playerTabMediaHint.textContent = 'Swipe right for the uploaded video, left for the cover image.';
             } else {
-                playerTabMediaHint.textContent = 'Swipe right to return to the cover image.';
+                playerTabMediaHint.textContent = 'Swipe to return to the cover image.';
             }
         }
 
@@ -1108,7 +1109,7 @@
 
     function cyclePlayerTabMediaModeForward() {
         const song = playerTabCurrentSong;
-        const sequence = ['image', 'video', 'video2'];
+        const sequence = ['image', 'video2', 'video'];
         const currentIdx = sequence.indexOf(playerTabCurrentMediaMode);
         const availableModes = getPlayerTabAvailableVideoModes(song);
         const hasVideo2 = availableModes.includes('video2');
@@ -1129,7 +1130,7 @@
 
     function cyclePlayerTabMediaModeBackward() {
         const song = playerTabCurrentSong;
-        const sequence = ['image', 'video', 'video2'];
+        const sequence = ['image', 'video2', 'video'];
         const currentIdx = sequence.indexOf(playerTabCurrentMediaMode);
         const availableModes = getPlayerTabAvailableVideoModes(song);
         const hasVideo2 = availableModes.includes('video2');
@@ -1197,7 +1198,7 @@
         playerTabLyricsEdit.value = song?.lyrics || '';
         playerTabLyrics.style.display = 'none';
         playerTabLyricsEdit.style.display = 'block';
-        playerTabLyricsEditActions.style.display = 'flex';
+        playerTabLyricsEditActions.classList.add('visible');
         playerTabEditLyricsBtn.style.display = 'none';
         playerTabLyricsEdit.focus();
     }
@@ -1207,7 +1208,7 @@
         isEditingLyrics = false;
         playerTabLyrics.style.display = '';
         playerTabLyricsEdit.style.display = 'none';
-        playerTabLyricsEditActions.style.display = 'none';
+        playerTabLyricsEditActions.classList.remove('visible');
         const song = playerTabCurrentSong;
         if (song && !isSongFromOtherArtist(song)) {
             playerTabEditLyricsBtn.style.display = 'block';
@@ -1718,7 +1719,7 @@
             if (audioElement.paused) {
                 haptic();
                 audioElement.play();
-                playPauseBtn.textContent = '■';
+                playPauseBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
             } else {
                 haptic();
                 audioElement.pause();
@@ -1781,7 +1782,7 @@
             });
             miniPlayer.style.display = 'block';
             playerTitle.textContent = song.title || 'Untitled';
-            playPauseBtn.textContent = '■';
+            playPauseBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
 
             updatePlayerTabUi(song);
             refreshVisibleSongPlaybackState();
@@ -1861,8 +1862,6 @@
             playerTabVideo.loop = true;
             playerTabVideo.playsInline = true;
             playerTabVideo.poster = posterUrl || '';
-            playerTabVideo.src = src;
-            playerTabVideo.style.display = 'block';
             playerTabVideo.onerror = () => {
                 showNoMedia();
             };
@@ -1874,12 +1873,9 @@
                     });
                 }
             };
-            const initialPlayPromise = playerTabVideo.play();
-            if (initialPlayPromise && typeof initialPlayPromise.catch === 'function') {
-                initialPlayPromise.catch(() => {
-                    // loadeddata may still trigger playback.
-                });
-            }
+            playerTabVideo.src = src;
+            playerTabVideo.style.display = 'block';
+            playerTabVideo.load();
         };
 
         if (!song) {
@@ -1926,7 +1922,7 @@
             }
         }
         if (playerTabLyricsEditActions && !isEditingLyrics) {
-            playerTabLyricsEditActions.style.display = 'none';
+            playerTabLyricsEditActions.classList.remove('visible');
         }
 
         const thumbnailUrl = getPlayerTabCoverImageUrl(song);
@@ -1945,7 +1941,8 @@
 
             // Resolve cover videos from the Suno song page when user switches to a video mode
             // and the needed URL isn't available yet.
-            const needsResolution = (playerTabCurrentMediaMode === 'video' && !videoUrl && !cachedResolvedVideoUrl)
+            const needsResolution =
+                (playerTabCurrentMediaMode === 'video' && !cachedUploadedVideoUrl)
                 || (playerTabCurrentMediaMode === 'video2' && !videoUrl && !cachedUploadedVideoUrl);
 
             if (needsResolution && song.id) {
@@ -1978,7 +1975,9 @@
 
                         if (resolvedUrl) {
                             updatePlayerTabMediaControls(song);
-                            showVideo(resolvedUrl, thumbnailUrl);
+                            if (!playerTabVideo || resolvedUrl !== playerTabVideo.getAttribute('src')) {
+                                showVideo(resolvedUrl, thumbnailUrl);
+                            }
                         } else if (playerTabCurrentMediaMode === 'video2') {
                             // No uploaded video found, cycle back to cover image
                             setPlayerTabMediaMode('image');
@@ -4841,17 +4840,29 @@
             item.classList.toggle('playing', isCurrent);
             const playBtn = item.querySelector('.play-btn');
             if (playBtn) {
-                playBtn.textContent = (isCurrent && !isPaused) ? '⏸' : '▶';
+                if (isCurrent && !isPaused) {
+                    playBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
+                } else {
+                    playBtn.textContent = '▶';
+                }
             }
         });
 
         // Sync player tab play/pause button
         if (playerTabPlayPause) {
-            playerTabPlayPause.textContent = (!isPaused && currentPlayingSongId) ? '⏸' : '▶';
+            if (!isPaused && currentPlayingSongId) {
+                playerTabPlayPause.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
+            } else {
+                playerTabPlayPause.textContent = '▶';
+            }
         }
         // Sync mini-player play/pause button
         if (playPauseBtn) {
-            playPauseBtn.textContent = (!isPaused && currentPlayingSongId) ? '■' : '▶';
+            if (!isPaused && currentPlayingSongId) {
+                playPauseBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
+            } else {
+                playPauseBtn.textContent = '▶';
+            }
         }
     }
 

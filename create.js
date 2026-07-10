@@ -54,6 +54,11 @@
         </div>
 
         <div class="create-section">
+          <label class="create-label" for="create-lyrics">Lyrics</label>
+          <textarea id="create-lyrics" class="create-textarea" placeholder="[Verse]\nYour lyrics here...\n\n[Chorus]\nMore lyrics..." rows="10" maxlength="5000"></textarea>
+        </div>
+
+        <div class="create-section">
           <label class="create-label" for="create-style">Music Style</label>
           <textarea id="create-style" class="create-textarea" placeholder="e.g., upbeat pop with synth and female vocals" maxlength="1000" inputmode="text" autocomplete="off"></textarea>
         </div>
@@ -61,11 +66,6 @@
         <div class="create-section">
           <label class="create-label" for="create-exclude">Exclude Style</label>
           <input type="text" id="create-exclude" class="create-input" placeholder="e.g., heavy metal, opera" maxlength="1000" inputmode="text" autocomplete="off" />
-        </div>
-
-        <div class="create-section">
-          <label class="create-label" for="create-lyrics">Lyrics</label>
-          <textarea id="create-lyrics" class="create-textarea" placeholder="[Verse]\nYour lyrics here...\n\n[Chorus]\nMore lyrics..." rows="10" maxlength="5000"></textarea>
         </div>
 
         <div class="create-section">

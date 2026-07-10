@@ -3397,12 +3397,21 @@ function extractVideoUrlFromClip(clip) {
     clip.video_cdn_url,
     clip.mp4_url,
     clip.cover_video_url,
+    clip.cover_snapshot_url,
+    clip.video_upload_url,
+    clip.uploaded_video_url,
     clip.metadata?.video_url,
     clip.metadata?.video_cdn_url,
     clip.metadata?.mp4_url,
+    clip.metadata?.cover_snapshot_url,
+    clip.metadata?.video_upload_url,
+    clip.metadata?.uploaded_video_url,
     clip.meta?.video_url,
     clip.meta?.video_cdn_url,
-    clip.meta?.mp4_url
+    clip.meta?.mp4_url,
+    clip.meta?.cover_snapshot_url,
+    clip.meta?.video_upload_url,
+    clip.meta?.uploaded_video_url
   ];
 
   for (const candidate of directCandidates) {
@@ -4144,6 +4153,29 @@ function extractCoverVideosFromHtml(html, songId = '') {
       }
     }
   }
+
+  // Extract video URLs from <script> JSON payloads (Next.js __NEXT_DATA__ etc.)
+  // Suno's SSR song page embeds video URLs in JSON, not in <source>/<video> tags.
+  const jsonPayloads = extractJsonPayloadsFromHtml(html);
+  const collectVideoUrlsFromJson = (node, depth = 0) => {
+    if (!node || typeof node !== 'object' || depth > 6) return;
+    if (Array.isArray(node)) {
+      node.forEach(item => collectVideoUrlsFromJson(item, depth + 1));
+      return;
+    }
+    for (const value of Object.values(node)) {
+      if (typeof value === 'string' && /^https?:\/\/[^\s"']+\.(?:mp4|webm|mov|m4v)(?:\?[^\s"']*)?$/i.test(value)) {
+        const decoded = value.replace(/&amp;/g, '&');
+        if (!seen.has(decoded)) {
+          seen.add(decoded);
+          urls.push(decoded);
+        }
+      } else if (value && typeof value === 'object') {
+        collectVideoUrlsFromJson(value, depth + 1);
+      }
+    }
+  };
+  jsonPayloads.forEach(payload => collectVideoUrlsFromJson(payload));
 
   if (urls.length === 0) {
     result.processed = derivedProcessedUrl;

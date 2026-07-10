@@ -1,6 +1,6 @@
 {
   "name": "bettersuno",
-  "version": "2.2.5",
+  "version": "2.2.6",
   "description": "Enhanced Suno.com experience with notifications and song downloads",
   "scripts": {
     "build": "node build.js",
