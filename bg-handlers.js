@@ -657,9 +657,9 @@ function handleResolveSongCoverVideo(msg, sender, sendResponse, ctx) {
       if (!response.ok) { sendResponse({ ok: false, status: response.status, error: `Song page request failed (${response.status})` }); return; }
       const html = await response.text();
       const videos = ctx.extractCoverVideosFromHtml(html, songId);
-      const videoUrl = videos.processed || videos.uploaded || null;
+      const videoUrl = videos.lyric || videos.coverArt || videos.uploaded || null;
       if (!videoUrl) { sendResponse({ ok: false, status: response.status, error: 'No cover video URL found on song page' }); return; }
-      sendResponse({ ok: true, status: response.status, videoUrl, processedVideoUrl: videos.processed || null, uploadedVideoUrl: videos.uploaded || null });
+      sendResponse({ ok: true, status: response.status, videoUrl, lyricVideoUrl: videos.lyric || null, coverArtVideoUrl: videos.coverArt || null, uploadedVideoUrl: videos.uploaded || null, processedVideoUrl: videos.lyric || null });
     } catch (e) {
       sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
     }

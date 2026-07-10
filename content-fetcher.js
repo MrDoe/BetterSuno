@@ -192,7 +192,7 @@
             clip.video_url,
             clip.video_cdn_url,
             clip.mp4_url,
-            clip.cover_video_url,
+            clip.video_cover_url,
             clip.cover_snapshot_url,
             clip.video_upload_url,
             clip.uploaded_video_url,

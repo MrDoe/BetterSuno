@@ -137,7 +137,14 @@
     "maxContentChars": 4000
   },
   "mcp": {
-    "enabled": true
+    "enabled": true,
+    "servers": {
+      "firefox-devtools": {
+        "command": "npx",
+        "args": ["-y", "@mozilla/firefox-devtools-mcp@latest", "--headless", "--viewport", "1280x720", "--profilePath", "/home/christoph/.mozilla/firefox/enpsbzb4.default-release-1753257853777", "--startUrl", "https://suno.com"],
+        "env": {}
+      }
+    }
   },
   "logging": {
     "level": "info",

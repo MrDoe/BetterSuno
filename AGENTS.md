@@ -44,7 +44,17 @@
 
 ## Song Data Model (normalized)
 
-Fields in `normalizeSongClip()`: `id`, `title`, `audio_url`, `video_url`, `image_url`, `lyrics`, `is_public`, `created_at`, `reaction_state`, `is_liked`, `is_stem`, `upvote_count`, `owner_user_id`, `owner_handle`, `owner_display_name`, `is_owned_by_current_user`.
+Fields in `normalizeSongClip()`: `id`, `title`, `audio_url`, `video_url`, `video_cover_url`, `image_url`, `lyrics`, `is_public`, `created_at`, `reaction_state`, `is_liked`, `is_stem`, `upvote_count`, `owner_user_id`, `owner_handle`, `owner_display_name`, `is_owned_by_current_user`.
+
+### Media Toggle Modes (Player tab)
+
+The player tab can toggle between the following media modes:
+| Mode | Source | Description |
+|------|--------|-------------|
+| `image` | `image_url` / `image_large_url` | Static cover image |
+| `lyric` | `video_url` or `{songId}.mp4` / `video_gen_{uuid}_processed_video.mp4` | Generated video with lyrics |
+| `cover_art` | `video_cover_url` or `video_upload_{uuid}_processed_video.mp4` | Video from "Generate Cover Art" feature |
+| `uploaded` | Resolved from song page HTML | User-uploaded video (lazy-resolved) |
 
 ## IndexedDB Stores
 
@@ -99,6 +109,32 @@ Also set `metadata.can_control_sliders` to an array of the slider keys used.
 }
 ```
 
+## Firefox DevTools MCP
+
+The project uses `@mozilla/firefox-devtools-mcp` for browser automation (configured in `.opencode/opencode.json`).
+
+| Setup | Detail |
+|-------|--------|
+| Command | `npx -y @mozilla/firefox-devtools-mcp@latest --connect-existing --viewport 1280x720` |
+| Mode | `--connect-existing` connects to a Firefox instance already running with `--remote-debugging-port 9222` |
+| Profile | Uses `$HOME/.mozilla/firefox/...default-release` — **not** isolated (uses the real user profile) |
+| Launch | Start Firefox manually: `firefox --remote-debugging-port 9222 "https://suno.com"` |
+
+### Common Tasks
+
+- **List tabs**: `firefox-devtools_list_pages`
+- **Navigate**: `firefox-devtools_navigate_page(url)`
+- **Inspect DOM**: `firefox-devtools_take_snapshot(maxLines, selector)`
+- **Capture screenshot**: `firefox-devtools_screenshot_page(saveTo)`
+- **Inspect network**: `firefox-devtools_list_network_requests(urlContains, detail)` then `firefox-devtools_get_network_request(id, format)`
+- **Read console**: `firefox-devtools_list_console_messages(level)`
+- **Change viewport**: `firefox-devtools_set_viewport_size(width, height)`
+
+### Troubleshooting
+
+- If MCP server won't start, ensure Firefox is already running with `--remote-debugging-port 9222`
+- To restart with different config: `firefox-devtools_restart_firefox(firefoxPath, headless, prefs, env)`
+
 ## Notable Quirks
 
 - `content-idb.js` (frontend IDB) and `idb-store.js` (background IDB) both use the same DB name but are separate wrappers — they coexist in different JS contexts.
@@ -119,4 +155,15 @@ ALWAYS use OpenCodeRAG tools before reading or editing:
 - **Images via describe** — `describe_image(filePath)` — never read raw bytes
 
 If no results, run `opencode-rag index`.
+
+## Browser-level inspection
+
+When analyzing Suno.com behavior, use the **firefox-devtools** MCP tools instead of static code search:
+- **Network requests**: `firefox-devtools_list_network_requests(urlContains, detail)` to find API calls, then `firefox-devtools_get_network_request(id, format)` for full request/response details
+- **DOM structure**: `firefox-devtools_take_snapshot(maxLines, selector)` for live page DOM
+- **Screenshots**: `firefox-devtools_screenshot_page(saveTo)` for visual verification
+- **Console logs**: `firefox-devtools_list_console_messages(level)` for runtime debug output
+- **Page navigation**: `firefox-devtools_navigate_page(url)` to load specific Suno pages
+
+See the Firefox DevTools MCP section above for setup and troubleshooting.
 <!-- END opencode-rag -->

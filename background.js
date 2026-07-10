@@ -2566,13 +2566,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         const html = await response.text();
         const videos = extractCoverVideosFromHtml(html, songId);
-        const videoUrl = videos.processed || videos.uploaded || null;
+        const videoUrl = videos.lyric || videos.coverArt || videos.uploaded || null;
         if (!videoUrl) {
           sendResponse({ ok: false, status: response.status, error: 'No cover video URL found on song page' });
           return;
         }
 
-        sendResponse({ ok: true, status: response.status, videoUrl, processedVideoUrl: videos.processed || null, uploadedVideoUrl: videos.uploaded || null });
+        sendResponse({ ok: true, status: response.status, videoUrl, lyricVideoUrl: videos.lyric || null, coverArtVideoUrl: videos.coverArt || null, uploadedVideoUrl: videos.uploaded || null, processedVideoUrl: videos.lyric || null });
       } catch (e) {
         sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
       }
@@ -3396,7 +3396,7 @@ function extractVideoUrlFromClip(clip) {
     clip.video_url,
     clip.video_cdn_url,
     clip.mp4_url,
-    clip.cover_video_url,
+    clip.video_cover_url,
     clip.cover_snapshot_url,
     clip.video_upload_url,
     clip.uploaded_video_url,
@@ -4124,7 +4124,7 @@ function findUuidLikeId(obj) {
 }
 
 function extractCoverVideosFromHtml(html, songId = '') {
-  const result = { processed: null, uploaded: null };
+  const result = { lyric: null, coverArt: null, uploaded: null, processed: null };
   if (typeof html !== 'string' || !html.trim()) {
     return result;
   }
@@ -4155,7 +4155,6 @@ function extractCoverVideosFromHtml(html, songId = '') {
   }
 
   // Extract video URLs from <script> JSON payloads (Next.js __NEXT_DATA__ etc.)
-  // Suno's SSR song page embeds video URLs in JSON, not in <source>/<video> tags.
   const jsonPayloads = extractJsonPayloadsFromHtml(html);
   const collectVideoUrlsFromJson = (node, depth = 0) => {
     if (!node || typeof node !== 'object' || depth > 6) return;
@@ -4177,49 +4176,66 @@ function extractCoverVideosFromHtml(html, songId = '') {
   };
   jsonPayloads.forEach(payload => collectVideoUrlsFromJson(payload));
 
-  if (urls.length === 0) {
-    result.processed = derivedProcessedUrl;
-    return result;
-  }
-
   const normalizedSongId = String(songId || '').trim().toLowerCase();
-  const scoreUrl = (url) => {
-    const normalized = String(url || '').toLowerCase();
-    let score = 0;
 
-    if (normalizedSongId) {
-      if (normalized.includes(normalizedSongId)) score += 220;
-      if (normalized.includes(`video_gen_${normalizedSongId}`)) score += 120;
+  // Classify URLs into categories
+  const lyricUrls = [];
+  const coverArtUrls = [];
+  const uploadedUrls = [];
+
+  for (const url of urls) {
+    const normalized = String(url || '').toLowerCase();
+    const isSongIdUrl = normalizedSongId && normalized.includes(normalizedSongId);
+    const isVideoGen = normalized.includes('video_gen_');
+    const isVideoUpload = normalized.includes('video_upload_');
+    const isProcessedVideo = normalized.includes('processed_video');
+
+    // Lyric video: {songId}.mp4 or video_gen_{uuid}_processed_video.mp4 (NOT video_upload_)
+    if (isSongIdUrl && normalized.endsWith('.mp4') && !isVideoUpload) {
+      lyricUrls.push(url);
+    } else if (isVideoGen && isProcessedVideo && !isVideoUpload) {
+      lyricUrls.push(url);
     }
 
-    if (normalized.includes('processed_video')) score += 100;
-    if (normalized.includes('video_gen_')) score += 60;
-    if (normalized.includes('.mp4')) score += 10;
-
-    return score;
-  };
-
-  urls.sort((a, b) => scoreUrl(b) - scoreUrl(a));
-
-  const bestUrl = urls[0] || null;
-
-  result.processed = derivedProcessedUrl || (bestUrl && !/[?&]type=upload/i.test(bestUrl)
-    ? bestUrl
-    : null);
-
-  const normalizedBest = String(bestUrl || '').toLowerCase();
-  const uploadedCandidates = urls.filter(u => {
-    const normalized = String(u || '').toLowerCase();
-    return normalized !== normalizedBest &&
-      (normalized.includes('video_upload') || normalized.includes('cover_snapshot'));
-  });
-
-  uploadedCandidates.sort((a, b) => scoreUrl(b) - scoreUrl(a));
-  result.uploaded = uploadedCandidates[0] || null;
-
-  if (result.processed && result.uploaded && result.processed === result.uploaded) {
-    result.uploaded = null;
+    // Cover art / uploaded: video_upload_{uuid}_processed_video.mp4
+    if (isVideoUpload && isProcessedVideo) {
+      if (isSongIdUrl) {
+        lyricUrls.push(url);
+      } else if (lyricUrls.length > 0) {
+        coverArtUrls.push(url);
+      } else {
+        uploadedUrls.push(url);
+      }
+    }
   }
+
+  // Deduplicate: if a URL appears in multiple categories, prefer lyric > coverArt > uploaded
+  const allVideoUrls = new Set();
+  const dedupe = (arr) => arr.filter(u => { if (allVideoUrls.has(u)) return false; allVideoUrls.add(u); return true; });
+
+  result.lyric = dedupe(lyricUrls)[0] || derivedProcessedUrl || null;
+  result.coverArt = dedupe(coverArtUrls)[0] || null;
+  result.uploaded = dedupe(uploadedUrls)[0] || null;
+
+  // If no lyric video from JSON patterns, try the scores-based fallback
+  if (!result.lyric && !result.coverArt && !result.uploaded && urls.length > 0) {
+    const scoreUrl = (url) => {
+      const normalized = String(url || '').toLowerCase();
+      let score = 0;
+      if (normalizedSongId) {
+        if (normalized.includes(normalizedSongId)) score += 220;
+        if (normalized.includes(`video_gen_${normalizedSongId}`)) score += 120;
+      }
+      if (normalized.includes('processed_video')) score += 100;
+      if (normalized.includes('video_gen_')) score += 60;
+      if (normalized.includes('.mp4')) score += 10;
+      return score;
+    };
+    urls.sort((a, b) => scoreUrl(b) - scoreUrl(a));
+    result.lyric = urls[0] || null;
+  }
+
+  result.processed = result.lyric || result.coverArt || result.uploaded || null;
 
   return result;
 }
@@ -4270,6 +4286,52 @@ function extractJsonPayloadsFromHtml(html) {
         // ignore invalid JSON blobs embedded in HTML
       }
     }
+  }
+
+  // RSC payload: self.__next_f.push([1, "...escaped chunks..."])
+  // Use non-greedy match from [1, to ]) with proper JSON string escaping
+  let searchIdx = 0;
+  while (true) {
+    const startTag = '__next_f.push([1,';
+    const start = html.indexOf(startTag, searchIdx);
+    if (start === -1) break;
+    const strStart = html.indexOf('"', start + startTag.length);
+    if (strStart === -1) { searchIdx = start + 1; continue; }
+    // Find the closing quote of the JSON string, handling backslash-escaped quotes
+    let strEnd = strStart;
+    while (true) {
+      strEnd = html.indexOf('"', strEnd + 1);
+      if (strEnd === -1) break;
+      // Check if this quote is escaped
+      let backslashCount = 0;
+      for (let i = strEnd - 1; i >= 0 && html[i] === '\\'; i--) backslashCount++;
+      if (backslashCount % 2 === 0) break; // Even backslashes = unescaped quote
+    }
+    if (strEnd === -1) { searchIdx = start + 1; continue; }
+    const closeBracket = html.indexOf('])', strEnd + 1);
+    if (closeBracket === -1 || closeBracket > start + 60000) { searchIdx = strEnd + 1; continue; }
+    
+    try {
+      const rawStr = JSON.parse(html.slice(strStart, strEnd + 1));
+      if (typeof rawStr !== 'string') { searchIdx = closeBracket + 1; continue; }
+      const lines = rawStr.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const colonIdx = trimmed.indexOf(':');
+        if (colonIdx === -1) continue;
+        const jsonStr = trimmed.slice(colonIdx + 1);
+        if (!jsonStr) continue;
+        try {
+          payloads.push(JSON.parse(jsonStr));
+        } catch (e) {
+          // Ignore non-JSON RSC chunks
+        }
+      }
+    } catch (e) {
+      // Ignore malformed RSC payloads
+    }
+    searchIdx = closeBracket + 1;
   }
 
   return payloads;
