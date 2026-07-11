@@ -1333,8 +1333,8 @@
 
 #bettersuno-panel .song-actions {
   display: flex !important;
-  gap: 4px !important;
-  margin-left: 8px !important;
+  gap: 2px !important;
+  margin-left: 4px !important;
   flex-shrink: 0 !important;
 }
 
@@ -1343,13 +1343,13 @@
   border: 1px solid var(--bettersuno-border) !important;
   border-radius: 4px !important;
   color: var(--bettersuno-text) !important;
-  width: 28px !important;
-  height: 28px !important;
+  width: 26px !important;
+  height: 26px !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
   cursor: pointer !important;
-  font-size: 14px !important;
+  font-size: 13px !important;
   padding: 0 !important;
   transition: all 0.2s !important;
   touch-action: manipulation !important;
@@ -1793,7 +1793,7 @@
 /* Playlist selector row */
 #bettersuno-panel #playlistControls {
   display: flex !important;
-  gap: 8px !important;
+  gap: 6px !important;
   margin-bottom: 6px !important;
   align-items: center !important;
   padding: 8px 10px !important;
@@ -1802,6 +1802,7 @@
   color: var(--bettersuno-text) !important;
   font-size: 12px !important;
   flex-wrap: nowrap !important;
+  line-height: 1 !important;
 }
 
 #bettersuno-panel #playlistFilter {
