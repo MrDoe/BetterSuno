@@ -116,24 +116,39 @@ The project uses `@mozilla/firefox-devtools-mcp` for browser automation (configu
 | Setup | Detail |
 |-------|--------|
 | Command | `npx -y @mozilla/firefox-devtools-mcp@latest --connect-existing --viewport 1280x720` |
-| Mode | `--connect-existing` connects to a Firefox instance already running with `--remote-debugging-port 9222` |
+| Mode | `--connect-existing` connects to a Firefox instance already running with `--marionette` (port 2828) |
 | Profile | Uses `$HOME/.mozilla/firefox/...default-release` — **not** isolated (uses the real user profile) |
-| Launch | Start Firefox manually: `firefox --remote-debugging-port 9222 "https://suno.com"` |
+| Launch | Start Firefox manually: `firefox --marionette "https://suno.com"` |
 
 ### Common Tasks
 
 - **List tabs**: `firefox-devtools_list_pages`
-- **Navigate**: `firefox-devtools_navigate_page(url)`
+- **Navigate**: `firefox-devtools_navigate_page(url)` — note: `about:` URLs cause errors
 - **Inspect DOM**: `firefox-devtools_take_snapshot(maxLines, selector)`
 - **Capture screenshot**: `firefox-devtools_screenshot_page(saveTo)`
-- **Inspect network**: `firefox-devtools_list_network_requests(urlContains, detail)` then `firefox-devtools_get_network_request(id, format)`
-- **Read console**: `firefox-devtools_list_console_messages(level)`
+- **Inspect network**: `firefox-devtools_list_network_requests(urlContains, detail)` then `firefox-devtools_get_network_request(id, format)` — **requires BiDi mode** (not available with `--connect-existing`)
+- **Read console**: `firefox-devtools_list_console_messages(level)` — **requires BiDi mode** (not available with `--connect-existing`)
 - **Change viewport**: `firefox-devtools_set_viewport_size(width, height)`
 
 ### Troubleshooting
 
-- If MCP server won't start, ensure Firefox is already running with `--remote-debugging-port 9222`
-- To restart with different config: `firefox-devtools_restart_firefox(firefoxPath, headless, prefs, env)`
+- If MCP server won't start, ensure Firefox is already running with `--marionette` (port 2828)
+- If tools time out or return MCP errors, kill stale MCP server processes: `pkill -f "firefox-devtools-mcp"`, then restart the MCP from OpenCode's `/mcp` UI
+- If the MCP tools disappear from the agent's tool list, the MCP server process was killed — restart it from OpenCode's `/mcp` UI
+- BiDi features (console messages, network requests) are **not available** in `--connect-existing` mode; use `--headless` mode (without `--connect-existing`) for those features
+- `about:` URLs (like `about:debugging`) cause `navigate_page` errors — select an existing tab instead
+- After code changes: `node build.js` then reload the extension in `about:debugging#/runtime/this-firefox`
+- The RAG index (`opencode-rag`) can be stale — always use `read` to verify actual source code when RAG shows old mode names or patterns
+
+## Player Tab Video Mode Cycle
+
+The player tab cycles `image → lyric → cover_art → uploaded` in `cyclePlayerTabMediaModeForward/Backward`. Two critical bugs were fixed:
+
+1. **Cached URL chicken-and-egg**: The cycle functions only advanced to modes listed in `getPlayerTabAvailableVideoModes()`, but `cover_art` and `uploaded` modes couldn't appear there until after resolution (which only triggers after entering the mode). **Fix**: allow cycling into `cover_art`/`uploaded` even without cached URL, as long as `song.id` exists — resolution triggers on mode switch.
+
+2. **Cover art URL classification in HTML fallback**: `extractCoverVideosFromHtml` in `background.js` collects video URLs from JSON payloads on the song page using `Object.values()`, which discards field names. A `video_cover_url` value (`video_upload_{uuid}_processed_video.mp4`) was indistinguishable from `video_url`. The pattern-based classification could only classify `video_upload_*` URLs as `coverArt` if a `lyricUrls` entry already existed (order-dependent), or misclassify as `uploaded`. **Fix**: use `Object.entries()` and check field key against `COVER_FIELD_RE` / `LYRIC_FIELD_RE` regex — `video_cover_url` values go directly to `coverArtUrls`, `video_url` to `lyricUrls`.
+
+3. **No fallback for cover_art after failed resolution**: `updatePlayerTabUi` only had a fallback to `image` mode for `uploaded`; added the same fallback for `cover_art`.
 
 ## Notable Quirks
 

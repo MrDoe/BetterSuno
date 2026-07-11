@@ -4155,22 +4155,35 @@ function extractCoverVideosFromHtml(html, songId = '') {
   }
 
   // Extract video URLs from <script> JSON payloads (Next.js __NEXT_DATA__ etc.)
+  // Track field names so video_cover_url → coverArt, video_url → lyric, etc.
   const jsonPayloads = extractJsonPayloadsFromHtml(html);
-  const collectVideoUrlsFromJson = (node, depth = 0) => {
+  const coverArtUrls = [];
+  const lyricUrls = [];
+  const uploadedUrls = [];
+  const VIDEO_URL_RE = /^https?:\/\/[^\s"']+\.(?:mp4|webm|mov|m4v)(?:\?[^\s"']*)?$/i;
+  const COVER_FIELD_RE = /video_cover_url|cover_video|coverart/i;
+  const LYRIC_FIELD_RE = /^video_url$|lyric.*video|video_lyric/i;
+
+  const collectVideoUrlsFromJson = (node, depth = 0, parentKey = '') => {
     if (!node || typeof node !== 'object' || depth > 6) return;
     if (Array.isArray(node)) {
-      node.forEach(item => collectVideoUrlsFromJson(item, depth + 1));
+      node.forEach(item => collectVideoUrlsFromJson(item, depth + 1, parentKey));
       return;
     }
-    for (const value of Object.values(node)) {
-      if (typeof value === 'string' && /^https?:\/\/[^\s"']+\.(?:mp4|webm|mov|m4v)(?:\?[^\s"']*)?$/i.test(value)) {
+    for (const [key, value] of Object.entries(node)) {
+      if (typeof value === 'string' && VIDEO_URL_RE.test(value)) {
         const decoded = value.replace(/&amp;/g, '&');
-        if (!seen.has(decoded)) {
+        const keyLower = String(key || '').toLowerCase();
+        if (COVER_FIELD_RE.test(keyLower)) {
+          if (!coverArtUrls.includes(decoded)) coverArtUrls.push(decoded);
+        } else if (LYRIC_FIELD_RE.test(keyLower)) {
+          if (!lyricUrls.includes(decoded)) lyricUrls.push(decoded);
+        } else if (!seen.has(decoded)) {
           seen.add(decoded);
           urls.push(decoded);
         }
       } else if (value && typeof value === 'object') {
-        collectVideoUrlsFromJson(value, depth + 1);
+        collectVideoUrlsFromJson(value, depth + 1, key);
       }
     }
   };
@@ -4178,11 +4191,7 @@ function extractCoverVideosFromHtml(html, songId = '') {
 
   const normalizedSongId = String(songId || '').trim().toLowerCase();
 
-  // Classify URLs into categories
-  const lyricUrls = [];
-  const coverArtUrls = [];
-  const uploadedUrls = [];
-
+  // Classify URLs from <video>/<source> tags and untyped JSON fields into categories
   for (const url of urls) {
     const normalized = String(url || '').toLowerCase();
     const isSongIdUrl = normalizedSongId && normalized.includes(normalizedSongId);

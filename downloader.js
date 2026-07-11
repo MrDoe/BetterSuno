@@ -1051,22 +1051,31 @@
             const shouldShowButton = !isAndroidDevice && canToggleVideo;
             playerTabMediaToggle.style.display = shouldShowButton ? 'inline-flex' : 'none';
 
-            const availableModes = getPlayerTabAvailableVideoModes(song);
+            const sequence = ['image', 'lyric', 'cover_art', 'uploaded'];
             const mode = playerTabCurrentMediaMode;
+            const currentIdx = sequence.indexOf(mode);
 
-            if (mode === 'image' && availableModes.length > 1) {
-                const next = availableModes[1] || 'image';
+            let nextIdx = currentIdx + 1;
+            if (nextIdx >= sequence.length) nextIdx = 0;
+            while (nextIdx !== currentIdx && sequence[nextIdx] === 'image') {
+                nextIdx++;
+                if (nextIdx >= sequence.length) nextIdx = 0;
+            }
+            const hasNext = nextIdx !== currentIdx && song?.id;
+            const nextMode = hasNext ? sequence[nextIdx] : 'image';
+
+            if (mode !== 'image' && hasNext) {
                 playerTabMediaToggle.textContent = '≫';
-                playerTabMediaToggle.setAttribute('aria-label', 'Show ' + MEDIA_BUTTON_TITLES[next]);
-                playerTabMediaToggle.setAttribute('title', 'Show ' + MEDIA_BUTTON_TITLES[next]);
+                playerTabMediaToggle.setAttribute('aria-label', 'Show ' + MEDIA_BUTTON_TITLES[nextMode]);
+                playerTabMediaToggle.setAttribute('title', 'Show ' + MEDIA_BUTTON_TITLES[nextMode]);
             } else if (mode !== 'image') {
                 playerTabMediaToggle.textContent = '≪';
                 playerTabMediaToggle.setAttribute('aria-label', 'Show ' + MEDIA_BUTTON_TITLES.image);
                 playerTabMediaToggle.setAttribute('title', 'Show ' + MEDIA_BUTTON_TITLES.image);
             } else {
                 playerTabMediaToggle.textContent = '≫';
-                playerTabMediaToggle.setAttribute('aria-label', 'Show video');
-                playerTabMediaToggle.setAttribute('title', 'Show video');
+                playerTabMediaToggle.setAttribute('aria-label', 'Show ' + (hasNext ? MEDIA_BUTTON_TITLES[nextMode] : 'video'));
+                playerTabMediaToggle.setAttribute('title', 'Show ' + (hasNext ? MEDIA_BUTTON_TITLES[nextMode] : 'video'));
             }
         }
 
@@ -1153,7 +1162,7 @@
 
         while (nextIdx !== currentIdx) {
             const candidate = sequence[nextIdx];
-            if (availableModes.includes(candidate)) {
+            if (availableModes.includes(candidate) || (candidate !== 'image' && song?.id)) {
                 setPlayerTabMediaMode(candidate);
                 return;
             }
@@ -1173,7 +1182,7 @@
 
         while (prevIdx !== currentIdx) {
             const candidate = sequence[prevIdx];
-            if (availableModes.includes(candidate)) {
+            if (availableModes.includes(candidate) || (candidate !== 'image' && song?.id)) {
                 setPlayerTabMediaMode(candidate);
                 return;
             }
@@ -2017,7 +2026,7 @@
                             if (!playerTabVideo || resolvedUrl !== playerTabVideo.getAttribute('src')) {
                                 showVideo(resolvedUrl, thumbnailUrl);
                             }
-                        } else if (playerTabCurrentMediaMode === 'uploaded') {
+                        } else if (playerTabCurrentMediaMode === 'uploaded' || playerTabCurrentMediaMode === 'cover_art') {
                             setPlayerTabMediaMode('image');
                         }
                     } catch (e) {
