@@ -40,6 +40,12 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 - **Android Firefox keepalive** - Experimental opt-in silent media session to reduce MIUI/HyperOS tab reloads on Firefox for Android
 - **Library actions** - Refetch library, stop fetch, or delete local library
 
+### 🤖 MCP Server (AI Agent Integration)
+- **47 tools** - Expose Suno's full API to AI agents (opencode, Claude Desktop, etc.) via the Model Context Protocol
+- **Direct API calls** - The MCP server calls Suno's API directly using the extension's auth token
+- **WebSocket bridge** - Extension shares Clerk token with the MCP server over `ws://localhost:9423`
+- **Full feature coverage** - Song creation, covering, remastering, personas, uploads, downloads, playlists, workspaces, and more
+
 ## Installation
 
 ### Chrome / Edge / Brave
@@ -73,6 +79,81 @@ npm run build
 ```
 
 This creates browser-specific builds in `dist/chrome/` and `dist/firefox/`.
+
+## MCP Server
+
+BetterSuno includes a standalone MCP (Model Context Protocol) server that exposes Suno's features to AI agents like opencode, Claude Desktop, or any MCP-compatible client.
+
+### Quick Start
+
+```bash
+# 1. Install dependencies
+cd mcp-server && npm install && cd ..
+
+# 2. Start the MCP server
+node mcp-server/src/index.js
+
+# 3. Make sure the BetterSuno extension is loaded with a Suno tab open
+#    The extension auto-connects to ws://localhost:9423 and shares the auth token
+```
+
+### Register with opencode
+
+Add the following to `.opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "bettersuno": {
+      "type": "local",
+      "command": ["node", "mcp-server/src/index.js"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### How It Works
+
+```
+AI Client ←stdio→ MCP Server ←ws://localhost:9423→ BetterSuno Extension → Suno API
+                         ↓
+                    Direct API calls (with shared token)
+```
+
+1. The **extension** acquires a Clerk auth token (via Suno.com tab) and pushes it to the MCP server over WebSocket
+2. The **MCP server** receives the token and makes direct HTTP calls to `studio-api.prod.suno.com`
+3. The **AI client** (opencode, Claude) calls MCP tools which translate to Suno API requests
+
+The extension pushes the token on connect and on every 45-minute refresh. If Suno requires a captcha challenge, the MCP server requests a Turnstile solve from the extension over WebSocket.
+
+### Prerequisites
+
+- BetterSuno extension loaded in Chrome or Firefox
+- At least one Suno.com tab open and logged in (for auth)
+- Node.js 18+ (for the MCP server)
+
+### Tool Overview (47 tools)
+
+| Module | Tools |
+|--------|-------|
+| **Generation** | `create_song`, `inspire_song`, `cover_song`, `extend_song`, `remaster_song`, `make_stems`, `get_recommended_styles`, `upsample_tags` |
+| **Library** | `list_library`, `get_song`, `get_songs_by_ids`, `search_songs`, `search_users`, `get_profile`, `get_current_user`, `get_user_session` |
+| **Downloads** | `get_song_urls`, `download_song`, `download_lyrics`, `download_cover_image` |
+| **Personas** | `create_persona`, `list_personas`, `get_persona`, `list_followed_personas`, `list_loved_personas`, `toggle_love_persona` |
+| **Uploads** | `upload_audio`, `upload_image`, `upload_video` |
+| **Playlists** | `list_playlists`, `create_playlist`, `get_playlist`, `add_to_playlist`, `remove_from_playlist`, `reorder_playlist`, `delete_playlist`, `update_playlist_metadata` |
+| **Workspaces** | `list_projects`, `get_project`, `get_project_clips` |
+| **Metadata** | `delete_song`, `trash_song`, `set_visibility`, `like_song`, `update_song_metadata`, `generate_video`, `create_custom_model` |
+
+See [mcp-server/API.md](mcp-server/API.md) for full parameter references and examples.
+
+### Configuration
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `MCP_WS_PORT` | `9423` | WebSocket port the MCP server listens on |
+| `MCP_API_BASE_URL` | `https://studio-api.prod.suno.com` | Suno API base URL |
 
 ## Support
 

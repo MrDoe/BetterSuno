@@ -31,7 +31,9 @@
     "https://suno.com/*",
     "https://*.suno.com/*",
     "https://*.suno.ai/*",
-    "https://studio-api.prod.suno.com/*"
+    "https://studio-api.prod.suno.com/*",
+    "http://localhost/*",
+    "ws://localhost/*"
   ],
   "background": {
     "scripts": [

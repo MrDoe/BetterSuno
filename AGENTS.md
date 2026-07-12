@@ -187,6 +187,60 @@ ALWAYS use OpenCodeRAG tools before reading or editing:
 
 If no results, run `opencode-rag index`.
 
+## MCP Server (`mcp-server/`)
+
+The project includes a standalone MCP server in `mcp-server/` that exposes Suno features to AI agents (opencode, Claude Desktop, etc.) via the [Model Context Protocol](https://modelcontextprotocol.io).
+
+### Architecture
+
+```
+AI Client ←stdio→ MCP Server ←ws://localhost:9423→ BetterSuno Extension → Suno API
+                         ↓
+                    Direct API calls (with shared token)
+```
+
+- **MCP server** (`mcp-server/src/index.js`) — stdio transport, registers 47 tools across 8 modules
+- **Extension** (`background.js`) — WebSocket client connects to `ws://localhost:9423`, shares the Clerk auth token, handles captcha challenges if needed
+- **Token flow**: Extension pushes token on connect and on every 45-minute token refresh alarm. MCP server stores it and makes direct API calls.
+
+### Setup
+
+```bash
+cd mcp-server && npm install && cd ..
+node mcp-server/src/index.js  # starts the server (stdio)
+```
+
+Register in `.opencode/opencode.json`:
+```json
+"bettersuno": {
+  "type": "local",
+  "command": ["node", "mcp-server/src/index.js"],
+  "enabled": true
+}
+```
+
+Prerequisites: BetterSuno extension loaded in Firefox/Chrome with a Suno tab open (for auth).
+
+### Tool Modules (47 tools)
+
+| Module | File | Tools |
+|--------|------|-------|
+| Generation | `tools/generation.js` | `create_song`, `inspire_song`, `cover_song`, `extend_song`, `remaster_song`, `make_stems`, `get_recommended_styles`, `upsample_tags` |
+| Library | `tools/library.js` | `list_library`, `get_song`, `get_songs_by_ids`, `search_songs`, `search_users`, `get_profile`, `get_current_user`, `get_user_session` |
+| Downloads | `tools/downloads.js` | `get_song_urls`, `download_song`, `download_lyrics`, `download_cover_image` |
+| Personas | `tools/personas.js` | `create_persona`, `list_personas`, `get_persona`, `list_followed_personas`, `list_loved_personas`, `toggle_love_persona` |
+| Uploads | `tools/uploads.js` | `upload_audio`, `upload_image`, `upload_video` |
+| Playlists | `tools/playlists.js` | `list_playlists`, `create_playlist`, `get_playlist`, `add_to_playlist`, `remove_from_playlist`, `reorder_playlist`, `delete_playlist`, `update_playlist_metadata` |
+| Workspaces | `tools/workspaces.js` | `list_projects`, `get_project`, `get_project_clips` |
+| Metadata | `tools/metadata.js` | `delete_song`, `trash_song`, `set_visibility`, `like_song`, `update_song_metadata`, `generate_video`, `create_custom_model` |
+
+### Key Implementation Details
+
+- **Captcha**: All generation tools call `POST /api/c/check` with `{ctype: "generation"}` first. If captcha is required, the MCP server requests a Turnstile solve from the extension via WebSocket.
+- **Upload flow**: Files are uploaded via S3 presigned URLs (init → S3 → finish → optional initialize-clip). Reads files from the local filesystem by path.
+- **Rate limiting**: `suno-client.js` implements exponential backoff (1s → 2s → ... → 30s cap) for 429 responses, max 5 retries.
+- **Token expiry**: 401 responses bubble up as clear errors. The extension pushes refreshed tokens automatically every 45 min.
+
 ## Browser-level inspection
 
 When analyzing Suno.com behavior, use the **firefox-devtools** MCP tools instead of static code search:

@@ -88,6 +88,129 @@ const REFRESH_HOST_LEASE_MS = 70000;
 })();
 
 // ============================================================================
+// MCP Bridge — WebSocket client that shares auth token with the MCP server
+// ============================================================================
+
+let mcpWs = null;
+let mcpWsReconnectTimer = null;
+
+function pushTokenToMcpBridge() {
+  if (!mcpWs || mcpWs.readyState !== WebSocket.OPEN) return;
+  getApiTokenWithFallback('mcp-bridge').then(token => {
+    if (token) {
+      mcpWs.send(JSON.stringify({ type: 'auth', token }));
+    }
+  }).catch(err => {
+    log('mcp-bridge: failed to push token:', err.message);
+  });
+}
+
+function connectMcpBridge() {
+  if (mcpWsReconnectTimer) {
+    clearTimeout(mcpWsReconnectTimer);
+    mcpWsReconnectTimer = null;
+  }
+  if (mcpWs) {
+    try { mcpWs.close(); } catch {}
+  }
+  try {
+    mcpWs = new WebSocket('ws://localhost:9423');
+  } catch (err) {
+    log('mcp-bridge: connection failed (server likely not running):', err.message);
+    mcpWsReconnectTimer = setTimeout(connectMcpBridge, 10000);
+    return;
+  }
+  mcpWs.onopen = () => {
+    log('mcp-bridge: connected');
+    pushTokenToMcpBridge();
+  };
+  mcpWs.onclose = () => {
+    log('mcp-bridge: disconnected, will retry in 10s');
+    mcpWs = null;
+    mcpWsReconnectTimer = setTimeout(connectMcpBridge, 10000);
+  };
+  mcpWs.onerror = () => {};
+  mcpWs.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'captcha_required') {
+        log('mcp-bridge: captcha solve requested');
+        handleMcpCaptchaRequest().then(captchaToken => {
+          if (mcpWs && mcpWs.readyState === WebSocket.OPEN) {
+            mcpWs.send(JSON.stringify({ type: 'captcha_token', token: captchaToken }));
+          }
+        }).catch(err => {
+          log('mcp-bridge: captcha solve failed:', err.message);
+        });
+      }
+    } catch (err) {
+      log('mcp-bridge: message parsing error:', err.message);
+    }
+  };
+}
+
+async function handleMcpCaptchaRequest() {
+  const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
+  const tab = sunoTabs.find(t => typeof t.id === 'number');
+  if (!tab) throw new Error('No Suno tab available to render captcha');
+
+  const captchaToken = await executeWithTimeout(tab, async () => {
+    const wjs = typeof wrappedJSObject !== 'undefined' ? wrappedJSObject : window;
+
+    // Check if Turnstile is already loaded
+    if (typeof wjs.turnstile === 'undefined') {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+      // Wait for turnstile to be available
+      for (let i = 0; i < 50; i++) {
+        if (typeof wjs.turnstile !== 'undefined') break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      const container = document.createElement('div');
+      container.style.cssText = 'position:fixed;top:10px;right:10px;z-index:999999;';
+      document.body.appendChild(container);
+
+      const timeout = setTimeout(() => {
+        container.remove();
+        reject(new Error('Captcha solve timed out'));
+      }, 55000);
+
+      wjs.turnstile.render(container, {
+        sitekey: '0x4AAAAAAAAAAAAAAAAAAAAAAAQAAA', // Turnstile generation sitekey
+        callback: (token) => {
+          clearTimeout(timeout);
+          container.remove();
+          resolve(token);
+        },
+        'expired-callback': () => {
+          clearTimeout(timeout);
+          container.remove();
+          reject(new Error('Captcha expired'));
+        },
+        'error-callback': () => {
+          clearTimeout(timeout);
+          container.remove();
+          reject(new Error('Captcha error'));
+        },
+      });
+    });
+  });
+
+  return captchaToken;
+}
+
+// Retry MCP bridge connection periodically in case the server starts later
+setTimeout(connectMcpBridge, 2000);
+
+// ============================================================================
 // Persistence via IndexedDB (persistent across browser sessions)
 // ============================================================================
 
@@ -627,6 +750,11 @@ async function ensureValidTokenViaClerkSession(tabId) {
     st.tokenTimestamp = Date.now();
     st.clerkSessionToken = sessionToken;
     st.clerkSessionExpiry = tokenData.expiresAt;
+
+    // Push fresh token to MCP bridge if connected
+    if (mcpWs && mcpWs.readyState === WebSocket.OPEN) {
+      mcpWs.send(JSON.stringify({ type: 'auth', token: tokenData.token }));
+    }
 
     log("Token successfully refreshed and cached");
     st.tokenRefreshPromise = null;
