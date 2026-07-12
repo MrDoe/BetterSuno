@@ -114,7 +114,20 @@ export function registerLibraryTools(server, allTools) {
       },
       required: ['query'],
     }, async (args) => {
-      const result = await sunoClient.GET('/api/search/users', { params: { q: args.query } });
+      const result = await sunoClient.POST('/api/search/', {
+        search_queries: [
+          {
+            name: 'users',
+            search_type: 'user',
+            term: args.query,
+            from_index: 0,
+            size: 100,
+            rank_by: 'most_relevant',
+          },
+        ],
+        tune_results: false,
+        tuned_offset: 0,
+      });
       if (!result.ok) throw new Error(result.error || 'User search failed');
       return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
     }),
