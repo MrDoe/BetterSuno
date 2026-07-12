@@ -243,7 +243,10 @@
                 <button type="button" class="btn-primary" id="player-tab-lyrics-save">Save</button>
                 <button type="button" class="btn-secondary" id="player-tab-lyrics-cancel">Cancel</button>
               </div>
-              <button type="button" class="player-tab-edit-lyrics-btn" id="player-tab-edit-lyrics-btn" style="display: none;">Edit Lyrics</button>
+              <div class="player-tab-lyrics-btn-row">
+                <button type="button" class="player-tab-copy-lyrics-btn" id="player-tab-copy-lyrics-btn" style="display: none;">Copy Lyrics</button>
+                <button type="button" class="player-tab-edit-lyrics-btn" id="player-tab-edit-lyrics-btn" style="display: none;">Edit Lyrics</button>
+              </div>
             </div>
             <div class="player-tab-view" id="player-tab-view-comments" style="display: none;">
               <div class="player-tab-comments-wrapper">

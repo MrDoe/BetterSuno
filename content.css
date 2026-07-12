@@ -1069,6 +1069,31 @@
   background: var(--bettersuno-bg-hover) !important;
 }
 
+.player-tab-copy-lyrics-btn {
+  display: block !important;
+  padding: 4px 12px !important;
+  font-size: 11px !important;
+  color: var(--bettersuno-text-muted) !important;
+  background: transparent !important;
+  border: 1px solid var(--bettersuno-border) !important;
+  border-radius: 4px !important;
+  cursor: pointer !important;
+  transition: all 0.2s !important;
+}
+
+.player-tab-copy-lyrics-btn:hover {
+  color: var(--bettersuno-text) !important;
+  border-color: var(--bettersuno-accent) !important;
+  background: var(--bettersuno-bg-hover) !important;
+}
+
+.player-tab-lyrics-btn-row {
+  display: flex !important;
+  gap: 8px !important;
+  justify-content: flex-end !important;
+  padding: 0 16px 8px !important;
+}
+
 /* Comments View Styles */
 .player-tab-comments-wrapper {
   display: flex !important;

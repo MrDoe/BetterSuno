@@ -870,6 +870,7 @@
     const playerTabLyricsEditActions = document.getElementById('player-tab-lyrics-edit-actions');
     const playerTabLyricsSave = document.getElementById('player-tab-lyrics-save');
     const playerTabLyricsCancel = document.getElementById('player-tab-lyrics-cancel');
+    const playerTabCopyLyricsBtn = document.getElementById('player-tab-copy-lyrics-btn');
     const playerTabEditLyricsBtn = document.getElementById('player-tab-edit-lyrics-btn');
     const playerTabViewCover = document.getElementById('player-tab-view-cover');
     const playerTabViewLyrics = document.getElementById('player-tab-view-lyrics');
@@ -1255,6 +1256,22 @@
         if (song && !isSongFromOtherArtist(song)) {
             playerTabEditLyricsBtn.style.display = 'block';
         }
+    }
+
+    if (playerTabCopyLyricsBtn) {
+        playerTabCopyLyricsBtn.addEventListener('click', () => {
+            const song = playerTabCurrentSong;
+            if (!song || !song.lyrics) return;
+            navigator.clipboard.writeText(song.lyrics).then(() => {
+                const originalText = playerTabCopyLyricsBtn.textContent;
+                playerTabCopyLyricsBtn.textContent = 'Copied!';
+                setTimeout(() => {
+                    playerTabCopyLyricsBtn.textContent = originalText;
+                }, 2000);
+            }).catch(() => {
+                alert('Failed to copy lyrics.');
+            });
+        });
     }
 
     if (playerTabEditLyricsBtn) {
@@ -1930,6 +1947,7 @@
             if (playerTabCoverImage) playerTabCoverImage.style.display = 'none';
             updatePlayerTabMediaControls(null);
             if (playerTabEditLyricsBtn) playerTabEditLyricsBtn.style.display = 'none';
+            if (playerTabCopyLyricsBtn) playerTabCopyLyricsBtn.style.display = 'none';
             if (isEditingLyrics) exitLyricsEditMode();
             return;
         }
@@ -1962,6 +1980,9 @@
             } else {
                 playerTabEditLyricsBtn.style.display = 'none';
             }
+        }
+        if (playerTabCopyLyricsBtn) {
+            playerTabCopyLyricsBtn.style.display = song?.lyrics ? 'block' : 'none';
         }
         if (playerTabLyricsEditActions && !isEditingLyrics) {
             playerTabLyricsEditActions.classList.remove('visible');
