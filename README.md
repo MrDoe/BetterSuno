@@ -97,9 +97,9 @@ node mcp-server/src/index.js
 #    The extension auto-connects to ws://localhost:9423 and shares the auth token
 ```
 
-### Register with opencode
+### Register with OpenCode
 
-Add the following to `.opencode/opencode.json`:
+Add the following to `.opencode/opencode.json` in your project root:
 
 ```json
 {
@@ -108,6 +108,36 @@ Add the following to `.opencode/opencode.json`:
       "type": "local",
       "command": ["node", "mcp-server/src/index.js"],
       "enabled": true
+    }
+  }
+}
+```
+
+### Register with Codex (OpenAI)
+
+Add the following to `~/.codex/config.json` (or your project's `.codex/config.json`):
+
+```json
+{
+  "mcpServers": {
+    "bettersuno": {
+      "command": "node",
+      "args": ["mcp-server/src/index.js"]
+    }
+  }
+}
+```
+
+### Register with Claude Desktop
+
+Add the following to your Claude Desktop config (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "bettersuno": {
+      "command": "node",
+      "args": ["/absolute/path/to/BetterSuno/mcp-server/src/index.js"]
     }
   }
 }
