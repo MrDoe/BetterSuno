@@ -3083,6 +3083,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const hasLyrics = msg.lyrics && msg.lyrics.trim();
         if (!hasLyrics) { sendResponse({ ok: false, error: "Lyrics are required" }); return; }
 
+        // Suno requires a captcha check before generation.
+        // Call /api/c/check with {ctype: "generation"} first.
+        // If required=true, a Cloudflare Turnstile token would be needed (rendered on-page).
+        // In the common case required=false, and we pass token=null, token_provider=null.
+        let captchaToken = null;
+        let captchaProvider = null;
+        try {
+          const checkRes = await fetch('https://studio-api.prod.suno.com/api/c/check', {
+            method: 'POST',
+            cache: 'no-store',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ ctype: 'generation' })
+          });
+          if (checkRes.ok) {
+            const checkData = await checkRes.json();
+            if (checkData.required) {
+              sendResponse({ ok: false, error: 'Captcha required — please generate a song on suno.com first to clear the captcha challenge, then retry.' });
+              return;
+            }
+          }
+        } catch (e) {
+          log('captcha check failed, continuing anyway:', e?.message || e);
+        }
+
         const stylePrompt = msg.stylePrompt && msg.stylePrompt.trim();
 
         // Control sliders: convert 0-100 UI values to 0.0-1.0 API values
@@ -3111,6 +3138,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           tags: stylePrompt || msg.tags || '',
           negative_tags: msg.negativeTags || '',
           generation_type: 'TEXT',
+          token: captchaToken,
+          token_provider: captchaProvider,
           continue_at: null,
           continue_clip_id: null,
           task: null,

@@ -72,7 +72,18 @@ Database: `BetterSunoicationsDB` (version 3)
 
 Endpoint: `POST https://studio-api.prod.suno.com/api/generate/v2-web/`
 
-**Two mutually exclusive modes:**
+### Captcha Check (required before generation)
+
+Suno requires a captcha check before calling the generate endpoint. Without it, the API returns 422 `token_validation_failed`.
+
+1. Call `POST https://studio-api.prod.suno.com/api/c/check` with body `{ "ctype": "generation" }` (Authorization: Bearer token)
+2. Response: `{ "required": false, "captcha_version": 1 }` (common case) or `{ "required": true, "captcha_version": N }`
+3. If `required: false` — pass `token: null, token_provider: null` in the generate payload (these fields are always present in Suno's own payload)
+4. If `required: true` — a Cloudflare Turnstile widget must be rendered and solved on-page to obtain a captcha token. This cannot be done from the background script.
+
+**Critical:** The `token` and `token_provider` fields must be present in the generate payload even when null. Without them, generation fails. See `background.js` `handleGenerateSong` (the `generate_song` message handler).
+
+### Two mutually exclusive modes:
 
 | Mode | `gpt_description_prompt` | `prompt` | `tags` | `metadata.create_mode` | Behavior |
 |------|--------------------------|----------|--------|------------------------|----------|
@@ -99,6 +110,11 @@ Also set `metadata.can_control_sliders` to an array of the slider keys used.
   "tags": "pop, upbeat, synths",
   "negative_tags": "metal, heavy",
   "generation_type": "TEXT",
+  "token": null,
+  "token_provider": null,
+  "continue_at": null,
+  "continue_clip_id": null,
+  "task": null,
   "metadata": {
     "web_client_pathname": "/create",
     "create_mode": "custom",
