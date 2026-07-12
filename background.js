@@ -142,11 +142,29 @@ function connectMcpBridge() {
         }).catch(err => {
           log('mcp-bridge: captcha solve failed:', err.message);
         });
+      } else if (msg.type === 'play_song' || msg.type === 'stop_playback') {
+        relayMcpPlaybackToTab(msg);
       }
     } catch (err) {
       log('mcp-bridge: message parsing error:', err.message);
     }
   };
+}
+
+async function relayMcpPlaybackToTab(msg) {
+  const tabId = await pickPreferredSunoTabId();
+  if (tabId == null) {
+    log('mcp-bridge: no suno tab available for playback relay');
+    return;
+  }
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      action: msg.type === 'play_song' ? 'mcp_play_song' : 'mcp_stop_playback',
+      song: msg.song,
+    });
+  } catch (err) {
+    log('mcp-bridge: playback relay failed:', err.message);
+  }
 }
 
 async function handleMcpCaptchaRequest() {

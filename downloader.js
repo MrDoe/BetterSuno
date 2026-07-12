@@ -4220,6 +4220,22 @@
             return true;
         }
 
+        if (message.action === "mcp_play_song") {
+            if (message.song) {
+                togglePlay(message.song);
+            }
+            return;
+        }
+
+        if (message.action === "mcp_stop_playback") {
+            if (audioElement) {
+                audioElement.pause();
+                currentPlayingSongId = null;
+                if (playPauseBtn) playPauseBtn.textContent = '▶';
+            }
+            return;
+        }
+
         if (message.action === "log") {
             statusDiv.innerText = message.text + "\n" + statusDiv.innerText;
         }

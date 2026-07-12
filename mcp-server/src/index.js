@@ -12,6 +12,7 @@ import { registerUploadTools } from './tools/uploads.js';
 import { registerPlaylistTools } from './tools/playlists.js';
 import { registerWorkspaceTools } from './tools/workspaces.js';
 import { registerMetadataTools } from './tools/metadata.js';
+import { registerPlaybackTools } from './tools/playback.js';
 
 initBridge();
 
@@ -30,6 +31,7 @@ registerUploadTools(server, allTools);
 registerPlaylistTools(server, allTools);
 registerWorkspaceTools(server, allTools);
 registerMetadataTools(server, allTools);
+registerPlaybackTools(allTools);
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: allTools }));
 

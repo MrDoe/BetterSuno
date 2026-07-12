@@ -5,6 +5,7 @@ let currentToken = null;
 let captchaResolve = null;
 let captchaReject = null;
 let captchaTimer = null;
+let extensionWs = null;
 
 function startWsServer() {
   const wss = new WebSocketServer({ port: config.wsPort });
@@ -44,7 +45,10 @@ function startWsServer() {
       }
     });
 
+    extensionWs = ws;
+
     ws.on('close', () => {
+      if (extensionWs === ws) extensionWs = null;
       console.error('[ws-bridge] Extension disconnected');
     });
 
@@ -58,6 +62,18 @@ function startWsServer() {
 
 export function getToken() {
   return currentToken;
+}
+
+export function sendToExtension(msg) {
+  if (!extensionWs || extensionWs.readyState !== extensionWs.OPEN) {
+    return false;
+  }
+  try {
+    extensionWs.send(JSON.stringify(msg));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function requestCaptcha() {
