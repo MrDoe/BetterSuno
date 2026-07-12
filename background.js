@@ -144,6 +144,8 @@ function connectMcpBridge() {
         });
       } else if (msg.type === 'play_song' || msg.type === 'stop_playback') {
         relayMcpPlaybackToTab(msg);
+      } else if (msg.type === 'extension_request') {
+        handleMcpExtensionRequest(msg);
       }
     } catch (err) {
       log('mcp-bridge: message parsing error:', err.message);
@@ -161,9 +163,40 @@ async function relayMcpPlaybackToTab(msg) {
     await chrome.tabs.sendMessage(tabId, {
       action: msg.type === 'play_song' ? 'mcp_play_song' : 'mcp_stop_playback',
       song: msg.song,
+      start_time: msg.start_time ?? null,
     });
   } catch (err) {
     log('mcp-bridge: playback relay failed:', err.message);
+  }
+}
+
+async function handleMcpExtensionRequest(msg) {
+  const requestId = msg.requestId;
+  const sendResponse = (payload) => {
+    if (mcpWs && mcpWs.readyState === WebSocket.OPEN) {
+      mcpWs.send(JSON.stringify({ type: 'response', requestId, ...payload }));
+    }
+  };
+  try {
+    if (msg.action === 'get_prompts') {
+      const prompts = await IDBStore.getAllPrompts();
+      sendResponse({ ok: true, data: { prompts } });
+      return;
+    }
+    if (msg.action === 'save_prompt') {
+      const prompt = msg.payload?.prompt || {};
+      await IDBStore.savePrompt({ id: prompt.id || crypto.randomUUID(), ...prompt });
+      sendResponse({ ok: true, data: { saved: true } });
+      return;
+    }
+    if (msg.action === 'delete_prompt') {
+      await IDBStore.deletePrompt(msg.payload?.id);
+      sendResponse({ ok: true, data: { deleted: true } });
+      return;
+    }
+    sendResponse({ ok: false, error: `Unknown extension request action: ${msg.action}` });
+  } catch (err) {
+    sendResponse({ ok: false, error: err.message });
   }
 }
 

@@ -6,6 +6,8 @@ let captchaResolve = null;
 let captchaReject = null;
 let captchaTimer = null;
 let extensionWs = null;
+const pendingRequests = new Map();
+let requestSeq = 0;
 
 function startWsServer() {
   const wss = new WebSocketServer({ port: config.wsPort });
@@ -42,6 +44,13 @@ function startWsServer() {
           clearTimeout(captchaTimer);
           captchaTimer = null;
         }
+      } else if (msg.type === 'response') {
+        const pending = pendingRequests.get(msg.requestId);
+        if (pending) {
+          pendingRequests.delete(msg.requestId);
+          clearTimeout(pending.timer);
+          pending.resolve(msg);
+        }
       }
     });
 
@@ -74,6 +83,25 @@ export function sendToExtension(msg) {
   } catch {
     return false;
   }
+}
+
+// Request/response round-trip to the extension (used for extension-local data
+// such as the prompt library stored in IndexedDB). Resolves with the
+// extension's `{ type: 'response', requestId, ok, data|error }` message.
+export function requestFromExtension(action, payload = {}, timeoutMs = null) {
+  const requestId = `req_${++requestSeq}`;
+  const msg = { type: 'extension_request', requestId, action, payload };
+  const sent = sendToExtension(msg);
+  if (!sent) {
+    return Promise.reject(new Error('BetterSuno extension is not connected.'));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequests.delete(requestId);
+      reject(new Error('Extension request timed out'));
+    }, timeoutMs || config.extensionRequestTimeoutMs);
+    pendingRequests.set(requestId, { resolve, reject, timer });
+  });
 }
 
 export function requestCaptcha() {

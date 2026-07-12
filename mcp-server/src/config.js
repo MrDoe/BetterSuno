@@ -5,4 +5,8 @@ export const config = {
   initialRetryDelayMs: 1000,
   captchaTimeoutMs: 60000,
   tokenRefreshTimeoutMs: 15000,
+  // Comments expose other users' content; opt-in only.
+  allowComments: process.env.MCP_ALLOW_COMMENTS === 'true',
+  // Prompt library lives in the extension's IndexedDB; surfaced via WS relay.
+  extensionRequestTimeoutMs: 15000,
 };

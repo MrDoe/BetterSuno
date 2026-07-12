@@ -4223,6 +4223,14 @@
         if (message.action === "mcp_play_song") {
             if (message.song) {
                 togglePlay(message.song);
+                const startTime = Number(message.start_time);
+                if (Number.isFinite(startTime) && startTime > 0 && audioElement) {
+                    const onPlaying = () => {
+                        try { audioElement.currentTime = startTime; } catch (e) {}
+                        audioElement.removeEventListener('playing', onPlaying);
+                    };
+                    audioElement.addEventListener('playing', onPlaying, { once: true });
+                }
             }
             return;
         }
