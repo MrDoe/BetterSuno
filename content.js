@@ -1256,6 +1256,21 @@
 
   // ---- Listen for live updates ----
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === 'get_clerk_token') {
+      const wjs = typeof wrappedJSObject !== 'undefined' ? wrappedJSObject : window;
+      const getToken = wjs?.Clerk?.session?.getToken;
+      if (typeof getToken === 'function') {
+        getToken.call(wjs.Clerk.session).then(token => {
+          sendResponse({ ok: true, token });
+        }).catch(err => {
+          sendResponse({ ok: false, error: err.message });
+        });
+      } else {
+        sendResponse({ ok: false, error: 'no-clerk-session' });
+      }
+      return true;
+    }
+
     if (msg.type === 'bettersunoProbeTab') {
       sendResponse({ ok: true });
       return;

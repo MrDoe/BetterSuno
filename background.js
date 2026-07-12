@@ -672,6 +672,32 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
           results = null;
         }
 
+        if (!results && isFirefox) {
+          try {
+            const scriptResults = await chrome.tabs.executeScript(sunoTab.id, {
+              code: `
+                (async () => {
+                  const w = (typeof wrappedJSObject !== 'undefined') ? wrappedJSObject : window;
+                  for (let i = 0; i < 20; i++) {
+                    const g = w?.Clerk?.session?.getToken;
+                    if (typeof g === 'function') {
+                      try { return await g.call(w.Clerk.session); } catch(e) { return null; }
+                    }
+                    await new Promise(r => setTimeout(r, 100));
+                  }
+                  return null;
+                })()
+              `
+            });
+            if (scriptResults && scriptResults[0]) {
+              log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, Token via tabs.executeScript in tab ${sunoTab.id}`);
+              return { token: scriptResults[0], expiresAt: Date.now() + (50 * 60 * 1000), sourceTabId: sunoTab.id };
+            }
+          } catch (tabsErr) {
+            log(`refreshTokenViaClerkAPI: tabs.executeScript fallback also failed:`, tabsErr.message);
+          }
+        }
+
         if (results) {
           token = results[0]?.result || null;
         }
