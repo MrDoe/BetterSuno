@@ -41,7 +41,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 - **Library actions** - Refetch library, stop fetch, or delete local library
 
 ### 🤖 MCP Server (AI Agent Integration)
-- **47 tools** - Expose Suno's full API to AI agents (OpenCode, Claude Desktop, etc.) via the Model Context Protocol
+- **59 tools** - Expose Suno's full API to AI agents (OpenCode, Claude Desktop, etc.) via the Model Context Protocol
 - **Direct API calls** - The MCP server calls Suno's API directly using the extension's auth token
 - **WebSocket bridge** - Extension shares Clerk token with the MCP server over `ws://localhost:9423`
 - **Full feature coverage** - Song creation, covering, remastering, personas, uploads, downloads, playlists, workspaces, and more
@@ -163,18 +163,24 @@ The extension pushes the token on connect and on every 45-minute refresh. If Sun
 - At least one Suno.com tab open and logged in (for auth)
 - Node.js 18+ (for the MCP server)
 
-### Tool Overview (47 tools)
+### Tool Overview (59 tools)
 
 | Module | Tools |
 |--------|-------|
-| **Generation** | `create_song`, `inspire_song`, `cover_song`, `extend_song`, `remaster_song`, `make_stems`, `get_recommended_styles`, `upsample_tags` |
+| **Generation** | `create_song`, `inspire_song`, `cover_song`, `extend_song`, `remaster_song`, `make_stems`, `get_recommended_styles`, `upsample_tags`, `mashup_song` |
 | **Library** | `list_library`, `get_song`, `get_songs_by_ids`, `search_songs`, `search_users`, `get_profile`, `get_current_user`, `get_user_session` |
 | **Downloads** | `get_song_urls`, `download_song`, `download_lyrics`, `download_cover_image` |
 | **Personas** | `create_persona`, `list_personas`, `get_persona`, `list_followed_personas`, `list_loved_personas`, `toggle_love_persona` |
 | **Uploads** | `upload_audio`, `upload_image`, `upload_video` |
-| **Playlists** | `list_playlists`, `create_playlist`, `get_playlist`, `add_to_playlist`, `remove_from_playlist`, `reorder_playlist`, `delete_playlist`, `update_playlist_metadata` |
+| **Playlists** | `list_playlists`, `create_playlist`, `get_playlist`, `get_playlist_songs`, `search_playlists`, `add_to_playlist`, `remove_from_playlist`, `reorder_playlist`, `delete_playlist`, `update_playlist_metadata` |
 | **Workspaces** | `list_projects`, `get_project`, `get_project_clips` |
 | **Metadata** | `delete_song`, `trash_song`, `set_visibility`, `like_song`, `update_song_metadata`, `generate_video`, `create_custom_model` |
+| **Playback** | `play_song`, `stop_playback` |
+| **Comments** *(opt-in)* | `get_song_comments`, `post_song_comment`, `update_comment_reaction` |
+| **Feed** | `explore_feed` |
+| **Prompts** | `get_prompts`, `save_prompt`, `delete_prompt` |
+
+> **Notes:** `play_song` can play any song (including public songs from other users' playlists) and does not gate ownership. Download/metadata/delete tools are limited to songs you own. Comments require the server to be started with `MCP_ALLOW_COMMENTS=true`. `explore_feed` is read-only public browsing. Prompt tools are stored in the extension and require it to be connected.
 
 See [mcp-server/API.md](mcp-server/API.md) for full parameter references and examples.
 
@@ -188,7 +194,7 @@ cd mcp-server && npm test
 
 Tests cover:
 - MCP server startup and `initialize` handshake
-- All 47 tools listed via `tools/list`
+- All 59 tools listed via `tools/list`
 - Tool input schemas (required fields, enums)
 - Error handling when no auth token is available
 - End-to-end tool calls with a mock Suno API (verifies correct endpoints, HTTP methods, request bodies, auth headers)

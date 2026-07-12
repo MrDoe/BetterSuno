@@ -4,7 +4,7 @@
  * These tests start the MCP server as a child process, communicate over stdio
  * using the JSON-RPC protocol, and verify that:
  *   - The server starts and responds to the `initialize` handshake
- *   - All 47 tools are listed via `tools/list`
+ *   - All 59 tools are listed via `tools/list`
  *   - Each tool has the correct name, description, and input schema
  *   - Tool calls return proper error messages when no auth token is available
  *   - The syunthetic Suno API flow works end-to-end (with a mock API server)
@@ -190,10 +190,10 @@ describe('MCP Server — startup & protocol', () => {
     assert.ok(true, 'Server started and responded to initialize');
   });
 
-  test('tools/list returns all 47 tools', async () => {
+  test('tools/list returns all 59 tools', async () => {
     const result = await client.listTools();
     const names = result.tools.map(t => t.name);
-    assert.equal(result.tools.length, 47, 'Expected exactly 47 tools');
+    assert.equal(result.tools.length, 59, 'Expected exactly 59 tools');
     for (const expected of EXPECTED_TOOLS) {
       assert.ok(names.includes(expected), `Missing tool: ${expected}`);
     }

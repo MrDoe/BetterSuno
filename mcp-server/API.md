@@ -1,6 +1,8 @@
 # BetterSuno MCP Server — API Reference
 
-47 tools across 8 modules. All tools require the BetterSuno extension to be running with an active Suno.com tab for authentication.
+59 tools across 12 modules. All tools require the BetterSuno extension to be running with an active Suno.com tab for authentication.
+
+> Ownership/safety: download, metadata, and delete tools are gated to songs you own (`assertOwned`). Cover/extend/mashup of another artist's song is allowed only when that song's `metadata.can_remix` is `true`. `play_song` works for ANY song (including public songs from other users' playlists) and does not gate ownership. Comments (`get_song_comments`, `post_song_comment`, `update_comment_reaction`) are opt-in — the server must be started with `MCP_ALLOW_COMMENTS=true`.`explore_feed` is read-only public browsing; downloading or saving cover art of those songs is blocked by the ownership gate.
 
 ---
 
@@ -566,6 +568,146 @@ Create a custom AI model from a set of clips.
 
 ---
 
+### `mashup_song`
+
+Mash two or more songs together (remix task). Gated by `assertCanCover` on every input clip — only your own songs, or other artists' songs whose `metadata.can_remix` is `true`, are allowed.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `clip_ids` | string[] | Yes | Array of 2+ song clip IDs to mash up |
+
+---
+
+## Playlists (cont.)
+
+### `get_playlist_songs`
+
+Get the songs in a playlist by ID. Works for public playlists owned by other users too (enables playing them via `play_song`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `playlist_id` | string | Yes | Playlist ID |
+| `page` | number | No | Page number. Default: 1 |
+| `page_size` | number | No | Page size. Default: 50 |
+
+---
+
+### `search_playlists`
+
+Search playlists by query. Returns both your own and other users' public playlists.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Playlist search query |
+| `limit` | number | No | Max results. Default: 100 |
+
+---
+
+## Playback
+
+### `play_song`
+
+Play a song in the BetterSuno in-page mini player (GUI). Works for any song, including public songs from other users' playlists. Relays via the WebSocket bridge → the open `suno.com` tab → `downloader.js` `togglePlay`. Requires the extension connected.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `clip_id` | string | Yes | Song clip ID |
+| `start_time` | number | No | Start playback at this position in seconds |
+
+---
+
+### `stop_playback`
+
+Stop the currently playing song in the BetterSuno GUI. Requires the extension connected.
+
+No parameters.
+
+---
+
+## Comments (opt-in: `MCP_ALLOW_COMMENTS=true`)
+
+### `get_song_comments`
+
+List comments on a song.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `clip_id` | string | Yes | Song clip ID |
+| `order` | string | No | `newest` or `top`. Default: `newest` |
+
+---
+
+### `post_song_comment`
+
+Post a comment (or reply) on a song.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `clip_id` | string | Yes | Song clip ID |
+| `content` | string | Yes | Comment text |
+| `parent_id` | string | No | Parent comment ID to reply to |
+
+---
+
+### `update_comment_reaction`
+
+Like/unlike a comment.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `comment_id` | string | Yes | Comment ID |
+| `clip_id` | string | Yes | Song clip ID the comment belongs to |
+| `reaction` | string | No | `LIKE` or `NONE`. Default: `LIKE` |
+
+---
+
+## Feed
+
+### `explore_feed`
+
+Browse the public Suno feed (trending/explore). Read-only — downloading or saving cover art of these songs is blocked by the ownership gate.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `cursor` | string | No | Pagination cursor from a previous call |
+| `public_only` | boolean | No | Restrict to public songs. Default: true |
+| `user_id` | string | No | Restrict feed to a specific user ID |
+| `limit` | number | No | Number of results. Default: 20 |
+
+---
+
+## Prompts (relayed to extension IndexedDB)
+
+These read/write the BetterSuno prompt library stored in the extension's IndexedDB (not Suno). They send an `extension_request` over the WebSocket bridge and require the extension to be connected.
+
+### `get_prompts`
+
+List saved prompt-library entries.
+
+No parameters.
+
+---
+
+### `save_prompt`
+
+Save a prompt to the library.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `prompt` | object | Yes | `{ title?, content, tags? }` — `content` is required |
+
+---
+
+### `delete_prompt`
+
+Delete a saved prompt by ID.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | Yes | Prompt ID to delete |
+
+---
+
 ## Error Handling
 
 All tools return errors as MCP error responses with descriptive messages. Common errors:
@@ -590,11 +732,14 @@ All endpoints are on `https://studio-api.prod.suno.com`:
 | `/api/edit/stems/{clip_id}/` | POST | `make_stems` |
 | `/api/generate/get_recommend_styles` | GET | `get_recommended_styles` |
 | `/api/prompts/upsample` | POST | `upsample_tags` |
-| `/api/feed/v3` | POST | `list_library` |
-| `/api/clip/{clip_id}` | GET | `get_song`, download tools |
+| `/api/feed/v3` | POST | `list_library`, `explore_feed` |
+| `/api/clip/{clip_id}` | GET | `get_song`, download tools, `play_song` |
 | `/api/clips/get_songs_by_ids` | POST | `get_songs_by_ids` |
-| `/api/search/` | GET | `search_songs` |
-| `/api/search/users` | GET | `search_users` |
+| `/api/search/` | POST | `search_songs`, `search_users`, `search_playlists` (`search_queries` with `search_type` `song`/`user`/`playlist`) |
+| `/api/playlist/v2/{id}` | GET | `get_playlist`, `get_playlist_songs` |
+| `/api/comment/{id}/reaction/` | POST | `update_comment_reaction` |
+| `/api/gen/{id}/comments` | GET | `get_song_comments` |
+| `/api/gen/{id}/comment` | POST | `post_song_comment` |
 | `/api/profiles/{handle}` | GET | `get_profile` |
 | `/api/user/me` | GET | `get_current_user` |
 | `/api/session/` | GET | `get_user_session` |
