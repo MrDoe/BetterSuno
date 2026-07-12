@@ -199,9 +199,10 @@ AI Client ←stdio→ MCP Server ←ws://localhost:9423→ BetterSuno Extension 
                     Direct API calls (with shared token)
 ```
 
-- **MCP server** (`mcp-server/src/index.js`) — stdio transport, registers 47 tools across 8 modules
+- **MCP server** (`mcp-server/src/index.js`) — stdio transport, registers 59 tools across 12 modules
 - **Extension** (`background.js`) — WebSocket client connects to `ws://localhost:9423`, shares the Clerk auth token, handles captcha challenges if needed
 - **Token flow**: Extension pushes token on connect and on every 45-minute token refresh alarm. MCP server stores it and makes direct API calls.
+- **WS bridge is bidirectional**: server→extension (`sendToExtension`, `requestFromExtension` in `ws-bridge.js`) for playback and prompt relay; extension→server for `auth`, `captcha_token`, and `response` (request/response correlation keyed by `requestId`).
 
 ### Setup
 
@@ -221,18 +222,22 @@ Register in `.opencode/opencode.json`:
 
 Prerequisites: BetterSuno extension loaded in Firefox/Chrome with a Suno tab open (for auth).
 
-### Tool Modules (47 tools)
+### Tool Modules (59 tools)
 
 | Module | File | Tools |
 |--------|------|-------|
-| Generation | `tools/generation.js` | `create_song`, `inspire_song`, `cover_song`, `extend_song`, `remaster_song`, `make_stems`, `get_recommended_styles`, `upsample_tags` |
+| Generation | `tools/generation.js` | `create_song`, `inspire_song`, `cover_song`, `extend_song`, `remaster_song`, `make_stems`, `get_recommended_styles`, `upsample_tags`, `mashup_song` |
 | Library | `tools/library.js` | `list_library`, `get_song`, `get_songs_by_ids`, `search_songs`, `search_users`, `get_profile`, `get_current_user`, `get_user_session` |
 | Downloads | `tools/downloads.js` | `get_song_urls`, `download_song`, `download_lyrics`, `download_cover_image` |
 | Personas | `tools/personas.js` | `create_persona`, `list_personas`, `get_persona`, `list_followed_personas`, `list_loved_personas`, `toggle_love_persona` |
 | Uploads | `tools/uploads.js` | `upload_audio`, `upload_image`, `upload_video` |
-| Playlists | `tools/playlists.js` | `list_playlists`, `create_playlist`, `get_playlist`, `add_to_playlist`, `remove_from_playlist`, `reorder_playlist`, `delete_playlist`, `update_playlist_metadata` |
+| Playlists | `tools/playlists.js` | `list_playlists`, `create_playlist`, `get_playlist`, `get_playlist_songs`, `search_playlists`, `add_to_playlist`, `remove_from_playlist`, `reorder_playlist`, `delete_playlist`, `update_playlist_metadata` |
 | Workspaces | `tools/workspaces.js` | `list_projects`, `get_project`, `get_project_clips` |
 | Metadata | `tools/metadata.js` | `delete_song`, `trash_song`, `set_visibility`, `like_song`, `update_song_metadata`, `generate_video`, `create_custom_model` |
+| Playback | `tools/playback.js` | `play_song`, `stop_playback` |
+| Comments | `tools/comments.js` | `get_song_comments`, `post_song_comment`, `update_comment_reaction` |
+| Feed | `tools/feed.js` | `explore_feed` |
+| Prompts | `tools/prompts.js` | `get_prompts`, `save_prompt`, `delete_prompt` |
 
 ### Key Implementation Details
 
@@ -240,6 +245,13 @@ Prerequisites: BetterSuno extension loaded in Firefox/Chrome with a Suno tab ope
 - **Upload flow**: Files are uploaded via S3 presigned URLs (init → S3 → finish → optional initialize-clip). Reads files from the local filesystem by path.
 - **Rate limiting**: `suno-client.js` implements exponential backoff (1s → 2s → ... → 30s cap) for 429 responses, max 5 retries.
 - **Token expiry**: 401 responses bubble up as clear errors. The extension pushes refreshed tokens automatically every 45 min.
+- **Ownership gating**: Download/metadata/delete tools call `assertOwned(clipId)` (`auth.js`); non-owned songs throw. `cover_song`/`extend_song`/`mashup_song` call `assertCanCover` — covering another artist's song is allowed only when that song's `metadata.can_remix` is `true`. `like_song` is open.
+- **Playback does not gate ownership**: `play_song` works for ANY song (including public songs from other users' playlists). It relays via the WS bridge → `background.js` (`relayMcpPlaybackToTab`) → the open `suno.com` tab → `downloader.js` `togglePlay(song)`. Optional `start_time` (seconds) seeks before play. `stop_playback` pauses. Requires the extension connected to a `suno.com` tab.
+- **Other users' playlists**: `search_playlists` searches public + own playlists; `get_playlist_songs` returns tracks for any playlist (play via `play_song`). `get_playlist` (v2 endpoint) also works read-only for public playlists.
+- **Comments are opt-in**: `get_song_comments`/`post_song_comment`/`update_comment_reaction` throw unless the server was started with `MCP_ALLOW_COMMENTS=true` (they surface other users' content).
+- **Prompt library via relay**: `get_prompts`/`save_prompt`/`delete_prompt` live in the extension's IndexedDB, not Suno. MCP sends `{type:'extension_request'}` over the WS bridge; `background.js` (`handleMcpExtensionRequest`) fulfils via `IDBStore` and replies `{type:'response', requestId,...}`. Requires the extension connected.
+- **Public explore is read-only**: `explore_feed` returns public songs; downloading or saving cover art of those is blocked by the ownership gate.
+- **Search endpoints**: `search_songs` and `search_users` use `POST /api/search/` with `search_queries` (`search_type` `song`/`user`). Earlier GET variants returned HTTP 405.
 
 ## Browser-level inspection
 
