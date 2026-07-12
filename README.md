@@ -41,7 +41,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 - **Library actions** - Refetch library, stop fetch, or delete local library
 
 ### 🤖 MCP Server (AI Agent Integration)
-- **47 tools** - Expose Suno's full API to AI agents (opencode, Claude Desktop, etc.) via the Model Context Protocol
+- **47 tools** - Expose Suno's full API to AI agents (OpenCode, Claude Desktop, etc.) via the Model Context Protocol
 - **Direct API calls** - The MCP server calls Suno's API directly using the extension's auth token
 - **WebSocket bridge** - Extension shares Clerk token with the MCP server over `ws://localhost:9423`
 - **Full feature coverage** - Song creation, covering, remastering, personas, uploads, downloads, playlists, workspaces, and more
@@ -177,6 +177,23 @@ The extension pushes the token on connect and on every 45-minute refresh. If Sun
 | **Metadata** | `delete_song`, `trash_song`, `set_visibility`, `like_song`, `update_song_metadata`, `generate_video`, `create_custom_model` |
 
 See [mcp-server/API.md](mcp-server/API.md) for full parameter references and examples.
+
+### Testing
+
+The MCP server includes integration tests that verify the full stdio protocol, tool registration, payload construction, and end-to-end API calls (using a mock Suno API server — no real Suno account needed).
+
+```bash
+cd mcp-server && npm test
+```
+
+Tests cover:
+- MCP server startup and `initialize` handshake
+- All 47 tools listed via `tools/list`
+- Tool input schemas (required fields, enums)
+- Error handling when no auth token is available
+- End-to-end tool calls with a mock Suno API (verifies correct endpoints, HTTP methods, request bodies, auth headers)
+- `create_song` payload construction (captcha check, `token`/`token_provider` fields, control slider conversion, cover/extend task fields)
+- WebSocket token bridge (initial token push, token refresh via reconnection)
 
 ### Configuration
 
