@@ -2,6 +2,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
 import { sunoClient } from '../suno-client.js';
 import { getToken } from '../ws-bridge.js';
+import { assertOwned } from '../auth.js';
 
 function tool(name, description, inputSchema, handler) {
   return { name, description, inputSchema, handler };
@@ -26,9 +27,7 @@ export function registerDownloadTools(server, allTools) {
       },
       required: ['clip_id'],
     }, async (args) => {
-      const song = await sunoClient.GET(`/api/clip/${encodeURIComponent(args.clip_id)}`);
-      if (!song.ok) throw new Error(song.error || 'Song not found');
-      const s = song.data;
+      const s = await assertOwned(args.clip_id);
       return {
         content: [{
           type: 'text',
@@ -56,9 +55,7 @@ export function registerDownloadTools(server, allTools) {
       },
       required: ['clip_id'],
     }, async (args) => {
-      const songResult = await sunoClient.GET(`/api/clip/${encodeURIComponent(args.clip_id)}`);
-      if (!songResult.ok) throw new Error('Song not found');
-      const song = songResult.data;
+      const song = await assertOwned(args.clip_id);
       let audioUrl = song.audio_url;
       if (args.format === 'wav' && song.metadata?.wav_file_url) {
         audioUrl = song.metadata.wav_file_url;
@@ -90,9 +87,7 @@ export function registerDownloadTools(server, allTools) {
       },
       required: ['clip_id'],
     }, async (args) => {
-      const songResult = await sunoClient.GET(`/api/clip/${encodeURIComponent(args.clip_id)}`);
-      if (!songResult.ok) throw new Error('Song not found');
-      const song = songResult.data;
+      const song = await assertOwned(args.clip_id);
       const lyrics = song.metadata?.prompt || song.lyrics;
       if (!lyrics) throw new Error('No lyrics available for this song');
 
@@ -114,9 +109,7 @@ export function registerDownloadTools(server, allTools) {
       },
       required: ['clip_id'],
     }, async (args) => {
-      const songResult = await sunoClient.GET(`/api/clip/${encodeURIComponent(args.clip_id)}`);
-      if (!songResult.ok) throw new Error('Song not found');
-      const song = songResult.data;
+      const song = await assertOwned(args.clip_id);
       let imageUrl = song.image_url || song.metadata?.image_url;
       if (!imageUrl) throw new Error('No cover image available for this song');
 

@@ -1,4 +1,5 @@
 import { sunoClient } from '../suno-client.js';
+import { assertCanCover } from '../auth.js';
 
 function tool(name, description, inputSchema, handler) {
   return { name, description, inputSchema, handler };
@@ -101,6 +102,7 @@ export function registerGenerationTools(server, allTools) {
       },
       required: ['clip_id'],
     }, async (args) => {
+      await assertCanCover(args.clip_id);
       const payload = {
         mv: args.mv || 'chirp-fenix',
         gpt_description_prompt: '',
@@ -138,6 +140,7 @@ export function registerGenerationTools(server, allTools) {
       },
       required: ['clip_id', 'continue_at'],
     }, async (args) => {
+      await assertCanCover(args.clip_id);
       const payload = {
         mv: args.mv || 'chirp-fenix',
         gpt_description_prompt: '',
@@ -159,6 +162,44 @@ export function registerGenerationTools(server, allTools) {
 
       const result = await sunoClient.generate(payload);
       if (!result.ok) throw new Error(result.error || 'Extend failed');
+      return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
+    }),
+
+    tool('mashup_song', 'Blend two or more songs into a mashup', {
+      type: 'object',
+      properties: {
+        clip_ids: { type: 'array', items: { type: 'string' }, description: 'Song clip IDs to blend (2 or more)' },
+        title: { type: 'string', description: 'Mashup title' },
+        tags: { type: 'string', description: 'Style tags for the mashup' },
+        mv: { type: 'string', description: 'Model version', default: 'chirp-fenix' },
+      },
+      required: ['clip_ids'],
+    }, async (args) => {
+      if (!Array.isArray(args.clip_ids) || args.clip_ids.length < 2) {
+        throw new Error('Provide at least 2 clip IDs to mashup');
+      }
+      for (const id of args.clip_ids) await assertCanCover(id);
+      const payload = {
+        mv: args.mv || 'chirp-fenix',
+        gpt_description_prompt: '',
+        prompt: '',
+        make_instrumental: false,
+        title: args.title || '',
+        tags: args.tags || '',
+        generation_type: 'TEXT',
+        mashup_clip_ids: args.clip_ids,
+        task: 'mashup',
+        cover_clip_id: null,
+        continue_clip_id: null,
+        continue_at: null,
+        metadata: {
+          web_client_pathname: '/create',
+          create_mode: 'custom',
+          create_session_token: crypto.randomUUID(),
+        },
+      };
+      const result = await sunoClient.generate(payload);
+      if (!result.ok) throw new Error(result.error || 'Mashup generation failed');
       return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
     }),
 

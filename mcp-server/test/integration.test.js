@@ -400,18 +400,33 @@ describe('MCP Server — with mock token via WebSocket bridge', () => {
     assert.equal(mockApi.requests[0].body.limit, 10);
   });
 
-  test('search_songs passes query as URL parameter', async () => {
+  test('search_songs posts query and filters to own songs', async () => {
     mockApi.setResponse('/api/search/', {
       status: 200,
-      body: { results: [{ id: 'result1' }] },
+      body: {
+        result: {
+          song: {
+            result: [
+              { id: 'own1', user_id: 'me-123', title: 'Mine' },
+              { id: 'other1', user_id: 'them-456', title: 'Theirs' },
+            ],
+          },
+        },
+      },
+    });
+    mockApi.setResponse('/api/user/me', {
+      status: 200,
+      body: { user_id: 'me-123', handle: 'me' },
     });
     mockApi.requests.length = 0;
 
-    await client.callTool('search_songs', { query: 'rock ballad', page: 2 });
-    const url = mockApi.requests[0].url;
-
-    assert.ok(url.includes('q=rock+ballad') || url.includes('q=rock%20ballad'), `URL should contain query param: ${url}`);
-    assert.ok(url.includes('page=2'), `URL should contain page param: ${url}`);
+    const res = await client.callTool('search_songs', { query: 'rock ballad', page: 2 });
+    assert.equal(mockApi.requests[0].method, 'POST');
+    assert.equal(mockApi.requests[0].path, '/api/search/');
+    assert.equal(mockApi.requests[0].body.search_queries[0].term, 'rock ballad');
+    const data = JSON.parse(res.content[0].text);
+    assert.equal(data.count, 1, 'only own songs returned');
+    assert.equal(data.clips[0].id, 'own1');
   });
 
   test('list_playlists calls /api/playlist/me with GET', async () => {

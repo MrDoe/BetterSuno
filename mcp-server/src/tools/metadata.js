@@ -1,4 +1,5 @@
 import { sunoClient } from '../suno-client.js';
+import { assertOwned } from '../auth.js';
 
 function tool(name, description, inputSchema, handler) {
   return { name, description, inputSchema, handler };
@@ -14,6 +15,7 @@ export function registerMetadataTools(server, allTools) {
       },
       required: ['clip_ids'],
     }, async (args) => {
+      for (const id of args.clip_ids) await assertOwned(id);
       const body = { ids: args.clip_ids };
       if (args.reason) body.reason = args.reason;
       const result = await sunoClient.POST('/api/clips/delete/', { body });
@@ -29,6 +31,7 @@ export function registerMetadataTools(server, allTools) {
       },
       required: ['clip_ids'],
     }, async (args) => {
+      for (const id of args.clip_ids) await assertOwned(id);
       const result = await sunoClient.POST('/api/gen/trash', {
         body: { clip_ids: args.clip_ids, trash: args.trash !== false },
       });
@@ -45,6 +48,7 @@ export function registerMetadataTools(server, allTools) {
       },
       required: ['clip_id', 'is_public'],
     }, async (args) => {
+      await assertOwned(args.clip_id);
       const result = await sunoClient.POST(`/api/gen/${encodeURIComponent(args.clip_id)}/set_visibility/`, {
         body: { is_public: args.is_public, submit_to_contest: args.submit_to_contest || false },
       });
@@ -79,6 +83,7 @@ export function registerMetadataTools(server, allTools) {
       },
       required: ['clip_id'],
     }, async (args) => {
+      await assertOwned(args.clip_id);
       const body = {};
       if (args.title !== undefined) body.title = args.title;
       if (args.tags !== undefined) body.tags = args.tags;
@@ -105,6 +110,7 @@ export function registerMetadataTools(server, allTools) {
       },
       required: ['clip_id'],
     }, async (args) => {
+      await assertOwned(args.clip_id);
       const result = await sunoClient.POST(`/api/video/generate/${encodeURIComponent(args.clip_id)}/`);
       if (!result.ok) throw new Error(result.error || 'Video generation failed');
       return { content: [{ type: 'text', text: JSON.stringify({ generating: true, clip_id: args.clip_id }, null, 2) }] };
@@ -118,6 +124,7 @@ export function registerMetadataTools(server, allTools) {
       },
       required: ['clip_ids'],
     }, async (args) => {
+      for (const id of args.clip_ids) await assertOwned(id);
       if (args.clip_ids.length < 6) throw new Error('At least 6 clips are required to create a custom model');
       const result = await sunoClient.POST('/api/custom-model/create/', {
         body: { clip_ids: args.clip_ids, name: args.name || 'Custom Model' },

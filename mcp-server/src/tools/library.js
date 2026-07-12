@@ -1,4 +1,5 @@
 import { sunoClient } from '../suno-client.js';
+import { getCurrentUser } from '../auth.js';
 
 function tool(name, description, inputSchema, handler) {
   return { name, description, inputSchema, handler };
@@ -58,17 +59,52 @@ export function registerLibraryTools(server, allTools) {
       return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
     }),
 
-    tool('search_songs', 'Search Suno songs by query text', {
+    tool('search_songs', 'Search the current user\'s own songs by query text', {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Search query' },
         page: { type: 'number', description: 'Page number', default: 1 },
+        limit: { type: 'number', description: 'Max results per page', default: 50 },
       },
       required: ['query'],
     }, async (args) => {
-      const result = await sunoClient.GET('/api/search/', { params: { q: args.query, page: args.page || 1 } });
+      const me = await getCurrentUser();
+      const size = Math.min(Math.max(parseInt(args.limit, 10) || 50, 100), 100);
+      const fromIndex = ((parseInt(args.page, 10) || 1) - 1) * size;
+      const result = await sunoClient.POST('/api/search/', {
+        body: {
+          search_queries: [{
+            name: 'songs',
+            search_type: 'song',
+            term: args.query,
+            from_index: fromIndex,
+            size,
+            rank_by: 'most_relevant',
+          }],
+          tune_results: false,
+          tuned_offset: 0,
+        },
+      });
       if (!result.ok) throw new Error(result.error || 'Search failed');
-      return { content: [{ type: 'text', text: JSON.stringify(result.data, null, 2) }] };
+
+      const data = result.data || {};
+      let raw = [];
+      if (Array.isArray(data?.result?.song?.result)) raw = data.result.song.result;
+      else if (Array.isArray(data?.result?.songs?.result)) raw = data.result.songs.result;
+      else if (Array.isArray(data?.result?.song)) raw = data.result.song;
+      else if (Array.isArray(data?.songs)) raw = data.songs;
+      else if (Array.isArray(data?.result)) raw = data.result;
+
+      const own = raw
+        .map((item) => item?.clip || item?.song || item)
+        .filter((clip) => clip && clip.user_id === me.user_id);
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ query: args.query, owner_user_id: me.user_id, count: own.length, clips: own }, null, 2),
+        }],
+      };
     }),
 
     tool('search_users', 'Search Suno users by query text', {
