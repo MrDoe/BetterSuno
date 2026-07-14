@@ -10,18 +10,33 @@ const pendingRequests = new Map();
 let requestSeq = 0;
 
 function startWsServer() {
-  const wss = new WebSocketServer({ port: config.wsPort });
+  const wss = new WebSocketServer({ host: '127.0.0.1', port: config.wsPort });
 
   wss.on('listening', () => {
-    console.error(`[ws-bridge] WebSocket server listening on ws://localhost:${config.wsPort}`);
+    console.error(`[ws-bridge] WebSocket server listening on ws://127.0.0.1:${config.wsPort}`);
   });
 
   wss.on('error', (err) => {
     console.error('[ws-bridge] WebSocket server error:', err.message);
   });
 
-  wss.on('connection', (ws) => {
-    console.error('[ws-bridge] Extension connected');
+  wss.on('connection', (ws, req) => {
+    const origin = req.headers.origin || '';
+    if (!origin.startsWith('chrome-extension://') && !origin.startsWith('moz-extension://')) {
+      console.error('[ws-bridge] Rejected connection from unexpected origin:', origin);
+      ws.close(4001, 'Unauthorized origin');
+      return;
+    }
+
+    let authenticated = false;
+    const authTimeout = setTimeout(() => {
+      if (!authenticated) {
+        console.error('[ws-bridge] Auth timeout — closing unauthenticated connection');
+        ws.close(4002, 'Auth timeout');
+      }
+    }, 10000);
+
+    ws.send(JSON.stringify({ type: 'auth_ready' }));
 
     ws.on('message', (raw) => {
       let msg;
@@ -32,11 +47,25 @@ function startWsServer() {
       }
 
       if (msg.type === 'auth') {
+        if (!authenticated) {
+          authenticated = true;
+          clearTimeout(authTimeout);
+          extensionWs = ws;
+          console.error('[ws-bridge] Extension authenticated');
+        }
         if (msg.token) {
           currentToken = msg.token;
           console.error('[ws-bridge] Token updated');
         }
-      } else if (msg.type === 'captcha_token') {
+        return;
+      }
+
+      if (!authenticated) {
+        console.error('[ws-bridge] Rejected message before auth:', msg.type);
+        return;
+      }
+
+      if (msg.type === 'captcha_token') {
         if (captchaResolve) {
           captchaResolve(msg.token);
           captchaResolve = null;
@@ -54,14 +83,14 @@ function startWsServer() {
       }
     });
 
-    extensionWs = ws;
-
     ws.on('close', () => {
+      clearTimeout(authTimeout);
       if (extensionWs === ws) extensionWs = null;
       console.error('[ws-bridge] Extension disconnected');
     });
 
     ws.on('error', (err) => {
+      clearTimeout(authTimeout);
       console.error('[ws-bridge] Connection error:', err.message);
     });
   });

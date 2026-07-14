@@ -114,15 +114,14 @@ function connectMcpBridge() {
     try { mcpWs.close(); } catch {}
   }
   try {
-    mcpWs = new WebSocket('ws://localhost:9423');
+    mcpWs = new WebSocket('ws://127.0.0.1:9423');
   } catch (err) {
     log('mcp-bridge: connection failed (server likely not running):', err.message);
     mcpWsReconnectTimer = setTimeout(connectMcpBridge, 10000);
     return;
   }
   mcpWs.onopen = () => {
-    log('mcp-bridge: connected');
-    pushTokenToMcpBridge();
+    log('mcp-bridge: connected, waiting for auth_ready');
   };
   mcpWs.onclose = () => {
     log('mcp-bridge: disconnected, will retry in 10s');
@@ -133,7 +132,10 @@ function connectMcpBridge() {
   mcpWs.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'captcha_required') {
+      if (msg.type === 'auth_ready') {
+        log('mcp-bridge: server ready, sending auth token');
+        pushTokenToMcpBridge();
+      } else if (msg.type === 'captcha_required') {
         log('mcp-bridge: captcha solve requested');
         handleMcpCaptchaRequest().then(captchaToken => {
           if (mcpWs && mcpWs.readyState === WebSocket.OPEN) {
@@ -1841,9 +1843,11 @@ async function fetchOlderNotifications(beforeUtc) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // All msg.action handlers must come from a content script (i.e. have a tab).
-  // Offscreen messages use msg.type with an "offscreen" prefix, not msg.action.
-  if (msg.action && !sender.tab?.id) {
-    log("Blocked action message from untrusted sender:", msg.action);
+  // State-modifying msg.type handlers also require a content-script sender.
+  // Offscreen messages use msg.type with an "offscreen" prefix and are read-only or internal.
+  const STATE_MODIFYING_TYPES = new Set(['setConfig', 'clearNotifications', 'contentUpdateSettings']);
+  if ((msg.action || (msg.type && STATE_MODIFYING_TYPES.has(msg.type))) && !sender.tab?.id) {
+    log("Blocked message from untrusted sender:", msg.action || msg.type);
     sendResponse({ ok: false, error: 'Forbidden' });
     return true;
   }

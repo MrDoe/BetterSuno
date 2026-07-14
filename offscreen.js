@@ -39,22 +39,43 @@ let LAST_REQUEST_AT_ALL = 0; // global timestamp (ms)
 
 let port = null;
 let lastSentState = null; // { tabId, state }
+let reconnectAttempts = 0;
+let portReplayed = false;
 
 function setupPort() {
   try {
     port = chrome.runtime.connect({ name: "offscreen-document" });
     log("Connected to background via port");
+    reconnectAttempts = 0;
 
     port.onDisconnect.addListener(() => {
       log("Port disconnected – scheduling reconnect");
       port = null;
-      // attempt to reconnect after a short delay
-      setTimeout(setupPort, 1000);
+      portReplayed = false;
+      scheduleReconnect();
     });
   } catch (e) {
     log("Port connection failed:", e.message);
-    setTimeout(setupPort, 1000);
+    scheduleReconnect();
   }
+
+  if (port && !portReplayed) {
+    portReplayed = true;
+    setTimeout(() => {
+      if (port) replayLastState();
+    }, 0);
+  }
+}
+
+function scheduleReconnect() {
+  reconnectAttempts++;
+  if (reconnectAttempts > 20) {
+    log("Max reconnect attempts reached, giving up");
+    return;
+  }
+  const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
+  log(`Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts})`);
+  setTimeout(setupPort, delay);
 }
 
 // initialise the port when the script loads
@@ -72,18 +93,6 @@ function replayLastState() {
     });
   }
 }
-
-// wrap the original setupPort to fire replay after successful connect
-const realSetupPort = setupPort;
-setupPort = function() {
-  realSetupPort();
-  // the port.onDisconnect handler above already re-invokes setupPort,
-  // so the simplest way to trigger a replay is to call it after the
-  // next tick if a port exists.
-  setTimeout(() => {
-    if (port) replayLastState();
-  }, 0);
-};
 
 
 // Send keepalive ping to background every 30 seconds
@@ -282,9 +291,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "offscreenSetToken") {
-    log("received NEW TOKEN for tab", msg.tabId, "token:", msg.token.slice(0, 12), "…");
     if (msg.token) {
-      STATES[msg.tabId].token = msg.token;
+      const st = STATES[msg.tabId];
+      if (st) {
+        log("received NEW TOKEN for tab", msg.tabId, "token:", msg.token.slice(0, 12), "…");
+        st.token = msg.token;
+      }
     }
     sendResponse({ ok: true });
     return true;
