@@ -1451,7 +1451,19 @@ async function syncNotificationWorkerState() {
 // Shared Suno API auth helper
 // ============================================================================
 
-async function getApiTokenWithFallback(logPrefix = 'api') {
+async function getApiTokenWithFallback(logPrefix = 'api', options = {}) {
+  const { forceRefresh = false } = options;
+
+  if (forceRefresh) {
+    log(`${logPrefix}: force-refreshing token cache for all tabs`);
+    for (const tid of Object.keys(tabState)) {
+      const st = tabState[tid];
+      st.token = null;
+      st.tokenTimestamp = null;
+      st.tokenRefreshPromise = null;
+    }
+  }
+
   try {
     const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
     for (const sunoTab of sunoTabs) {
@@ -1472,9 +1484,10 @@ async function getApiTokenWithFallback(logPrefix = 'api') {
   return null;
 }
 
-async function fetchFeedV3WithRetry(token, body, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'feed/v3' } = {}) {
+async function fetchFeedV3WithRetry(currentToken, body, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'feed/v3' } = {}) {
   let retries = 0;
   let delayMs = initialDelayMs;
+  let renewed = false;
 
   while (retries <= maxRetries) {
     const controller = new AbortController();
@@ -1486,7 +1499,7 @@ async function fetchFeedV3WithRetry(token, body, { maxRetries = 5, initialDelayM
         cache: 'no-store',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${currentToken}`
         },
         body: JSON.stringify(body),
         signal: controller.signal
@@ -1502,6 +1515,26 @@ async function fetchFeedV3WithRetry(token, body, { maxRetries = 5, initialDelayM
         await new Promise(resolve => setTimeout(resolve, delayMs));
         delayMs = Math.min(delayMs * 2, 30000);
         continue;
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        if (!renewed) {
+          renewed = true;
+          log(`${logPrefix}: 401/403 received, renewing token`);
+          for (const tid of Object.keys(tabState)) {
+            const st = tabState[tid];
+            st.token = null;
+            st.tokenTimestamp = null;
+            st.tokenRefreshPromise = null;
+          }
+          const freshToken = await getApiTokenWithFallback(logPrefix + '/renew');
+          if (freshToken && freshToken !== currentToken) {
+            log(`${logPrefix}: using renewed token, retrying request`);
+            currentToken = freshToken;
+            continue;
+          }
+          log(`${logPrefix}: token renewal returned no new token, returning 401/403 as-is`);
+        }
       }
 
       let data = null;
@@ -1524,9 +1557,10 @@ async function fetchFeedV3WithRetry(token, body, { maxRetries = 5, initialDelayM
   return { ok: false, status: 0, data: null, rateLimited: true };
 }
 
-async function fetchLibraryPageWithRetry(token, page, pageSize, signal, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'library' } = {}) {
+async function fetchLibraryPageWithRetry(currentToken, page, pageSize, signal, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'library' } = {}) {
   let retries = 0;
   let delayMs = initialDelayMs;
+  let renewed = false;
 
   while (retries <= maxRetries) {
     const controller = new AbortController();
@@ -1546,7 +1580,7 @@ async function fetchLibraryPageWithRetry(token, page, pageSize, signal, { maxRet
         method: 'GET',
         cache: 'no-store',
         headers: {
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${currentToken}`
         },
         signal: controller.signal
       });
@@ -1561,6 +1595,26 @@ async function fetchLibraryPageWithRetry(token, page, pageSize, signal, { maxRet
         await new Promise(resolve => setTimeout(resolve, delayMs));
         delayMs = Math.min(delayMs * 2, 30000);
         continue;
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        if (!renewed) {
+          renewed = true;
+          log(`${logPrefix}: 401/403 received on page ${page}, renewing token`);
+          for (const tid of Object.keys(tabState)) {
+            const st = tabState[tid];
+            st.token = null;
+            st.tokenTimestamp = null;
+            st.tokenRefreshPromise = null;
+          }
+          const freshToken = await getApiTokenWithFallback(logPrefix + '/renew');
+          if (freshToken && freshToken !== currentToken) {
+            log(`${logPrefix}: using renewed token, retrying page ${page}`);
+            currentToken = freshToken;
+            continue;
+          }
+          log(`${logPrefix}: token renewal returned no new token, returning 401/403 as-is`);
+        }
       }
 
       let data = null;
@@ -2218,15 +2272,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "fetch_feed_page") {
     (async () => {
       try {
-        const token = await getApiTokenWithFallback('fetch_feed_page');
         const cursorValue = msg.cursor || null;
         const isPublicOnly = !!msg.isPublicOnly;
         const userId = msg.userId || null;
-
-        if (!token) {
-          sendResponse({ ok: false, status: 0, error: "Missing token" });
-          return;
-        }
 
         const body = {
           limit: 20,
@@ -2251,15 +2299,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           body.cursor = cursorValue;
         }
 
-        const response = await fetchFeedV3WithRetry(token, body, { logPrefix: 'fetch_feed_page' });
-        const status = response.status;
-        const data = response.data || null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const token = await getApiTokenWithFallback('fetch_feed_page', { forceRefresh: attempt > 0 });
+          if (!token) {
+            sendResponse({ ok: false, status: 0, error: "Missing token" });
+            return;
+          }
 
-        sendResponse({
-          ok: response.ok,
-          status,
-          data
-        });
+          const response = await fetchFeedV3WithRetry(token, body, { logPrefix: 'fetch_feed_page' });
+          if (response.status !== 401 && response.status !== 403) {
+            sendResponse({
+              ok: response.ok,
+              status: response.status,
+              data: response.data || null
+            });
+            return;
+          }
+          log(`fetch_feed_page: attempt ${attempt + 1} returned ${response.status}, renewing token and retrying`);
+        }
+
+        sendResponse({ ok: false, status: 401, data: null, error: 'Token expired after renewal attempt' });
       } catch (e) {
         sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
       }

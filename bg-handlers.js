@@ -391,17 +391,25 @@ function handleFetchSongsByIds(msg, sender, sendResponse, ctx) {
 function handleFetchFeedPage(msg, sender, sendResponse, ctx) {
   (async () => {
     try {
-      const token = await ctx.getApiTokenWithFallback('fetch_feed_page');
       const cursorValue = msg.cursor || null;
       const isPublicOnly = !!msg.isPublicOnly;
       const userId = msg.userId || null;
-      if (!token) { sendResponse({ ok: false, status: 0, error: "Missing token" }); return; }
       const body = { limit: 20, filters: { disliked: "False", trashed: "False", fromStudioProject: { presence: "False" } } };
       if (userId) body.filters.user = { presence: "True", user_id: userId };
       if (isPublicOnly) body.filters.public = "True";
       if (cursorValue) body.cursor = cursorValue;
-      const response = await ctx.fetchFeedV3WithRetry(token, body, { logPrefix: 'fetch_feed_page' });
-      sendResponse({ ok: response.ok, status: response.status, data: response.data || null });
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const token = await ctx.getApiTokenWithFallback('fetch_feed_page', { forceRefresh: attempt > 0 });
+        if (!token) { sendResponse({ ok: false, status: 0, error: "Missing token" }); return; }
+        const response = await ctx.fetchFeedV3WithRetry(token, body, { logPrefix: 'fetch_feed_page' });
+        if (response.status !== 401 && response.status !== 403) {
+          sendResponse({ ok: response.ok, status: response.status, data: response.data || null });
+          return;
+        }
+        ctx.log(`fetch_feed_page: attempt ${attempt + 1} returned ${response.status}, renewing token and retrying`);
+      }
+      sendResponse({ ok: false, status: 401, data: null, error: 'Token expired after renewal attempt' });
     } catch (e) {
       sendResponse({ ok: false, status: 0, error: e?.message || String(e) });
     }

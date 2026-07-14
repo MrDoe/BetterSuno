@@ -467,7 +467,7 @@
             }
             
             if (response.status === 401) {
-                api.runtime.sendMessage({ action: "fetch_error_internal", error: "❌ Error 401: Token expired." });
+                api.runtime.sendMessage({ action: "fetch_error_internal", error: "❌ Error 401: Token expired (background renewal also failed)." });
                 return;
             }
             if (!response.ok) {
