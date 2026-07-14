@@ -1,6 +1,6 @@
 # Privacy and Permission Justifications
 
-BetterSuno takes privacy seriously. The extension requests a small set of permissions strictly to provide the features described below. No personal data is collected or transmitted by the extension unless explicitly required by the user (for example, downloading a song file). All network requests are limited to the official Suno domains.
+BetterSuno takes privacy seriously. The extension requests a small set of permissions strictly to provide the features described below. No personal data is collected or transmitted by the extension unless explicitly required by the user (for example, downloading a song file). All network requests are limited to the official Suno domains and the localhost MCP server. Below is a detailed explanation of each permission and its purpose.
 
 ## Requested Permissions
 
@@ -36,6 +36,7 @@ The extension requires access to the following domains to function:
 - `https://suno.com/*` – Core Suno site where audio playback occurs and where content scripts run.
 - `https://clerk.suno.com/*` – Authentication and session management endpoints used when logging in.
 - `https://api.suno.com/*` and `https://studio-api.prod.suno.com/*` – APIs used to check for new releases and to fetch data needed for notifications or the download feature.
+- `http://localhost:3000/*` – Localhost MCP server used for development and testing purposes. All requests to this server are local and do not leave the user's machine.
 
 All network requests are restricted to these hosts and nothing else. We do not collect, share, or store any personal data from these requests.
 
@@ -49,4 +50,4 @@ If you have any privacy concerns or questions about the permissions, please open
 
 ---
 
-*Last updated: March 6, 2026*
+*Last updated: July 14, 2026*
