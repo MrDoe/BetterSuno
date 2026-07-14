@@ -1496,16 +1496,32 @@ async function fetchFeedV3WithRetry(currentToken, body, { maxRetries = 5, initia
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetch('https://studio-api.prod.suno.com/api/feed/v3', {
-        method: 'POST',
-        cache: 'no-store',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${currentToken}`
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal
-      });
+      let response;
+      try {
+        response = await fetch('https://studio-api.prod.suno.com/api/feed/v3', {
+          method: 'POST',
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${currentToken}`
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+      } catch (e) {
+        if (e instanceof TypeError) {
+          if (retries >= maxRetries) {
+            clearTimeout(timeout);
+            return { ok: false, status: 0, data: null, networkError: true, error: e.message };
+          }
+          retries += 1;
+          log(`${logPrefix}: network error (${e.message}), waiting ${Math.round(delayMs / 1000)}s before retry ${retries}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          delayMs = Math.min(delayMs * 2, 30000);
+          continue;
+        }
+        throw e;
+      }
 
       if (response.status === 429) {
         if (retries >= maxRetries) {
@@ -1578,14 +1594,33 @@ async function fetchLibraryPageWithRetry(currentToken, page, pageSize, signal, {
     }
 
     try {
-      const response = await fetch(`https://studio-api.prod.suno.com/api/library?page=${page}&page_size=${pageSize}`, {
-        method: 'GET',
-        cache: 'no-store',
-        headers: {
-          'Authorization': `Bearer ${currentToken}`
-        },
-        signal: controller.signal
-      });
+      let response;
+      try {
+        response = await fetch(`https://studio-api.prod.suno.com/api/library?page=${page}&page_size=${pageSize}`, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            'Authorization': `Bearer ${currentToken}`
+          },
+          signal: controller.signal
+        });
+      } catch (e) {
+        clearTimeout(timeout);
+        if (signal) {
+          signal.removeEventListener('abort', onAbort);
+        }
+        if (e instanceof TypeError) {
+          if (retries >= maxRetries) {
+            return { ok: false, status: 0, data: null, networkError: true, error: e.message };
+          }
+          retries += 1;
+          log(`${logPrefix}: network error on page ${page} (${e.message}), waiting ${Math.round(delayMs / 1000)}s before retry ${retries}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          delayMs = Math.min(delayMs * 2, 30000);
+          continue;
+        }
+        throw e;
+      }
 
       if (response.status === 429) {
         if (retries >= maxRetries) {

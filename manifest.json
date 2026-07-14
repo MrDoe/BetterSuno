@@ -21,7 +21,7 @@
     "downloads"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://localhost:9423 ws://127.0.0.1:9423"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://suno.com https://*.suno.com https://*.suno.ai https://studio-api.prod.suno.com ws://localhost:9423 ws://127.0.0.1:9423"
   },
   "host_permissions": [
     "https://suno.com/*",
