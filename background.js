@@ -255,9 +255,9 @@ async function handleMcpCaptchaRequest() {
         },
       });
     });
-  });
+  }, 60000);
 
-  return captchaToken;
+  return Array.isArray(captchaToken) ? (captchaToken[0]?.result || null) : captchaToken;
 }
 
 // Retry MCP bridge connection periodically in case the server starts later
