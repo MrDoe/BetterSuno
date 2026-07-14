@@ -41,10 +41,11 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 - **Library actions** - Refetch library, stop fetch, or delete local library
 
 ### 🤖 MCP Server (AI Agent Integration)
-- **59 tools** - Expose Suno's full API to AI agents (OpenCode, Claude Desktop, etc.) via the Model Context Protocol
+- **59 tools** via the [bettersuno-mcp](https://github.com/MrDoe/bettersuno-mcp) package — Expose Suno's full API to AI agents (OpenCode, Claude Desktop, etc.) via the Model Context Protocol
 - **Direct API calls** - The MCP server calls Suno's API directly using the extension's auth token
 - **WebSocket bridge** - Extension shares Clerk token with the MCP server over `ws://localhost:9423`
 - **Full feature coverage** - Song creation, covering, remastering, personas, uploads, downloads, playlists, workspaces, and more
+- Install: `npx bettersuno-mcp` (separate package, requires this extension at runtime)
 
 ## Installation
 
@@ -82,78 +83,23 @@ This creates browser-specific builds in `dist/chrome/` and `dist/firefox/`.
 
 ## MCP Server
 
-BetterSuno includes a standalone MCP (Model Context Protocol) server that exposes Suno's features to AI agents like opencode, Claude Desktop, or any MCP-compatible client.
-
-### Quick Start
+The MCP server is now a **separate package**: [`bettersuno-mcp`](https://github.com/MrDoe/bettersuno-mcp) on [npm](https://www.npmjs.com/package/bettersuno-mcp).
 
 ```bash
-# 1. Install dependencies
-cd mcp-server && npm install && cd ..
+# Run directly (no clone needed)
+npx bettersuno-mcp
 
-# 2. Start the MCP server
-node mcp-server/src/index.js
-
-# 3. Make sure the BetterSuno extension is loaded with a Suno tab open
-#    The extension auto-connects to ws://localhost:9423 and shares the auth token
-```
-
-### Register with OpenCode
-
-Add the following to `.opencode/opencode.json` in your project root:
-
-```json
-{
-  "mcp": {
-    "bettersuno": {
-      "type": "local",
-      "command": ["node", "mcp-server/src/index.js"],
-      "enabled": true
-    }
-  }
-}
-```
-
-### Register with Codex (OpenAI)
-
-Add the following to `~/.codex/config.json` (or your project's `.codex/config.json`):
-
-```json
-{
-  "mcpServers": {
-    "bettersuno": {
-      "command": "node",
-      "args": ["mcp-server/src/index.js"]
-    }
-  }
-}
-```
-
-### Register with Claude Desktop
-
-Add the following to your Claude Desktop config (`claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "bettersuno": {
-      "command": "node",
-      "args": ["/absolute/path/to/BetterSuno/mcp-server/src/index.js"]
-    }
-  }
-}
+# Or install globally
+npm install -g bettersuno-mcp
 ```
 
 ### How It Works
 
 ```
-AI Client ←stdio→ MCP Server ←ws://localhost:9423→ BetterSuno Extension → Suno API
-                         ↓
-                    Direct API calls (with shared token)
+AI Client ←stdio→ bettersuno-mcp ←ws://localhost:9423→ BetterSuno Extension → Suno API
 ```
 
-1. The **extension** acquires a Clerk auth token (via Suno.com tab) and pushes it to the MCP server over WebSocket
-2. The **MCP server** receives the token and makes direct HTTP calls to `studio-api.prod.suno.com`
-3. The **AI client** (opencode, Claude) calls MCP tools which translate to Suno API requests
+The **extension** acquires a Clerk auth token (via Suno.com tab) and pushes it to the MCP server over WebSocket. The **MCP server** receives the token and makes direct HTTP calls to `studio-api.prod.suno.com`. The **AI client** (opencode, Claude) calls MCP tools which translate to Suno API requests.
 
 The extension pushes the token on connect and on every 45-minute refresh. If Suno requires a captcha challenge, the MCP server requests a Turnstile solve from the extension over WebSocket.
 
@@ -161,52 +107,34 @@ The extension pushes the token on connect and on every 45-minute refresh. If Sun
 
 - BetterSuno extension loaded in Chrome or Firefox
 - At least one Suno.com tab open and logged in (for auth)
-- Node.js 18+ (for the MCP server)
+- Node.js 18+
 
-### Tool Overview (59 tools)
+### Register with OpenCode
 
-| Module | Tools |
-|--------|-------|
-| **Generation** | `create_song`, `inspire_song`, `cover_song`, `extend_song`, `remaster_song`, `make_stems`, `get_recommended_styles`, `upsample_tags`, `mashup_song` |
-| **Library** | `list_library`, `get_song`, `get_songs_by_ids`, `search_songs`, `search_users`, `get_profile`, `get_current_user`, `get_user_session` |
-| **Downloads** | `get_song_urls`, `download_song`, `download_lyrics`, `download_cover_image` |
-| **Personas** | `create_persona`, `list_personas`, `get_persona`, `list_followed_personas`, `list_loved_personas`, `toggle_love_persona` |
-| **Uploads** | `upload_audio`, `upload_image`, `upload_video` |
-| **Playlists** | `list_playlists`, `create_playlist`, `get_playlist`, `get_playlist_songs`, `search_playlists`, `add_to_playlist`, `remove_from_playlist`, `reorder_playlist`, `delete_playlist`, `update_playlist_metadata` |
-| **Workspaces** | `list_projects`, `get_project`, `get_project_clips` |
-| **Metadata** | `delete_song`, `trash_song`, `set_visibility`, `like_song`, `update_song_metadata`, `generate_video`, `create_custom_model` |
-| **Playback** | `play_song`, `stop_playback` |
-| **Comments** *(opt-in)* | `get_song_comments`, `post_song_comment`, `update_comment_reaction` |
-| **Feed** | `explore_feed` |
-| **Prompts** | `get_prompts`, `save_prompt`, `delete_prompt` |
-
-> **Notes:** `play_song` can play any song (including public songs from other users' playlists) and does not gate ownership. Download/metadata/delete tools are limited to songs you own. Comments require the server to be started with `MCP_ALLOW_COMMENTS=true`. `explore_feed` is read-only public browsing. Prompt tools are stored in the extension and require it to be connected.
-
-See [mcp-server/API.md](mcp-server/API.md) for full parameter references and examples.
-
-### Testing
-
-The MCP server includes integration tests that verify the full stdio protocol, tool registration, payload construction, and end-to-end API calls (using a mock Suno API server — no real Suno account needed).
-
-```bash
-cd mcp-server && npm test
+```json
+{
+  "mcpServers": {
+    "bettersuno": {
+      "command": ["npx", "bettersuno-mcp"]
+    }
+  }
+}
 ```
 
-Tests cover:
-- MCP server startup and `initialize` handshake
-- All 59 tools listed via `tools/list`
-- Tool input schemas (required fields, enums)
-- Error handling when no auth token is available
-- End-to-end tool calls with a mock Suno API (verifies correct endpoints, HTTP methods, request bodies, auth headers)
-- `create_song` payload construction (captcha check, `token`/`token_provider` fields, control slider conversion, cover/extend task fields)
-- WebSocket token bridge (initial token push, token refresh via reconnection)
+### Register with Claude Desktop
 
-### Configuration
+```json
+{
+  "mcpServers": {
+    "bettersuno": {
+      "command": "npx",
+      "args": ["bettersuno-mcp"]
+    }
+  }
+}
+```
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `MCP_WS_PORT` | `9423` | WebSocket port the MCP server listens on |
-| `MCP_API_BASE_URL` | `https://studio-api.prod.suno.com` | Suno API base URL |
+> Full tool reference, examples, and environment variables are in the [bettersuno-mcp README](https://github.com/MrDoe/bettersuno-mcp).
 
 ## Support
 

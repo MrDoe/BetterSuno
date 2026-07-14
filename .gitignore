@@ -1,6 +1,7 @@
 node_modules/
 package-lock.json
 dist/
-.vscode/
-.vscode/tasks.json
-.opencode/
+.vscode/*
+.opencode/*
+.commandcode/*
+.agents/*
