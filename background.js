@@ -196,6 +196,23 @@ async function handleMcpExtensionRequest(msg) {
       sendResponse({ ok: true, data: { deleted: true } });
       return;
     }
+    if (msg.action === 'relay_generate') {
+      const tabId = await pickPreferredSunoTabId();
+      if (tabId == null) { sendResponse({ ok: false, error: 'No suno.com tab open' }); return; }
+      try {
+        const token = await getApiTokenWithFallback('relay_generate');
+        if (!token) { sendResponse({ ok: false, error: 'No auth token' }); return; }
+        const response = await chrome.tabs.sendMessage(tabId, {
+          action: 'relay_generate',
+          payload: msg.payload?.payload || msg.payload,
+          token,
+        });
+        sendResponse(response || { ok: false, error: 'No response from content script' });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
     sendResponse({ ok: false, error: `Unknown extension request action: ${msg.action}` });
   } catch (err) {
     sendResponse({ ok: false, error: err.message });
@@ -207,57 +224,71 @@ async function handleMcpCaptchaRequest() {
   const tab = sunoTabs.find(t => typeof t.id === 'number');
   if (!tab) throw new Error('No Suno tab available to render captcha');
 
-  const captchaToken = await executeWithTimeout(tab, async () => {
-    const wjs = typeof wrappedJSObject !== 'undefined' ? wrappedJSObject : window;
+  const executeOptions = {
+    target: { tabId: tab.id, frameIds: [0] },
+    func: async () => {
+      const wjs = typeof window.wrappedJSObject !== 'undefined' ? window.wrappedJSObject : window;
 
-    // Check if Turnstile is already loaded
-    if (typeof wjs.turnstile === 'undefined') {
-      await new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-        script.onload = resolve;
-        script.onerror = reject;
-        document.head.appendChild(script);
-      });
-      // Wait for turnstile to be available
-      for (let i = 0; i < 50; i++) {
-        if (typeof wjs.turnstile !== 'undefined') break;
-        await new Promise(r => setTimeout(r, 100));
+      if (typeof wjs.turnstile === 'undefined') {
+        await new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+          script.onload = resolve;
+          script.onerror = reject;
+          document.head.appendChild(script);
+        });
+        for (let i = 0; i < 50; i++) {
+          if (typeof wjs.turnstile !== 'undefined') break;
+          await new Promise(r => setTimeout(r, 100));
+        }
       }
-    }
 
-    return new Promise((resolve, reject) => {
-      const container = document.createElement('div');
-      container.style.cssText = 'position:fixed;top:10px;right:10px;z-index:999999;';
-      document.body.appendChild(container);
+      return new Promise((resolve, reject) => {
+        const container = document.createElement('div');
+        container.style.cssText = 'position:fixed;top:10px;right:10px;z-index:999999;';
+        document.body.appendChild(container);
 
-      const timeout = setTimeout(() => {
-        container.remove();
-        reject(new Error('Captcha solve timed out'));
-      }, 55000);
+        const timeout = setTimeout(() => {
+          container.remove();
+          reject(new Error('Captcha solve timed out'));
+        }, 55000);
 
-      wjs.turnstile.render(container, {
-        sitekey: '0x4AAAAAAAAAAAAAAAAAAAAAAAQAAA', // Turnstile generation sitekey
-        callback: (token) => {
-          clearTimeout(timeout);
-          container.remove();
-          resolve(token);
-        },
-        'expired-callback': () => {
-          clearTimeout(timeout);
-          container.remove();
-          reject(new Error('Captcha expired'));
-        },
-        'error-callback': () => {
-          clearTimeout(timeout);
-          container.remove();
-          reject(new Error('Captcha error'));
-        },
+        wjs.turnstile.render(container, {
+          sitekey: '0x4AAAAAAAAAAAAAAAAAAAAAAAQAAA',
+          callback: (token) => {
+            clearTimeout(timeout);
+            container.remove();
+            resolve(token);
+          },
+          'expired-callback': () => {
+            clearTimeout(timeout);
+            container.remove();
+            reject(new Error('Captcha expired'));
+          },
+          'error-callback': () => {
+            clearTimeout(timeout);
+            container.remove();
+            reject(new Error('Captcha error'));
+          },
+        });
       });
-    });
-  }, 60000);
+    }
+  };
 
-  return Array.isArray(captchaToken) ? (captchaToken[0]?.result || null) : captchaToken;
+  if (!isFirefox) {
+    executeOptions.world = 'MAIN';
+  }
+
+  const captchaToken = await Promise.race([
+    chrome.scripting.executeScript(executeOptions),
+    new Promise(resolve => setTimeout(() => resolve(null), 60000))
+  ]);
+
+  if (Array.isArray(captchaToken)) {
+    const validResult = captchaToken.find(r => r && r.result != null);
+    return validResult ? validResult.result : null;
+  }
+  return null;
 }
 
 // Retry MCP bridge connection periodically in case the server starts later

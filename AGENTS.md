@@ -46,3 +46,9 @@ Use OpenCodeRAG before reading/editing: `search_semantic` (search), `get_file_sk
 
 ## Inspection (Firefox DevTools MCP)
 `npx -y @mozilla/firefox-devtools-mcp@latest --connect-existing`. Tabs `_list_pages`; DOM `_take_snapshot`; network `_list_network_requests`→`_get_network_request`; screenshot `_screenshot_page`. Console/network need BiDi (`--headless`). After code changes: `node build.js` + reload the extension.
+
+**Firefox 152+ CDP note**: The REST endpoints (`/json/version`, `/json/list`) are **gone** — the HTTP server is a minimal `httpd.js`. Use the DevTools MCP with `--connect-existing` or connect via WebSocket (BiDi) directly. To start an inspectable Firefox for testing:
+```
+# Kill any existing Firefox first, then start with remote debugging + same profile
+/usr/lib/firefox/firefox --new-instance --profile ~/.mozilla/firefox/<profile> --remote-debugging-port 9222
+# The MCP will then find the browser via `--connect-existing`. You cannot use curl to the CDP port.

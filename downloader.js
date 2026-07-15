@@ -4244,6 +4244,30 @@
             return;
         }
 
+        if (message.action === "relay_generate") {
+            (async () => {
+                try {
+                    const payload = message.payload;
+                    const token = message.token;
+                    const response = await fetch('https://studio-api.prod.suno.com/api/generate/v2-web/', {
+                        method: 'POST',
+                        cache: 'no-store',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({ ...payload, token: null, token_provider: null }),
+                        credentials: 'include',
+                    });
+                    const data = await response.json();
+                    if (sendResponse) sendResponse({ ok: response.ok, status: response.status, data });
+                } catch (e) {
+                    if (sendResponse) sendResponse({ ok: false, error: e.message });
+                }
+            })();
+            return true;
+        }
+
         if (message.action === "log") {
             statusDiv.innerText = message.text + "\n" + statusDiv.innerText;
         }
