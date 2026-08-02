@@ -219,6 +219,10 @@ async function handleMcpExtensionRequest(msg) {
   }
 }
 
+// Fallback generation sitekey (Suno rotates this; we prefer the dynamically
+// discovered one from the suno.com tab below, but keep a known-good default).
+const FALLBACK_CAPTCHA_SITEKEY = '0x4AAAAAADI7xDNyj-3LcIbi';
+
 async function handleMcpCaptchaRequest() {
   const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
   const tab = sunoTabs.find(t => typeof t.id === 'number');
@@ -226,7 +230,7 @@ async function handleMcpCaptchaRequest() {
 
   const executeOptions = {
     target: { tabId: tab.id, frameIds: [0] },
-    func: async () => {
+    func: async (fallbackSitekey) => {
       const wjs = typeof window.wrappedJSObject !== 'undefined' ? window.wrappedJSObject : window;
 
       if (typeof wjs.turnstile === 'undefined') {
@@ -243,6 +247,33 @@ async function handleMcpCaptchaRequest() {
         }
       }
 
+      // Sitekey discovery runs inside the suno.com page (MAIN world) so it can
+      // read Suno's own JS chunks. Suno exposes the generation sitekey as
+      // NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY_GEN in one of its bundles; we
+      // scan same-origin scripts for that constant and fall back to the default.
+      async function findSunoCaptchaSitekey() {
+        try {
+          const resources = performance.getEntriesByType('resource')
+            .map(e => e.name)
+            .filter(u => u.startsWith('https://suno.com') && /\.js($|\?)/.test(u));
+          for (const url of resources.slice(0, 60)) {
+            try {
+              const res = await fetch(url, { cache: 'force-cache' });
+              const text = await res.text();
+              const genMatch = text.match(/NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY_GEN\|\|"([A-Za-z0-9_-]{20,})"/);
+              if (genMatch) return genMatch[1];
+            } catch (e) { /* try next chunk */ }
+          }
+        } catch (e) { /* fall through to default */ }
+        return fallbackSitekey;
+      }
+
+      let sitekey = null;
+      try {
+        sitekey = await findSunoCaptchaSitekey();
+      } catch (e) {}
+      if (!sitekey) sitekey = fallbackSitekey;
+
       return new Promise((resolve, reject) => {
         const container = document.createElement('div');
         container.style.cssText = 'position:fixed;top:10px;right:10px;z-index:999999;';
@@ -254,7 +285,7 @@ async function handleMcpCaptchaRequest() {
         }, 55000);
 
         wjs.turnstile.render(container, {
-          sitekey: '0x4AAAAAADI7xDNyj-3LcIbi',
+          sitekey,
           callback: (token) => {
             clearTimeout(timeout);
             container.remove();
@@ -275,9 +306,11 @@ async function handleMcpCaptchaRequest() {
     }
   };
 
+  const executeArgs = [{ value: FALLBACK_CAPTCHA_SITEKEY }];
   if (!isFirefox) {
     executeOptions.world = 'MAIN';
   }
+  executeOptions.args = executeArgs;
 
   const captchaToken = await Promise.race([
     chrome.scripting.executeScript(executeOptions),

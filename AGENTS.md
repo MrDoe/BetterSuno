@@ -41,7 +41,8 @@ Run: `npx bettersuno-mcp`. Registered globally in `~/.config/opencode/opencode.j
 Extension-side semantics that agents need to know:
 - **Playback** (`play_song`): works for ANY song (incl. other users' public playlists). Relays MCP→WS→`background.relayMcpPlaybackToTab`→suno tab→`downloader.togglePlay`; `start_time` seeks; `stop_playback` pauses. Needs the extension connected.
 - **Prompts**: stored in the extension's IndexedDB; relayed via WS `extension_request`/`response` (`background.handleMcpExtensionRequest`). Needs the extension connected.
-- **Captcha**: MCP server requests Turnstile solve from the extension over WS when Suno requires it.
+- **Captcha**: MCP server requests Turnstile solve from the extension over WS when Suno requires it. `background.handleMcpCaptchaRequest` runs in the suno.com tab (MAIN world) and **discovers the generation sitekey dynamically** by scanning Suno's own JS chunks for `NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY_GEN` (pattern `...||"0x4AAAA..."`), falling back to `FALLBACK_CAPTCHA_SITEKEY`. Do NOT hardcode Cloudflare's test key (`0x4AAA...AAAQAAA`) — Suno rejects those tokens. The returned token is sent back over WS as `captcha_token`; the MCP server passes it as `token` with `token_provider = captcha_version` from `/api/c/check`.
+- **`params: {}` required** in `POST /api/generate/v2-web/` bodies (2026-08). The extension's `generate_song` payload and `downloader.js` `relay_generate` both add it; missing it → 422 `token_validation_failed` / "We couldn't verify your request".
 
 ## Code navigation
 Use OpenCodeRAG before reading/editing: `search_semantic` (search), `get_file_skeleton` (orient), `find_usages` (before edits), `describe_image` (images). The index can be stale — verify with `read`.
