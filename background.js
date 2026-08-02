@@ -254,7 +254,7 @@ async function handleMcpCaptchaRequest() {
         }, 55000);
 
         wjs.turnstile.render(container, {
-          sitekey: '0x4AAAAAAAAAAAAAAAAAAAAAAAQAAA',
+          sitekey: '0x4AAAAAADI7xDNyj-3LcIbi',
           callback: (token) => {
             clearTimeout(timeout);
             container.remove();
@@ -3477,6 +3477,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           continue_at: null,
           continue_clip_id: null,
           task: null,
+          params: {},
           ...(msg.personaId ? { persona_id: msg.personaId, ...(msg.personaModel ? { persona_model: msg.personaModel } : {}) } : {}),
           metadata: {
             web_client_pathname: '/create',

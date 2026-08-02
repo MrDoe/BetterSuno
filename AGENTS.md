@@ -32,7 +32,9 @@ SW vs persistent bg; offscreen polling vs inline `ffPollOnce`; `world:"MAIN"` (C
 
 ## MCP server (`bettersuno-mcp`)
 The MCP server is now a **separate package** at [MrDoe/bettersuno-mcp](https://github.com/MrDoe/bettersuno-mcp) on [npm](https://www.npmjs.com/package/bettersuno-mcp).
-Run: `npx bettersuno-mcp`. Register in `.opencode/opencode.json` via `npx bettersuno-mcp`. Requires the extension loaded + an open Suno tab.
+Run: `npx bettersuno-mcp`. Registered globally in `~/.config/opencode/opencode.jsonc` (do NOT also register in `.opencode/opencode.json` — one registration per session). Requires the extension loaded + an open Suno tab.
+
+**Single-instance rule**: only ONE server can bind `ws://127.0.0.1:9423`; the extension connects to whoever owns the port. A second opencode session's server hits `EADDRINUSE` and now exits with an actionable FATAL message (instead of silently serving broken tools). If tools say "not connected", a stale instance owns the port → `pkill -f bettersuno-mcp` (the active session's server respawns on next tool use).
 
 **59 tools / 12 modules.** The server sits behind a WS bridge (`ws-bridge.js`); the MCP server's `suno-client.js` calls the Suno API directly (429 → exponential backoff 1s→30s, 5 retries; 401 → token auto-refreshed).
 

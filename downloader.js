@@ -4256,7 +4256,7 @@
                             'Content-Type': 'application/json',
                             'Authorization': `Bearer ${token}`,
                         },
-                        body: JSON.stringify({ ...payload, token: null, token_provider: null }),
+                        body: JSON.stringify({ ...payload, params: {}, token: null, token_provider: null }),
                         credentials: 'include',
                     });
                     const data = await response.json();
