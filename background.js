@@ -3509,9 +3509,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           token_provider: captchaProvider,
           continue_at: null,
           continue_clip_id: null,
-          task: null,
+          task: msg.personaId ? (msg.personaModel === 'style_persona' ? 'artist_consistency' : 'vox') : null,
           params: {},
-          ...(msg.personaId ? { persona_id: msg.personaId, ...(msg.personaModel ? { persona_model: msg.personaModel } : {}) } : {}),
+          ...(msg.personaId ? { persona_id: msg.personaId } : {}),
           metadata: {
             web_client_pathname: '/create',
             create_mode: 'custom',

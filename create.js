@@ -263,9 +263,9 @@
   function selectPersona(id, name, model) {
     personaState.selectedId = id;
     personaState.selectedName = name;
-    personaState.selectedModel = model || 'style_persona';
+    personaState.selectedModel = model || 'voice_persona';
     document.getElementById('create-persona').value = id;
-    document.getElementById('create-persona-model').value = model || 'style_persona';
+    document.getElementById('create-persona-model').value = model || 'voice_persona';
     updatePersonaDisplay();
     closePersonaDialog();
     // Highlight selected card
