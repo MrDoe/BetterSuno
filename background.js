@@ -3842,6 +3842,27 @@ function extractAudioUrlFromClip(clip) {
   return null;
 }
 
+// Resolve a real download URL for a clip from Suno's download endpoint.
+// GET /api/download/clip/{clip_id}?format=wav returns {status:"processing"} then
+// {status:"ready", download_url} (a genuine .wav). The web client uses this for
+// WAV; a plain .mp3->.wav CDN rewrite returns 403.
+async function resolveSunoDownloadUrl(clipId, format, token) {
+  const path = `https://studio-api.prod.suno.com/api/download/clip/${encodeURIComponent(clipId)}?format=${encodeURIComponent(format)}`;
+  const headers = token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const res = await fetch(path, { method: 'GET', headers });
+    if (!res.ok) throw new Error(`Download URL request failed: HTTP ${res.status}`);
+    const data = await res.json();
+    if (data?.status === 'ready' && data?.download_url) return data.download_url;
+    if (data?.status === 'error') throw new Error(data?.error || 'Suno download failed');
+    if (attempt >= 2 && (data?.ok === false || data?.status === 'not_available')) {
+      throw new Error(data?.detail || data?.error || 'Suno download not available');
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  throw new Error('Timed out waiting for Suno download URL');
+}
+
 function getAudioUrlForFormat(song, format) {
   if (!song || !song.audio_url) return null;
   const requested = String(format || '').trim().toLowerCase();
@@ -5462,7 +5483,12 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
         }
 
         const requestedExt = format.toLowerCase();
-        const audioUrl = getAudioUrlForFormat(song, requestedExt) || song.audio_url;
+        let audioUrl;
+        if (requestedExt === 'wav') {
+          audioUrl = await resolveSunoDownloadUrl(song.id, 'wav', token);
+        } else {
+          audioUrl = getAudioUrlForFormat(song, requestedExt) || song.audio_url;
+        }
         const baseName = `${safeTitle}_${song.id.slice(-4)}.${requestedExt}`;
         const directFilename = buildDownloadFilename(baseName);
 
@@ -5550,6 +5576,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
   persistDownloadState({ finishedAt: Date.now() });
   broadcastDownloadState();
 
+  // Final summary notification
   const completionText = wasStopped
     ? `⏹️ Download stopped. ${downloadedCount} songs downloaded, ${failedCount} failed, ${blockedSongs.length} blocked.`
     : downloadedFileCount > 0
