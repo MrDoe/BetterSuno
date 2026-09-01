@@ -2432,6 +2432,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === "resolve_suno_audio") {
+    (async () => {
+      try {
+        const token = await getApiTokenWithFallback('resolve_suno_audio');
+        const bytes = await resolveSunoAudioBytes(msg.clipId, msg.encryptedUrl, token);
+        sendResponse({ ok: true, data: bytes });
+      } catch (e) {
+        log('resolve_suno_audio failed:', e?.message || String(e));
+        sendResponse({ ok: false, error: e?.message || String(e) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === "fetch_user_playlists") {
     (async () => {
       try {
@@ -3822,8 +3836,23 @@ function extractVideoUrlFromClip(clip) {
   return null;
 }
 
+function extractMediaUrlFromClip(clip) {
+  const mediaUrls = Array.isArray(clip?.media_urls) ? clip.media_urls
+    : Array.isArray(clip?.metadata?.media_urls) ? clip.metadata.media_urls
+    : Array.isArray(clip?.meta?.media_urls) ? clip.meta.media_urls
+    : [];
+  if (mediaUrls.length === 0) return null;
+  const enc = mediaUrls.find(m => m && typeof m.url === 'string' && m.url && !!m.encoding);
+  const any = enc || mediaUrls.find(m => m && typeof m.url === 'string' && m.url);
+  if (!any) return null;
+  return { url: any.url, encrypted: !!any.encoding };
+}
+
 function extractAudioUrlFromClip(clip) {
   if (!clip || typeof clip !== 'object') return null;
+
+  const media = extractMediaUrlFromClip(clip);
+  if (media) return media.url;
 
   const directCandidates = [
     clip.audio_url,
@@ -3891,6 +3920,132 @@ function getPlayableAudioUrl(song, format) {
   }
 
   return song.audio_url;
+}
+
+// ============================================================================
+// Suno encrypted audio ("mango" / m4a-opus) — replicated from Suno's own player
+// (their webpack module 913328 + the /api/mango/rights license flow).
+//
+// Suno now serves clip audio as an encrypted fragmented MP4. `audio_url` is a
+// decoy (`/api/forbidden`); the real stream lives in `media_urls[]` as an
+// entry with `encoding` set (e.g. cloudfront m4a-opus). To play it:
+//   1. POST /api/mango/rights  -> { key, iv, glt }  (AES-GCM-wrapped AES-CTR key)
+//   2. userKey = SHA-256(bearer token) or SHA-256(glt) for guests
+//   3. unwrap key/iv via AES-GCM (additionalData = clipId)
+//   4. fetch the encrypted media, AES-CTR decrypt the whole stream
+//   5. the result is a plain MP4 -> blob -> audio element (no MSE needed)
+// ============================================================================
+
+async function sunoGetUserKey(secret) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
+  return crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['decrypt']);
+}
+
+function sunoToWrappedKey(b64) {
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+async function sunoDecodeContentKey(wrapped, contentId, userKey) {
+  const raw = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: wrapped.slice(0, 12), additionalData: new TextEncoder().encode(contentId) },
+    userKey,
+    wrapped.slice(12)
+  );
+  return crypto.subtle.importKey('raw', raw, { name: 'AES-CTR' }, false, ['decrypt']);
+}
+
+async function sunoDecodeContentIv(wrapped, contentId, userKey) {
+  return new Uint8Array(await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: wrapped.slice(0, 12), additionalData: new TextEncoder().encode(contentId) },
+    userKey,
+    wrapped.slice(12)
+  ));
+}
+
+function sunoIncrementCounter(iv, add) {
+  const out = new Uint8Array(16);
+  if (out.set(iv), add === 0) return out;
+  let n = BigInt(0);
+  for (let i = 0; i < 16; i++) n = (n << BigInt(8)) | BigInt(out[i]);
+  n += BigInt(add);
+  for (let i = 15; i >= 0; i--) { out[i] = Number(n & BigInt(255)); n >>= BigInt(8); }
+  return out;
+}
+
+async function sunoAesCtrDecryptFull(key, iv, data, chunkSize = 65536) {
+  const out = [];
+  let carry = new Uint8Array(0);
+  let counter = 0;
+  for (let pos = 0; pos < data.length; pos += chunkSize) {
+    const slice = data.slice(pos, pos + chunkSize);
+    const merged = new Uint8Array(carry.length + slice.length);
+    merged.set(carry); merged.set(slice, carry.length);
+    const fullLen = 16 * Math.floor(merged.length / 16);
+    if (fullLen > 0) {
+      const ctr = sunoIncrementCounter(iv, counter);
+      const dec = new Uint8Array(await crypto.subtle.decrypt(
+        { name: 'AES-CTR', counter: ctr, length: 128 },
+        key,
+        merged.buffer.slice(merged.byteOffset, merged.byteOffset + fullLen)
+      ));
+      out.push(dec);
+      counter += fullLen / 16;
+    }
+    carry = merged.slice(fullLen);
+  }
+  if (carry.length > 0) {
+    const ctr = sunoIncrementCounter(iv, counter);
+    out.push(new Uint8Array(await crypto.subtle.decrypt(
+      { name: 'AES-CTR', counter: ctr, length: 128 },
+      key,
+      carry.buffer.slice(carry.byteOffset, carry.byteOffset + carry.byteLength)
+    )));
+  }
+  const total = out.reduce((a, b) => a + b.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of out) { result.set(chunk, offset); offset += chunk.length; }
+  return result;
+}
+
+// Fetches the license + media and returns decrypted audio bytes for a clip.
+// Encrypted media URL is the `media_urls[]` entry with `encoding` set.
+async function resolveSunoAudioBytes(clipId, encryptedUrl, token) {
+  // If we only have the decoy/stale URL (older cached clips stored `audio_url`
+  // as /api/forbidden before the media_urls change), re-fetch the clip from the
+  // feed to obtain the real encrypted media URL. Suno's own player does the same
+  // (POST /api/feed/v3 with filters.ids.clipIds).
+  if (!encryptedUrl || /forbidden/i.test(String(encryptedUrl))) {
+    const lookup = await fetchFeedSongsByIds(token, [clipId], { logPrefix: 'resolve_suno_audio' });
+    const clip = Array.isArray(lookup?.clips) ? lookup.clips[0] : null;
+    const media = extractMediaUrlFromClip(clip);
+    encryptedUrl = media?.url || null;
+    if (!encryptedUrl) throw new Error('No playable media URL for clip');
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const rightsResp = await fetch('https://studio-api-prod.suno.com/api/mango/rights', {
+    method: 'POST',
+    cache: 'no-store',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({ content_params: { content_id: clipId, content_type: 'clip' } })
+  });
+  if (!rightsResp.ok) throw new Error(`Suno license request failed: HTTP ${rightsResp.status}`);
+  const rights = await rightsResp.json();
+  if (!rights?.key || !rights?.iv) throw new Error('Suno license response missing key/iv');
+
+  const userKey = token && rights.glt
+    ? await sunoGetUserKey(token)
+    : await sunoGetUserKey(rights.glt || token);
+  const aesKey = await sunoDecodeContentKey(sunoToWrappedKey(rights.key), clipId, userKey);
+  const aesIv = await sunoDecodeContentIv(sunoToWrappedKey(rights.iv), clipId, userKey);
+
+  const mediaResp = await fetch(encryptedUrl, { cache: 'no-store' });
+  if (!mediaResp.ok) throw new Error(`Suno media fetch failed: HTTP ${mediaResp.status}`);
+  const encData = new Uint8Array(await mediaResp.arrayBuffer());
+  return await sunoAesCtrDecryptFull(aesKey, aesIv, encData);
 }
 
 function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
@@ -4026,6 +4181,7 @@ function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
     id: rawClip.id,
     title: rawClip.title || `Untitled_${rawClip.id || 'song'}`,
     audio_url: extractAudioUrlFromClip(rawClip),
+    audio_encrypted: !!extractMediaUrlFromClip(rawClip)?.encrypted,
     video_url: extractVideoUrlFromClip(rawClip),
     image_url: extractImageUrlFromClip(rawClip),
     lyrics: extractLyricsFromClip(rawClip),
@@ -5473,6 +5629,23 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
         let audioUrl;
         if (requestedExt === 'wav') {
           audioUrl = await resolveSunoDownloadUrl(song.id, 'wav', token);
+        } else if ((song.audio_encrypted || /forbidden/i.test(String(song.audio_url))) && song.audio_url) {
+          // Suno encrypts clip audio; decrypt it before downloading so the file
+          // is usable, otherwise the saved bytes are the encrypted stream.
+          try {
+            const decrypted = await resolveSunoAudioBytes(song.id, song.audio_url, token);
+            const baseName = `${safeTitle}_${song.id.slice(-4)}.${requestedExt}`;
+            await downloadBlobFile(new Blob([decrypted], { type: 'audio/mp4' }), buildDownloadFilename(baseName));
+            downloadedSomething = true;
+            downloadedFileCount += 1;
+            continue;
+          } catch (decryptError) {
+            notifyDownloadUi({
+              action: 'log',
+              text: `⚠️ ${title}: decrypted download failed (${decryptError.message}); falling back to URL.`
+            });
+          }
+          audioUrl = song.audio_url;
         } else {
           audioUrl = getPlayableAudioUrl(song, requestedExt) || song.audio_url;
         }

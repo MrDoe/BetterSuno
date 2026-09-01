@@ -388,6 +388,18 @@
         return extractFirstMatchingValue(source, paths, extractUrl);
     }
 
+    function extractMediaUrlFromClip(clip) {
+        const mediaUrls = Array.isArray(clip?.media_urls) ? clip.media_urls
+            : Array.isArray(clip?.metadata?.media_urls) ? clip.metadata.media_urls
+            : Array.isArray(clip?.meta?.media_urls) ? clip.meta.media_urls
+            : [];
+        if (mediaUrls.length === 0) return null;
+        const enc = mediaUrls.find(m => m && typeof m.url === 'string' && m.url && !!m.encoding);
+        const any = enc || mediaUrls.find(m => m && typeof m.url === 'string' && m.url);
+        if (!any) return null;
+        return { url: any.url, encrypted: !!any.encoding };
+    }
+
     function extractSongIdFromClipItem(rawClip) {
         const candidates = [
             rawClip?.clip?.id,
@@ -648,7 +660,9 @@
             id: songId,
             title: clip.title || rawClip?.title || `Untitled_${songId || 'song'}`,
             audio_url: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.audio, value => value || null)
-                || extractFirstMatchingValue(rawClip, SONG_CLIP_FIELD_PATHS.audio, value => value || null),
+                || extractFirstMatchingValue(rawClip, SONG_CLIP_FIELD_PATHS.audio, value => value || null)
+                || extractMediaUrlFromClip(rawClip)?.url || extractMediaUrlFromClip(clip)?.url,
+            audio_encrypted: !!(extractMediaUrlFromClip(rawClip)?.encrypted || extractMediaUrlFromClip(clip)?.encrypted),
             video_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.video)
                 || extractUrlFromPaths(rawClip, SONG_CLIP_FIELD_PATHS.video),
             video_cover_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.coverVideo)
@@ -1771,6 +1785,28 @@
         updatePlayerProgressUi();
     }
 
+    function isSunoDecoyUrl(url) {
+        return !!url && /forbidden/i.test(String(url));
+    }
+
+    async function resolveEncryptedAudioBlob(song) {
+        const response = await sendMessageWithRetry({
+            action: 'resolve_suno_audio',
+            clipId: song.id,
+            encryptedUrl: song.audio_url
+        });
+        if (!response?.ok || !response.data) {
+            throw new Error(response?.error || 'Failed to resolve encrypted audio');
+        }
+        const blob = new Blob([response.data], { type: 'audio/mp4' });
+        try {
+            await saveAudioBlobToIDB(song.id, blob);
+        } catch (e) {
+            // caching failure is non-fatal for playback
+        }
+        return blob;
+    }
+
     async function togglePlay(song) {
         if (!song || !song.audio_url) return;
 
@@ -1805,6 +1841,20 @@
             if (cachedBlob) {
                 currentBlobUrl = URL.createObjectURL(cachedBlob);
                 audioElement.src = currentBlobUrl;
+            } else if (song.audio_encrypted || isSunoDecoyUrl(song.audio_url) || !song.audio_url) {
+                // Suno encrypts clip audio (m4a-opus). Fetch the license, decrypt
+                // in the background, cache the result, then play the blob. Also
+                // handles older cached songs whose audio_url is still the
+                // /api/forbidden decoy (re-fetched in the background).
+                try {
+                    const blob = await resolveEncryptedAudioBlob(song);
+                    currentBlobUrl = URL.createObjectURL(blob);
+                    audioElement.src = currentBlobUrl;
+                } catch (e) {
+                    console.error('[Downloader] Encrypted audio resolve failed:', e?.message || String(e));
+                    const desiredFormat = getSelectedFormat();
+                    audioElement.src = getPlayableAudioUrl(song, desiredFormat) || song.audio_url;
+                }
             } else {
                 const desiredFormat = getSelectedFormat();
                 audioElement.src = getPlayableAudioUrl(song, desiredFormat) || song.audio_url;
@@ -3043,11 +3093,15 @@
 
             try {
                 const desiredFormat = getSelectedFormat();
-                const audioUrl = getPlayableAudioUrl(song, desiredFormat) || song.audio_url;
-                const response = await fetch(audioUrl);
-
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const blob = await response.blob();
+                let blob;
+                if (song.audio_encrypted || isSunoDecoyUrl(song.audio_url)) {
+                    blob = await resolveEncryptedAudioBlob(song);
+                } else {
+                    const audioUrl = getPlayableAudioUrl(song, desiredFormat) || song.audio_url;
+                    const response = await fetch(audioUrl);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    blob = await response.blob();
+                }
                 await saveAudioBlobToIDB(song.id, blob);
 
                 // Also cache a small thumbnail (64px wide via CDN query param)

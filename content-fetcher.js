@@ -218,8 +218,23 @@
         return null;
     }
 
+    function extractMediaUrlFromClip(clip) {
+        const mediaUrls = Array.isArray(clip?.media_urls) ? clip.media_urls
+            : Array.isArray(clip?.metadata?.media_urls) ? clip.metadata.media_urls
+            : Array.isArray(clip?.meta?.media_urls) ? clip.meta.media_urls
+            : [];
+        if (mediaUrls.length === 0) return null;
+        const enc = mediaUrls.find(m => m && typeof m.url === 'string' && m.url && !!m.encoding);
+        const any = enc || mediaUrls.find(m => m && typeof m.url === 'string' && m.url);
+        if (!any) return null;
+        return { url: any.url, encrypted: !!any.encoding };
+    }
+
     function extractAudioUrlFromClip(clip) {
         if (!clip || typeof clip !== 'object') return null;
+
+        const media = extractMediaUrlFromClip(clip);
+        if (media) return media.url;
 
         const directCandidates = [
             clip.audio_url,
@@ -508,6 +523,7 @@
                     id: clip.id,
                     title: clip.title || `Untitled_${clip.id}`,
                     audio_url: extractAudioUrlFromClip(clip),
+                    audio_encrypted: !!extractMediaUrlFromClip(clip)?.encrypted,
                     video_url: extractVideoUrlFromClip(clip),
                     image_url: extractImageUrlFromClip(clip),
                     lyrics: extractLyricsFromClip(clip),
