@@ -1807,7 +1807,7 @@
                 audioElement.src = currentBlobUrl;
             } else {
                 const desiredFormat = getSelectedFormat();
-                audioElement.src = getAudioUrlForFormat(song, desiredFormat) || song.audio_url;
+                audioElement.src = getPlayableAudioUrl(song, desiredFormat) || song.audio_url;
             }
 
             audioElement.currentTime = 0;
@@ -1821,16 +1821,15 @@
             const currentSongIdForError = song.id;
             const onErrorHandler = () => {
                 if (currentPlayingSongId !== currentSongIdForError) return;
-                
-                const currentSrc = String(audioElement.src || '').toLowerCase();
-                if (currentSrc.includes('.m4a') || currentSrc.includes('format=m4a')) {
-                    const mp3Url = getAudioUrlForFormat(song, 'mp3');
-                    if (mp3Url && mp3Url !== audioElement.src) {
-                        console.log('[Downloader] M4A play failed, falling back to MP3:', mp3Url);
-                        audioElement.src = mp3Url;
-                        audioElement.load();
-                        audioElement.play().catch(e => console.error('[Downloader] MP3 fallback also failed:', e));
-                    }
+
+                // Suno's CDN rejects synthesized format rewrites, so fall back to
+                // the raw audio URL the API actually served (never re-rewrite).
+                const rawUrl = song.audio_url;
+                if (rawUrl && rawUrl !== audioElement.src) {
+                    console.log('[Downloader] Playback failed, falling back to raw Suno URL:', rawUrl);
+                    audioElement.src = rawUrl;
+                    audioElement.load();
+                    audioElement.play().catch(e => console.error('[Downloader] Raw URL fallback also failed:', e));
                 }
             };
             audioElement.addEventListener('error', onErrorHandler, { once: true });
@@ -2218,12 +2217,15 @@
         return el ? el.value : 'm4a';
     }
 
-    function getAudioUrlForFormat(song, format) {
+    // Playback/caching must use a URL Suno actually serves. This never
+    // synthesizes a URL by swapping the extension (.mp3 -> .m4a) or appending a
+    // format= query — Suno's CDN rejects those rewrites (403), which broke inline
+    // playback. It only returns URLs Suno advertises for the song, falling back
+    // to the raw audio_url.
+    function getPlayableAudioUrl(song, format) {
         if (!song || !song.audio_url) return null;
         const requested = String(format || '').trim().toLowerCase();
-        const originalUrl = String(song.audio_url || '').trim();
-
-        if (!requested || !originalUrl) return originalUrl;
+        if (!requested) return song.audio_url;
 
         const urlCandidates = [
             song.audio_url,
@@ -2244,20 +2246,7 @@
             if (requested === 'mp3' && normalized.includes('.mp3')) return candidate;
         }
 
-        const queryIndex = originalUrl.indexOf('?');
-        const base = queryIndex >= 0 ? originalUrl.slice(0, queryIndex) : originalUrl;
-        const query = queryIndex >= 0 ? originalUrl.slice(queryIndex) : '';
-        const converted = base.replace(/\.([a-z0-9]{2,5})$/i, `.${requested}`);
-
-        if (converted !== base) {
-            return converted + query;
-        }
-
-        if (!/\bformat=/i.test(originalUrl)) {
-            return originalUrl + (originalUrl.includes('?') ? '&' : '?') + `format=${encodeURIComponent(requested)}`;
-        }
-
-        return originalUrl;
+        return song.audio_url;
     }
 
     const formatRadios = document.querySelectorAll('input[name="format"]');
@@ -3054,18 +3043,8 @@
 
             try {
                 const desiredFormat = getSelectedFormat();
-                let audioUrl = getAudioUrlForFormat(song, desiredFormat) || song.audio_url;
-                let response = await fetch(audioUrl);
-                
-                // Fallback: If M4A fails and we haven't tried MP3 yet, try MP3
-                if (!response.ok && desiredFormat === 'm4a') {
-                    const mp3Url = getAudioUrlForFormat(song, 'mp3');
-                    if (mp3Url && mp3Url !== audioUrl) {
-                        console.log(`[Downloader] M4A fetch failed for "${song.title}", falling back to MP3:`, mp3Url);
-                        audioUrl = mp3Url;
-                        response = await fetch(audioUrl);
-                    }
-                }
+                const audioUrl = getPlayableAudioUrl(song, desiredFormat) || song.audio_url;
+                const response = await fetch(audioUrl);
 
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const blob = await response.blob();

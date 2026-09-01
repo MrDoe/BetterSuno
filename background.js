@@ -143,6 +143,9 @@ function connectMcpBridge() {
           }
         }).catch(err => {
           log('mcp-bridge: captcha solve failed:', err.message);
+          if (mcpWs && mcpWs.readyState === WebSocket.OPEN) {
+            mcpWs.send(JSON.stringify({ type: 'captcha_token', token: null, error: err.message }));
+          }
         });
       } else if (msg.type === 'play_song' || msg.type === 'stop_playback') {
         relayMcpPlaybackToTab(msg);
@@ -233,18 +236,18 @@ async function handleMcpCaptchaRequest() {
     func: async (fallbackSitekey) => {
       const wjs = typeof window.wrappedJSObject !== 'undefined' ? window.wrappedJSObject : window;
 
+      // AMO compliance: do not load remote code. Only use Turnstile if Suno
+      // has already loaded it on the page. Poll briefly for Suno's lazy load
+      // but never inject the Turnstile CDN script ourselves (remote code
+      // execution – rejected by Mozilla).
       if (typeof wjs.turnstile === 'undefined') {
-        await new Promise((resolve, reject) => {
-          const script = document.createElement('script');
-          script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-          script.onload = resolve;
-          script.onerror = reject;
-          document.head.appendChild(script);
-        });
         for (let i = 0; i < 50; i++) {
           if (typeof wjs.turnstile !== 'undefined') break;
           await new Promise(r => setTimeout(r, 100));
         }
+      }
+      if (typeof wjs.turnstile === 'undefined') {
+        throw new Error('Turnstile not loaded on this page – please navigate to suno.com/create and retry');
       }
 
       // Sitekey discovery runs inside the suno.com page (MAIN world) so it can
@@ -3863,11 +3866,10 @@ async function resolveSunoDownloadUrl(clipId, format, token) {
   throw new Error('Timed out waiting for Suno download URL');
 }
 
-function getAudioUrlForFormat(song, format) {
+function getPlayableAudioUrl(song, format) {
   if (!song || !song.audio_url) return null;
   const requested = String(format || '').trim().toLowerCase();
-  const originalUrl = String(song.audio_url || '').trim();
-  if (!requested || !originalUrl) return originalUrl;
+  if (!requested) return song.audio_url;
 
   const urlCandidates = [
     song.audio_url,
@@ -3888,22 +3890,7 @@ function getAudioUrlForFormat(song, format) {
     if (requested === 'mp3' && normalized.includes('.mp3')) return candidate;
   }
 
-  // Fallback: replace the extension in the main audio URL if present.
-  const queryIndex = originalUrl.indexOf('?');
-  const base = queryIndex >= 0 ? originalUrl.slice(0, queryIndex) : originalUrl;
-  const query = queryIndex >= 0 ? originalUrl.slice(queryIndex) : '';
-
-  const converted = base.replace(/\.([a-z0-9]{2,5})$/i, `.${requested}`);
-  if (converted !== base) {
-    return converted + query;
-  }
-
-  // Last resort: try adding format query param if not present.
-  if (!/format=/i.test(originalUrl)) {
-    return originalUrl + (originalUrl.includes('?') ? '&' : '?') + `format=${encodeURIComponent(requested)}`;
-  }
-
-  return originalUrl;
+  return song.audio_url;
 }
 
 function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
@@ -5487,7 +5474,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
         if (requestedExt === 'wav') {
           audioUrl = await resolveSunoDownloadUrl(song.id, 'wav', token);
         } else {
-          audioUrl = getAudioUrlForFormat(song, requestedExt) || song.audio_url;
+          audioUrl = getPlayableAudioUrl(song, requestedExt) || song.audio_url;
         }
         const baseName = `${safeTitle}_${song.id.slice(-4)}.${requestedExt}`;
         const directFilename = buildDownloadFilename(baseName);
