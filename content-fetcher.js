@@ -230,6 +230,21 @@
         return { url: any.url, encrypted: !!any.encoding };
     }
 
+    // Unencrypted progressive assets (mp3/m4a) Suno advertises for a clip.
+    function extractProgressiveMediaUrlsFromClip(clip) {
+        if (!clip || typeof clip !== 'object') return [];
+        const mediaUrls = Array.isArray(clip.media_urls) ? clip.media_urls
+            : Array.isArray(clip?.metadata?.media_urls) ? clip.metadata.media_urls
+            : Array.isArray(clip?.meta?.media_urls) ? clip.meta.media_urls
+            : [];
+        return mediaUrls
+            .filter(m => m && typeof m.url === 'string' && m.url && !m.encoding)
+            .map(m => ({
+                url: m.url,
+                content_type: String(m.content_type || '').toLowerCase()
+            }));
+    }
+
     function extractAudioUrlFromClip(clip) {
         if (!clip || typeof clip !== 'object') return null;
 
@@ -524,6 +539,7 @@
                     title: clip.title || `Untitled_${clip.id}`,
                     audio_url: extractAudioUrlFromClip(clip),
                     audio_encrypted: !!extractMediaUrlFromClip(clip)?.encrypted,
+                    media_urls: extractProgressiveMediaUrlsFromClip(clip),
                     video_url: extractVideoUrlFromClip(clip),
                     image_url: extractImageUrlFromClip(clip),
                     lyrics: extractLyricsFromClip(clip),

@@ -400,6 +400,34 @@
         return { url: any.url, encrypted: !!any.encoding };
     }
 
+    // Unencrypted progressive assets (mp3/m4a) Suno advertises for a clip.
+    function extractProgressiveMediaUrlsFromClip(clip) {
+        if (!clip || typeof clip !== 'object') return [];
+        const mediaUrls = Array.isArray(clip.media_urls) ? clip.media_urls
+            : Array.isArray(clip?.metadata?.media_urls) ? clip.metadata.media_urls
+            : Array.isArray(clip?.meta?.media_urls) ? clip.meta.media_urls
+            : [];
+        return mediaUrls
+            .filter(m => m && typeof m.url === 'string' && m.url && !m.encoding)
+            .map(m => ({
+                url: m.url,
+                content_type: String(m.content_type || '').toLowerCase()
+            }));
+    }
+
+    function collectProgressiveMediaUrls(...sources) {
+        const seen = new Set();
+        const merged = [];
+        sources.forEach(source => {
+            extractProgressiveMediaUrlsFromClip(source).forEach(entry => {
+                if (!entry?.url || seen.has(entry.url)) return;
+                seen.add(entry.url);
+                merged.push(entry);
+            });
+        });
+        return merged;
+    }
+
     function extractSongIdFromClipItem(rawClip) {
         const candidates = [
             rawClip?.clip?.id,
@@ -599,6 +627,8 @@
             ...existingSong,
             title: freshSong.title ?? existingSong.title,
             audio_url: freshSong.audio_url || existingSong.audio_url,
+            audio_encrypted: freshSong.audio_encrypted ?? existingSong.audio_encrypted,
+            media_urls: freshSong.media_urls?.length ? freshSong.media_urls : existingSong.media_urls,
             video_url: freshSong.video_url || existingSong.video_url,
             image_url: freshSong.image_url || existingSong.image_url,
             lyrics: freshSong.lyrics ?? existingSong.lyrics,
@@ -662,7 +692,12 @@
             audio_url: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.audio, value => value || null)
                 || extractFirstMatchingValue(rawClip, SONG_CLIP_FIELD_PATHS.audio, value => value || null)
                 || extractMediaUrlFromClip(rawClip)?.url || extractMediaUrlFromClip(clip)?.url,
-            audio_encrypted: !!(extractMediaUrlFromClip(rawClip)?.encrypted || extractMediaUrlFromClip(clip)?.encrypted),
+            audio_encrypted: typeof clip.audio_encrypted === 'boolean'
+                ? clip.audio_encrypted
+                : (typeof rawClip?.audio_encrypted === 'boolean'
+                    ? rawClip.audio_encrypted
+                    : !!(extractMediaUrlFromClip(rawClip)?.encrypted || extractMediaUrlFromClip(clip)?.encrypted)),
+            media_urls: collectProgressiveMediaUrls(rawClip, clip),
             video_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.video)
                 || extractUrlFromPaths(rawClip, SONG_CLIP_FIELD_PATHS.video),
             video_cover_url: extractUrlFromPaths(clip, SONG_CLIP_FIELD_PATHS.coverVideo)
@@ -1798,7 +1833,9 @@
         if (!response?.ok || !response.data) {
             throw new Error(response?.error || 'Failed to resolve encrypted audio');
         }
-        const blob = new Blob([response.data], { type: 'audio/mp4' });
+        // Background transports binary as base64 (Chrome messaging is JSON).
+        const bytes = typeof response.data === 'string' ? base64ToBytes(response.data) : response.data;
+        const blob = new Blob([bytes], { type: 'audio/mp4' });
         try {
             await saveAudioBlobToIDB(song.id, blob);
         } catch (e) {
@@ -2575,6 +2612,15 @@
         }
     }
 
+    function base64ToBytes(base64) {
+        const binary = atob(String(base64 || ''));
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes;
+    }
+
     function saveFileInPage(bytes, mimeType, filename) {
         let payload = null;
 
@@ -2605,6 +2651,82 @@
         setTimeout(() => {
             URL.revokeObjectURL(objectUrl);
         }, 60000);
+    }
+
+    function writeAsciiToView(view, offset, text) {
+        for (let i = 0; i < text.length; i++) {
+            view.setUint8(offset + i, text.charCodeAt(i));
+        }
+    }
+
+    // Encodes decoded audio to 16-bit PCM WAV (RIFF).
+    function encodePcmWav(audioBuffer) {
+        const numChannels = audioBuffer.numberOfChannels;
+        const sampleRate = audioBuffer.sampleRate;
+        const length = audioBuffer.length;
+        const blockAlign = numChannels * 2;
+        const dataSize = length * blockAlign;
+        const buffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(buffer);
+
+        writeAsciiToView(view, 0, 'RIFF');
+        view.setUint32(4, 36 + dataSize, true);
+        writeAsciiToView(view, 8, 'WAVE');
+        writeAsciiToView(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * blockAlign, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, 16, true);
+        writeAsciiToView(view, 36, 'data');
+        view.setUint32(40, dataSize, true);
+
+        const channels = [];
+        for (let c = 0; c < numChannels; c++) {
+            channels.push(audioBuffer.getChannelData(c));
+        }
+
+        let offset = 44;
+        for (let i = 0; i < length; i++) {
+            for (let c = 0; c < numChannels; c++) {
+                const sample = Math.max(-1, Math.min(1, channels[c][i]));
+                view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                offset += 2;
+            }
+        }
+
+        return buffer;
+    }
+
+    // Decodes the (already decrypted) stream in the page and returns WAV bytes.
+    async function transcodeAudioBytesToWav(encodedBytes) {
+        let payload = null;
+        if (encodedBytes instanceof ArrayBuffer) {
+            payload = encodedBytes;
+        } else if (ArrayBuffer.isView(encodedBytes)) {
+            payload = encodedBytes.buffer.slice(encodedBytes.byteOffset, encodedBytes.byteOffset + encodedBytes.byteLength);
+        } else if (Array.isArray(encodedBytes)) {
+            payload = new Uint8Array(encodedBytes).buffer;
+        }
+
+        if (!(payload instanceof ArrayBuffer)) {
+            throw new Error('Invalid WAV render payload');
+        }
+
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextCtor) {
+            throw new Error('Web Audio API unavailable for WAV rendering');
+        }
+
+        const ctx = new AudioContextCtor();
+        try {
+            const audioBuffer = await ctx.decodeAudioData(payload.slice(0));
+            return encodePcmWav(audioBuffer);
+        } finally {
+            try { await ctx.close(); } catch (e) {}
+        }
     }
 
     async function checkFetchState() {
@@ -4172,7 +4294,7 @@
         }
 
         const selectedTypes = [];
-        if (downloadOptions.music) selectedTypes.push(format.toUpperCase());
+        if (downloadOptions.music) selectedTypes.push(format.toLowerCase() === 'wav_credit' ? 'WAV (1 credit)' : format.toUpperCase());
         if (downloadOptions.lyrics) selectedTypes.push("lyrics");
         if (downloadOptions.image) selectedTypes.push("images");
         statusDiv.innerText = blocked.length > 0
@@ -4244,12 +4366,28 @@
     api.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.action === "save_file_in_page") {
             try {
-                saveFileInPage(message.bytes, message.mimeType, message.filename);
+                const bytes = message.bytesBase64 ? base64ToBytes(message.bytesBase64) : message.bytes;
+                saveFileInPage(bytes, message.mimeType, message.filename);
                 sendResponse({ ok: true });
             } catch (error) {
                 console.error('[Downloader] Failed to save file in page:', error);
                 sendResponse({ ok: false, error: error?.message || String(error) });
             }
+            return true;
+        }
+
+        if (message.action === "render_wav_in_page") {
+            (async () => {
+                try {
+                    const bytes = message.bytesBase64 ? base64ToBytes(message.bytesBase64) : message.bytes;
+                    const wavBytes = await transcodeAudioBytesToWav(bytes);
+                    saveFileInPage(wavBytes, 'audio/wav', message.filename);
+                    sendResponse({ ok: true });
+                } catch (error) {
+                    console.error('[Downloader] Failed to render WAV in page:', error);
+                    sendResponse({ ok: false, error: error?.message || String(error) });
+                }
+            })();
             return true;
         }
 

@@ -7,7 +7,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 ### 🧭 Updated Panel UI
 - **Top-left bell launcher** - BetterSuno now opens from a fixed bell in the top-left corner
 - **Song Library first** - The Song Library tab is the default first tab, with Notifications as the second tab
-- **Download controls near action button** - M4A/WAV + music/lyrics/image options are grouped right next to the Download button
+- **Download controls near action button** - M4A/MP3/WAV + music/lyrics/image options are grouped right next to the Download button
 
 ### 🔔 Notifications
 - **Live updates** - See your latest Suno notifications in real-time without grouping of similar events
@@ -15,7 +15,10 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 
 ### 🎵 Song Library & Batch Download
 - **Browse your library** - View all your Suno creations in one place
-- **Bulk downloads** - Download multiple own songs at once in M4A or WAV format
+- **Bulk downloads** - Download multiple own songs at once as M4A, MP3, or WAV
+  - **M4A / MP3** - Saved from Suno's unlimited stream, no download credits used
+  - **WAV (local)** - Rendered in your browser from the stream; no credits, quality limited to the stream
+  - **WAV (1 credit)** - Official lossless WAV from Suno; uses one Suno download credit and falls back to a local render if unavailable
 - **Complete packages** - Include lyrics and cover images with downloads of your own songs
 - **Smart filtering** - Filter by liked songs, stems, public/private, offline-only, or search by title
 - **Playlist picker** - Load your Suno playlists into a dropdown and view playlist tracks directly

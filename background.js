@@ -2437,7 +2437,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const token = await getApiTokenWithFallback('resolve_suno_audio');
         const bytes = await resolveSunoAudioBytes(msg.clipId, msg.encryptedUrl, token);
-        sendResponse({ ok: true, data: bytes });
+        sendResponse({ ok: true, data: bytesToBase64(bytes), encoding: 'base64' });
       } catch (e) {
         log('resolve_suno_audio failed:', e?.message || String(e));
         sendResponse({ ok: false, error: e?.message || String(e) });
@@ -3848,6 +3848,39 @@ function extractMediaUrlFromClip(clip) {
   return { url: any.url, encrypted: !!any.encoding };
 }
 
+// Unencrypted, progressive media assets Suno advertises for a clip (mp3/m4a).
+// These can be downloaded directly without the license/decrypt dance and are
+// not the metered official-download route.
+function extractProgressiveMediaUrlsFromClip(clip) {
+  if (!clip || typeof clip !== 'object') return [];
+  const mediaUrls = Array.isArray(clip.media_urls) ? clip.media_urls
+    : Array.isArray(clip?.metadata?.media_urls) ? clip.metadata.media_urls
+    : Array.isArray(clip?.meta?.media_urls) ? clip.meta.media_urls
+    : [];
+  return mediaUrls
+    .filter(m => m && typeof m.url === 'string' && m.url && !m.encoding)
+    .map(m => ({
+      url: m.url,
+      content_type: String(m.content_type || '').toLowerCase()
+    }));
+}
+
+function pickProgressiveMediaEntry(mediaUrls, format) {
+  const requested = String(format || '').trim().toLowerCase();
+  if (!requested || !Array.isArray(mediaUrls) || mediaUrls.length === 0) return null;
+
+  const matches = (entry) => {
+    const type = String(entry?.content_type || '').toLowerCase();
+    const url = String(entry?.url || '').toLowerCase().split('?')[0];
+    if (requested === 'mp3') return type.includes('mp3') || url.endsWith('.mp3');
+    if (requested === 'm4a') return type.includes('m4a') || type.includes('mp4') || url.endsWith('.m4a');
+    if (requested === 'wav') return type.includes('wav') || url.endsWith('.wav');
+    return false;
+  };
+
+  return mediaUrls.find(matches) || null;
+}
+
 function extractAudioUrlFromClip(clip) {
   if (!clip || typeof clip !== 'object') return null;
 
@@ -3877,49 +3910,33 @@ function extractAudioUrlFromClip(clip) {
 // Resolve a real download URL for a clip from Suno's download endpoint.
 // GET /api/download/clip/{clip_id}?format=wav returns {status:"processing"} then
 // {status:"ready", download_url} (a genuine .wav). The web client uses this for
-// WAV; a plain .mp3->.wav CDN rewrite returns 403.
+// WAV; a plain .mp3->.wav CDN rewrite returns 403. This route is metered by
+// Suno's download credits, so callers must treat failures as non-fatal and fall
+// back to the unlimited stream.
 async function resolveSunoDownloadUrl(clipId, format, token) {
   const path = `https://studio-api.prod.suno.com/api/download/clip/${encodeURIComponent(clipId)}?format=${encodeURIComponent(format)}`;
   const headers = token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-  for (let attempt = 0; attempt < 20; attempt++) {
+  for (let attempt = 0; attempt < 6; attempt++) {
     const res = await fetch(path, { method: 'GET', headers });
-    if (!res.ok) throw new Error(`Download URL request failed: HTTP ${res.status}`);
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const body = await res.json();
+        detail = body?.detail || body?.error || body?.message || '';
+      } catch (e) {
+        // body was not JSON
+      }
+      throw new Error(`Suno download unavailable: HTTP ${res.status}${detail ? ` (${detail})` : ''}`);
+    }
     const data = await res.json();
     if (data?.status === 'ready' && data?.download_url) return data.download_url;
     if (data?.status === 'error') throw new Error(data?.error || 'Suno download failed');
-    if (attempt >= 2 && (data?.ok === false || data?.status === 'not_available')) {
+    if (attempt >= 1 && (data?.ok === false || data?.status === 'not_available')) {
       throw new Error(data?.detail || data?.error || 'Suno download not available');
     }
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 2000));
   }
   throw new Error('Timed out waiting for Suno download URL');
-}
-
-function getPlayableAudioUrl(song, format) {
-  if (!song || !song.audio_url) return null;
-  const requested = String(format || '').trim().toLowerCase();
-  if (!requested) return song.audio_url;
-
-  const urlCandidates = [
-    song.audio_url,
-    song.stream_audio_url,
-    song.song_path,
-    song.metadata?.audio_url,
-    song.metadata?.stream_audio_url,
-    song.metadata?.song_path,
-    song.meta?.audio_url,
-    song.meta?.stream_audio_url,
-    song.meta?.song_path
-  ].filter(Boolean);
-
-  for (const candidate of urlCandidates) {
-    const normalized = String(candidate || '').toLowerCase();
-    if (requested === 'm4a' && normalized.includes('.m4a')) return candidate;
-    if (requested === 'wav' && normalized.includes('.wav')) return candidate;
-    if (requested === 'mp3' && normalized.includes('.mp3')) return candidate;
-  }
-
-  return song.audio_url;
 }
 
 // ============================================================================
@@ -4182,6 +4199,7 @@ function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
     title: rawClip.title || `Untitled_${rawClip.id || 'song'}`,
     audio_url: extractAudioUrlFromClip(rawClip),
     audio_encrypted: !!extractMediaUrlFromClip(rawClip)?.encrypted,
+    media_urls: extractProgressiveMediaUrlsFromClip(rawClip),
     video_url: extractVideoUrlFromClip(rawClip),
     image_url: extractImageUrlFromClip(rawClip),
     lyrics: extractLyricsFromClip(rawClip),
@@ -5264,11 +5282,30 @@ async function fetchDownloadPayload(url) {
   };
 }
 
+// Extension messaging is JSON-serialized in Chrome (structured clone only via
+// an opt-in manifest key), so raw ArrayBuffers do not survive the trip. Binary
+// payloads are base64-encoded for transport and decoded by the receiver.
+function bytesToBase64(bytes) {
+  const arr = bytes instanceof Uint8Array
+    ? bytes
+    : (ArrayBuffer.isView(bytes)
+      ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      : new Uint8Array(bytes || 0));
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, arr.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 async function saveBytesInPage(tabId, bytes, mimeType, filename) {
+  const base64 = bytesToBase64(bytes);
+
   try {
     const response = await chrome.tabs.sendMessage(tabId, {
       action: 'save_file_in_page',
-      bytes,
+      bytesBase64: base64,
       mimeType,
       filename
     });
@@ -5281,13 +5318,11 @@ async function saveBytesInPage(tabId, bytes, mimeType, filename) {
   } catch (messageError) {
     await chrome.scripting.executeScript({
       target: { tabId },
-      func: (payload, type, fname) => {
-        const normalizedPayload = payload instanceof ArrayBuffer
-          ? payload
-          : (ArrayBuffer.isView(payload)
-            ? payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength)
-            : new Uint8Array(Array.isArray(payload) ? payload : []).buffer);
-        const blob = new Blob([normalizedPayload], { type: type || 'application/octet-stream' });
+      func: (payloadBase64, type, fname) => {
+        const binary = atob(payloadBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes], { type: type || 'application/octet-stream' });
         const objectUrl = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
         anchor.href = objectUrl;
@@ -5299,7 +5334,7 @@ async function saveBytesInPage(tabId, bytes, mimeType, filename) {
         anchor.remove();
         setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
       },
-      args: [bytes, mimeType, filename]
+      args: [base64, mimeType, filename]
     });
 
     return true;
@@ -5398,13 +5433,37 @@ async function fetchResourceBlob(url, token) {
   throw lastError || new Error('Fetch failed');
 }
 
-async function downloadBlobFile(blob, filename) {
-  const objectUrl = URL.createObjectURL(blob);
-  try {
-    return await downloadOneFile(objectUrl, filename);
-  } finally {
-    URL.revokeObjectURL(objectUrl);
+// Saves generated bytes through the live Suno tab. `URL.createObjectURL` does
+// not exist in Chrome MV3 service workers, so the SW must never build blob
+// URLs itself — the content script does it in a document context instead.
+async function saveDownloadBytes(bytes, mimeType, filename) {
+  const tabId = await getDownloadTargetTabId();
+  if (typeof tabId !== 'number') {
+    throw new Error('No Suno tab found for in-page download.');
   }
+
+  await saveBytesInPage(tabId, bytes, mimeType || 'application/octet-stream', filename);
+  return true;
+}
+
+// Transcodes the (already decrypted) source audio to WAV inside the Suno tab,
+// which has Web Audio. Used for the no-credit local WAV option.
+async function renderWavInPage(bytes, filename) {
+  const tabId = await getDownloadTargetTabId();
+  if (typeof tabId !== 'number') {
+    throw new Error('No Suno tab found for in-page WAV render.');
+  }
+
+  const response = await chrome.tabs.sendMessage(tabId, {
+    action: 'render_wav_in_page',
+    bytesBase64: bytesToBase64(bytes),
+    filename
+  });
+
+  if (response?.ok) {
+    return true;
+  }
+  throw new Error(response?.error || 'WAV render failed in page');
 }
 
 async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 0, downloadOptions = { music: true, lyrics: true, image: true }) {
@@ -5537,11 +5596,115 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
     return true;
   }
 
+  // Resolves how to obtain one song's audio. Stream formats (m4a/mp3) prefer
+  // Suno's unencrypted progressive assets and fall back to the encrypted stream
+  // — both are unlimited and never touch the metered download endpoint.
+  // `wav` renders locally from the stream (no credit); `wav_credit` asks Suno
+  // for the official lossless WAV and falls back to a local render when Suno
+  // cannot serve it (e.g. exhausted download credits).
+  async function prepareSongAudioDownload(song, requestedFormat, token) {
+    const requested = String(requestedFormat || 'm4a').trim().toLowerCase();
+    const title = song.custom_title || song.title || `Untitled_${song.id}`;
+
+    const fetchStreamBytes = async () => {
+      try {
+        return await resolveSunoAudioBytes(song.id, song.audio_url, token);
+      } catch (firstError) {
+        // Stale cached URL: force a fresh media lookup and retry once.
+        try {
+          return await resolveSunoAudioBytes(song.id, null, token);
+        } catch (retryError) {
+          throw firstError;
+        }
+      }
+    };
+
+    const progressiveEntries = async () => {
+      const fromSong = Array.isArray(song.media_urls) ? song.media_urls.filter(Boolean) : [];
+      if (fromSong.length > 0) return fromSong;
+      try {
+        const lookup = await fetchFeedSongsByIds(token, [song.id], { logPrefix: 'download_audio_media' });
+        const clip = Array.isArray(lookup?.clips)
+          ? (lookup.clips.find(c => (c?.id || c?.clip?.id || c?.song?.id) === song.id) || lookup.clips[0])
+          : null;
+        return extractProgressiveMediaUrlsFromClip(clip?.clip || clip || null);
+      } catch (e) {
+        return [];
+      }
+    };
+
+    const localWavFromStream = async () => {
+      const entries = await progressiveEntries();
+      const entry = pickProgressiveMediaEntry(entries, 'm4a') || pickProgressiveMediaEntry(entries, 'mp3');
+      if (entry) {
+        const file = await fetchResourceBlob(entry.url, token);
+        const sourceExt = inferAudioExtension(entry.url, file.contentType, 'm4a');
+        return {
+          kind: 'wav',
+          bytes: await file.blob.arrayBuffer(),
+          sourceExt,
+          sourceMimeType: file.contentType || (sourceExt === 'mp3' ? 'audio/mpeg' : 'audio/mp4')
+        };
+      }
+      if (song.audio_encrypted || /forbidden/i.test(String(song.audio_url || '')) || !song.audio_url) {
+        return { kind: 'wav', bytes: await fetchStreamBytes(), sourceExt: 'm4a', sourceMimeType: 'audio/mp4' };
+      }
+      const file = await fetchResourceBlob(song.audio_url, token);
+      const sourceExt = inferAudioExtension(file.finalUrl || song.audio_url, file.contentType, 'm4a');
+      return {
+        kind: 'wav',
+        bytes: await file.blob.arrayBuffer(),
+        sourceExt,
+        sourceMimeType: file.contentType || 'audio/mp4'
+      };
+    };
+
+    if (requested === 'wav_credit') {
+      try {
+        const url = await resolveSunoDownloadUrl(song.id, 'wav', token);
+        return { kind: 'url', url, ext: 'wav' };
+      } catch (e) {
+        notifyDownloadUi({
+          action: 'log',
+          text: `⚠️ ${title}: official WAV unavailable (${e.message}); rendering WAV locally from the stream.`
+        });
+        return await localWavFromStream();
+      }
+    }
+
+    if (requested === 'wav') {
+      return await localWavFromStream();
+    }
+
+    const container = requested === 'mp3' ? 'mp3' : 'm4a';
+    const entry = pickProgressiveMediaEntry(await progressiveEntries(), container);
+    if (entry) {
+      return { kind: 'url', url: entry.url, ext: container };
+    }
+
+    if (song.audio_encrypted || /forbidden/i.test(String(song.audio_url || '')) || !song.audio_url) {
+      const bytes = await fetchStreamBytes();
+      if (container === 'mp3') {
+        notifyDownloadUi({
+          action: 'log',
+          text: `ℹ️ ${title}: no direct MP3 asset advertised; saving the M4A stream instead.`
+        });
+      }
+      return { kind: 'bytes', bytes, ext: 'm4a', mimeType: 'audio/mp4' };
+    }
+
+    if (song.audio_url) {
+      return { kind: 'url', url: song.audio_url, ext: inferAudioExtension(song.audio_url, '', container) };
+    }
+
+    throw new Error('No audio URL available');
+  }
+
   const shouldDownloadMusic = !!downloadOptions?.music;
   const shouldDownloadLyrics = !!downloadOptions?.lyrics;
   const shouldDownloadImage = !!downloadOptions?.image;
   const selectedTypes = [];
-  if (shouldDownloadMusic) selectedTypes.push(format.toUpperCase());
+  if (shouldDownloadMusic) selectedTypes.push(format.toLowerCase() === 'wav_credit' ? 'WAV (credit)' : format.toUpperCase());
   if (shouldDownloadLyrics) selectedTypes.push('lyrics');
   if (shouldDownloadImage) selectedTypes.push('images');
 
@@ -5602,6 +5765,35 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
 
   notifyDownloadUi({ action: "log", text: `🚀 Starting download of ${downloadableSongs.length} song(s): ${selectedTypes.join(', ')}...` });
 
+  // Songs cached before progressive media_urls existed get one batched lookup
+  // here instead of a feed request per song during the download loop.
+  const songsMissingMediaUrls = downloadableSongs.filter(
+    song => !Array.isArray(song.media_urls) || song.media_urls.length === 0
+  );
+  if (songsMissingMediaUrls.length > 0 && token) {
+    try {
+      const lookup = await fetchFeedSongsByIds(
+        token,
+        songsMissingMediaUrls.map(song => song.id),
+        { logPrefix: 'download_media_prefetch' }
+      );
+      const clipsById = new Map();
+      (lookup?.clips || []).forEach(clip => {
+        const clipId = String(clip?.id || clip?.clip?.id || clip?.song?.id || '').trim();
+        if (clipId) clipsById.set(clipId, clip);
+      });
+      songsMissingMediaUrls.forEach(song => {
+        const clip = clipsById.get(String(song.id).trim());
+        const mediaUrls = clip ? extractProgressiveMediaUrlsFromClip(clip?.clip || clip) : [];
+        if (mediaUrls.length > 0) {
+          song.media_urls = mediaUrls;
+        }
+      });
+    } catch (e) {
+      log('download media prefetch failed:', e?.message || String(e));
+    }
+  }
+
   if (isAndroid) {
     notifyDownloadUi({ action: "log", text: '📱 Android detected: using compatibility mode for file saving.' });
   }
@@ -5621,62 +5813,67 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
     let downloadedSomething = false;
     try {
     if (shouldDownloadMusic) {
-        if (!song.audio_url) {
-          throw new Error('No audio URL available');
-        }
+        const requestedFormat = format.toLowerCase();
+        const prepared = await prepareSongAudioDownload(song, requestedFormat, token);
 
-        const requestedExt = format.toLowerCase();
-        let audioUrl;
-        if (requestedExt === 'wav') {
-          audioUrl = await resolveSunoDownloadUrl(song.id, 'wav', token);
-        } else if ((song.audio_encrypted || /forbidden/i.test(String(song.audio_url))) && song.audio_url) {
-          // Suno encrypts clip audio; decrypt it before downloading so the file
-          // is usable, otherwise the saved bytes are the encrypted stream.
+        if (prepared.kind === 'bytes') {
+          const baseName = `${safeTitle}_${song.id.slice(-4)}.${prepared.ext || 'm4a'}`;
+          await saveDownloadBytes(prepared.bytes, prepared.mimeType || 'audio/mp4', buildDownloadFilename(baseName));
+          downloadedSomething = true;
+          downloadedFileCount += 1;
+        } else if (prepared.kind === 'wav') {
+          const baseName = `${safeTitle}_${song.id.slice(-4)}.wav`;
+          const filename = buildDownloadFilename(baseName);
           try {
-            const decrypted = await resolveSunoAudioBytes(song.id, song.audio_url, token);
-            const baseName = `${safeTitle}_${song.id.slice(-4)}.${requestedExt}`;
-            await downloadBlobFile(new Blob([decrypted], { type: 'audio/mp4' }), buildDownloadFilename(baseName));
+            await renderWavInPage(prepared.bytes, filename);
+          } catch (wavError) {
+            const fallbackExt = prepared.sourceExt || 'm4a';
+            notifyDownloadUi({
+              action: 'log',
+              text: `⚠️ ${title}: local WAV render failed (${wavError.message}); saving the ${fallbackExt.toUpperCase()} stream instead.`
+            });
+            await saveDownloadBytes(
+              prepared.bytes,
+              prepared.sourceMimeType || 'audio/mp4',
+              buildDownloadFilename(`${safeTitle}_${song.id.slice(-4)}.${fallbackExt}`)
+            );
+          }
+          downloadedSomething = true;
+          downloadedFileCount += 1;
+        } else {
+          const actualExt = prepared.ext || requestedFormat;
+          const directFilename = buildDownloadFilename(`${safeTitle}_${song.id.slice(-4)}.${actualExt}`);
+
+          try {
+            await downloadOneFile(prepared.url, directFilename);
             downloadedSomething = true;
             downloadedFileCount += 1;
-            continue;
-          } catch (decryptError) {
+          } catch (directError) {
             notifyDownloadUi({
               action: 'log',
-              text: `⚠️ ${title}: decrypted download failed (${decryptError.message}); falling back to URL.`
+              text: `ℹ️ ${title}: direct audio download failed (${directError.message}). Retrying via authenticated fetch.`
             });
+
+            let fallbackFilename = directFilename;
+            const audioFile = await fetchResourceBlob(prepared.url, token);
+            const fetchedExt = inferAudioExtension(audioFile.finalUrl, audioFile.contentType, actualExt);
+
+            if (fetchedExt && fetchedExt !== actualExt) {
+              fallbackFilename = replaceFilenameExtension(fallbackFilename, fetchedExt);
+              notifyDownloadUi({
+                action: 'log',
+                text: `ℹ️ ${title}: Suno returned ${fetchedExt.toUpperCase()} audio; saving with that format.`
+              });
+            }
+
+            await saveDownloadBytes(
+              await audioFile.blob.arrayBuffer(),
+              audioFile.contentType || audioFile.blob.type || 'application/octet-stream',
+              fallbackFilename
+            );
+            downloadedSomething = true;
+            downloadedFileCount += 1;
           }
-          audioUrl = song.audio_url;
-        } else {
-          audioUrl = getPlayableAudioUrl(song, requestedExt) || song.audio_url;
-        }
-        const baseName = `${safeTitle}_${song.id.slice(-4)}.${requestedExt}`;
-        const directFilename = buildDownloadFilename(baseName);
-
-        try {
-          await downloadOneFile(audioUrl, directFilename);
-          downloadedSomething = true;
-          downloadedFileCount += 1;
-        } catch (directError) {
-          notifyDownloadUi({
-            action: 'log',
-            text: `ℹ️ ${title}: direct audio download failed (${directError.message}). Retrying via authenticated fetch.`
-          });
-
-          let fallbackFilename = directFilename;
-          const audioFile = await fetchResourceBlob(audioUrl, token);
-          const actualExt = inferAudioExtension(audioFile.finalUrl, audioFile.contentType, requestedExt);
-
-          if (actualExt && actualExt !== requestedExt) {
-            fallbackFilename = replaceFilenameExtension(fallbackFilename, actualExt);
-            notifyDownloadUi({
-              action: 'log',
-              text: `ℹ️ ${title}: Suno returned ${actualExt.toUpperCase()} audio; saving with that format.`
-            });
-          }
-
-          await downloadBlobFile(audioFile.blob, fallbackFilename);
-          downloadedSomething = true;
-          downloadedFileCount += 1;
         }
       }
 

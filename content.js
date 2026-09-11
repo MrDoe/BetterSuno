@@ -124,12 +124,18 @@
                 </label>
                 <hr style="border-color: var(--bettersuno-border); margin: 10px 0;" />
                 <label style="display: block; margin-bottom: 5px; font-weight: bold;">Format:</label>
-                <div id="formatControls" style="display: flex; gap: 6px; align-items: center">
-                  <label class="checkbox-label">
+                <div id="formatControls" style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap">
+                  <label class="checkbox-label" title="M4A stream from Suno. Unlimited — no download credit used.">
                     <input type="radio" name="format" id="formatM4a" value="m4a" checked />M4A
                   </label>
-                  <label class="checkbox-label">
-                    <input type="radio" name="format" id="formatWav" value="wav" />WAV
+                  <label class="checkbox-label" title="Direct CDN MP3 when Suno advertises one. Unlimited — no download credit used.">
+                    <input type="radio" name="format" id="formatMp3" value="mp3" />MP3
+                  </label>
+                  <label class="checkbox-label" title="Rendered from the stream in your browser. No download credit used; quality is limited to the stream, not the lossless master.">
+                    <input type="radio" name="format" id="formatWav" value="wav" />WAV (local)
+                  </label>
+                  <label class="checkbox-label" title="Official lossless WAV from Suno. Uses one Suno download credit; falls back to a local render if unavailable.">
+                    <input type="radio" name="format" id="formatWavCredit" value="wav_credit" />WAV (1 credit)
                   </label>
                 </div>
               </div>
