@@ -793,28 +793,38 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
         }
 
         if (!results && isFirefox) {
+          // Slow-loading Clerk on Firefox: retry with a longer budget through
+          // the MV3 scripting API (`tabs.executeScript` was removed in MV3).
           try {
-            const scriptResults = await chrome.tabs.executeScript(sunoTab.id, {
-              code: `
-                (async () => {
+            const longResults = await Promise.race([
+              chrome.scripting.executeScript({
+                target: { tabId: sunoTab.id },
+                func: async () => {
+                  const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
                   const w = (typeof wrappedJSObject !== 'undefined') ? wrappedJSObject : window;
-                  for (let i = 0; i < 20; i++) {
+                  for (let i = 0; i < 25; i++) {
                     const g = w?.Clerk?.session?.getToken;
                     if (typeof g === 'function') {
-                      try { return await g.call(w.Clerk.session); } catch(e) { return null; }
+                      try {
+                        return await g.call(w.Clerk.session);
+                      } catch (e) {
+                        return null;
+                      }
                     }
-                    await new Promise(r => setTimeout(r, 100));
+                    await wait(100);
                   }
                   return null;
-                })()
-              `
-            });
-            if (scriptResults && scriptResults[0]) {
-              log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, Token via tabs.executeScript in tab ${sunoTab.id}`);
-              return { token: scriptResults[0], expiresAt: Date.now() + (50 * 60 * 1000), sourceTabId: sunoTab.id };
+                }
+              }),
+              new Promise(resolve => setTimeout(() => resolve(null), 3000))
+            ]);
+            const longToken = longResults?.[0]?.result || null;
+            if (longToken) {
+              log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, Token via scripting.executeScript fallback in tab ${sunoTab.id}`);
+              return { token: longToken, expiresAt: Date.now() + (50 * 60 * 1000), sourceTabId: sunoTab.id };
             }
-          } catch (tabsErr) {
-            log(`refreshTokenViaClerkAPI: tabs.executeScript fallback also failed:`, tabsErr.message);
+          } catch (scriptingErr) {
+            log(`refreshTokenViaClerkAPI: scripting.executeScript fallback also failed:`, scriptingErr.message);
           }
         }
 

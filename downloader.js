@@ -2263,6 +2263,7 @@
         deleteImageBlobFromIDB,
         deletePreferenceFromIDB,
         estimateDbUsageBytes,
+        evictStaleBlobs,
         getAllCachedSongIdsFromIDB,
         getAllRecordsFromStore,
         getAudioBlobFromIDB,
