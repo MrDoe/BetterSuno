@@ -151,7 +151,7 @@ Generate a song.
 **Full custom-mode payload (as used by BetterSuno):**
 ```json
 {
-  "mv": "chirp-fenix",
+  "mv": "chirp-hawk",
   "gpt_description_prompt": "",
   "prompt": "[Verse]\nActual lyrics...",
   "make_instrumental": false,
@@ -178,7 +178,7 @@ Generate a song.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `mv` | string | Model/version, e.g. `"chirp-v4"`, `"chirp-fenix"` |
+| `mv` | string | Model/version — V6 family: `"chirp-hawk"` (default), `"chirp-hawk-wild"`, `"chirp-goose"` |
 | `gpt_description_prompt` | string | Style description (inspiration mode) or `""` (custom mode) |
 | `prompt` | string | Lyric text (custom mode) or `""` (inspiration mode) |
 | `make_instrumental` | boolean | Whether to generate instrumental only |
@@ -203,6 +203,28 @@ In `metadata.control_sliders` (values 0.0–1.0, mapped from UI 0–100):
 | `audio_weight` | Audio quality influence |
 
 Also set `metadata.can_control_sliders` to an array of the slider keys used.
+
+### V6 Options (2026-09)
+
+Top-level fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `duration` | number | Target duration in seconds (10–360, 5s steps; omit for auto) |
+| `use_personalization` | boolean | Enable V6 Personalize ("My Taste") |
+| `do_personalize_lyrics` | boolean | Let Personalize adapt the lyrics |
+| `personalization_user_uuid` | string | Optional target user UUID for Personalize |
+
+`metadata` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `is_max_mode` | boolean | V6 Max Mode (plan feature `max-mode`) |
+| `vocal_gender` | `"m"`/`"f"` | Force vocal gender |
+| `control_sliders.aug_creativity` | 0–4 | V6 Variety level: 0=off, 1=normal, 2=high, 3=extra, 4=max (only V6 models) |
+
+`token:null` + `token_provider:null` are still required. `params` is **not** sent by the V6 web client
+and is no longer needed.
 
 ---
 

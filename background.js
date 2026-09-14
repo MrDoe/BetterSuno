@@ -41,6 +41,7 @@ let activeDownloadIds = new Set();
 let downloadRequestorTabId = null;
 const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
 const BULK_LIBRARY_PAGE_SIZE = 10000;
+const PLAYLIST_CLIP_PAGE_SIZE = 50;
 
 // Gate: resolves once loadState() has completed, so alarm handlers
 // don't operate on empty in-memory state after a service-worker restart.
@@ -137,7 +138,7 @@ function connectMcpBridge() {
         pushTokenToMcpBridge();
       } else if (msg.type === 'captcha_required') {
         log('mcp-bridge: captcha solve requested');
-        handleMcpCaptchaRequest().then(captchaToken => {
+        handleMcpCaptchaRequest(msg.captcha_version).then(captchaToken => {
           if (mcpWs && mcpWs.readyState === WebSocket.OPEN) {
             mcpWs.send(JSON.stringify({ type: 'captcha_token', token: captchaToken }));
           }
@@ -216,6 +217,17 @@ async function handleMcpExtensionRequest(msg) {
       }
       return;
     }
+    if (msg.action === 'get_db_songs') {
+      const tabId = await pickPreferredSunoTabId();
+      if (tabId == null) { sendResponse({ ok: false, error: 'No suno.com tab open' }); return; }
+      try {
+        const response = await chrome.tabs.sendMessage(tabId, { action: 'mcp_get_db_songs' });
+        sendResponse(response || { ok: false, error: 'No response from content script' });
+      } catch (err) {
+        sendResponse({ ok: false, error: err.message });
+      }
+      return;
+    }
     sendResponse({ ok: false, error: `Unknown extension request action: ${msg.action}` });
   } catch (err) {
     sendResponse({ ok: false, error: err.message });
@@ -226,7 +238,15 @@ async function handleMcpExtensionRequest(msg) {
 // discovered one from the suno.com tab below, but keep a known-good default).
 const FALLBACK_CAPTCHA_SITEKEY = '0x4AAAAAADI7xDNyj-3LcIbi';
 
-async function handleMcpCaptchaRequest() {
+async function handleMcpCaptchaRequest(captchaVersion) {
+  // Suno's /api/c/check reports which generation captcha is required:
+  //   1 = hCaptcha, 2 = Turnstile. The web client prefers Turnstile and only
+  // falls back to hCaptcha if Turnstile times out. This extension only solves
+  // Turnstile, so fail fast (and clearly) when hCaptcha is demanded.
+  if (captchaVersion === 1) {
+    throw new Error('Suno is requiring hCaptcha for this generation; only Turnstile is supported by the extension');
+  }
+
   const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
   const tab = sunoTabs.find(t => typeof t.id === 'number');
   if (!tab) throw new Error('No Suno tab available to render captcha');
@@ -1652,10 +1672,17 @@ async function fetchFeedV3WithRetry(currentToken, body, { maxRetries = 5, initia
   return { ok: false, status: 0, data: null, rateLimited: true };
 }
 
-async function fetchLibraryPageWithRetry(currentToken, page, pageSize, signal, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'library' } = {}) {
+// Fetch one page of the user's library via POST /api/feed/v3 (cursor-based).
+//
+// The legacy GET /api/library?page=… endpoint used through the V5 era now
+// returns 404 — the V6 web client reads the library from the unified feed
+// (`/api/project/feed`), and `/api/feed/v3` (still used by the MCP server)
+// exposes the same clips with `{ clips, next_cursor }` pagination.
+async function fetchLibraryPageWithRetry(currentToken, cursor, pageSize, signal, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'library' } = {}) {
   let retries = 0;
   let delayMs = initialDelayMs;
   let renewed = false;
+  const limit = Math.min(Math.max(parseInt(pageSize, 10) || 50, 1), 50);
 
   while (retries <= maxRetries) {
     const controller = new AbortController();
@@ -1673,12 +1700,14 @@ async function fetchLibraryPageWithRetry(currentToken, page, pageSize, signal, {
     try {
       let response;
       try {
-        response = await fetch(`https://studio-api.prod.suno.com/api/library?page=${page}&page_size=${pageSize}`, {
-          method: 'GET',
+        response = await fetch('https://studio-api.prod.suno.com/api/feed/v3', {
+          method: 'POST',
           cache: 'no-store',
           headers: {
+            'Content-Type': 'application/json',
             'Authorization': `Bearer ${currentToken}`
           },
+          body: JSON.stringify({ limit, cursor: cursor || null }),
           signal: controller.signal
         });
       } catch (e) {
@@ -3521,10 +3550,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           controlSliders.audio_weight = msg.audioInfluence / 100;
           canControl.push('audio_weight');
         }
+        // V6 Variety = aug_creativity level 0-4 (not a 0-100 slider)
+        if (typeof msg.variety === 'number' && !isNaN(msg.variety)) {
+          controlSliders.aug_creativity = Math.max(0, Math.min(4, Math.round(msg.variety)));
+          canControl.push('aug_creativity');
+        } else if (msg.personalize) {
+          // Personalize needs Variety on; default to level 1 like the web UI
+          controlSliders.aug_creativity = 1;
+          canControl.push('aug_creativity');
+        }
+
+        const wantsPersonalization = msg.personalize === true || msg.personalizeLyrics === true || !!msg.personalizeUserUuid;
+        const duration = Number(msg.duration);
+        const hasDuration = msg.duration !== undefined && msg.duration !== null && Number.isFinite(duration);
 
         // Custom mode: style goes in tags, gpt_description_prompt must be empty
         const payload = {
-          mv: msg.mv || 'chirp-fenix',
+          mv: msg.mv || 'chirp-hawk',
           gpt_description_prompt: '',
           prompt: msg.lyrics,
           make_instrumental: msg.instrumental || false,
@@ -3537,12 +3579,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           continue_at: null,
           continue_clip_id: null,
           task: msg.personaId ? (msg.personaModel === 'style_persona' ? 'artist_consistency' : 'vox') : null,
-          params: {},
           ...(msg.personaId ? { persona_id: msg.personaId } : {}),
+          ...(hasDuration ? { duration: Math.max(10, Math.min(360, Math.round(duration))) } : {}),
+          ...(wantsPersonalization ? {
+            use_personalization: true,
+            ...(msg.personalizeUserUuid ? { personalization_user_uuid: msg.personalizeUserUuid } : {}),
+            ...(msg.personalizeLyrics !== undefined ? { do_personalize_lyrics: !!msg.personalizeLyrics } : {})
+          } : {}),
           metadata: {
             web_client_pathname: '/create',
             create_mode: 'custom',
             create_session_token: crypto.randomUUID(),
+            ...(msg.maxMode ? { is_max_mode: true } : {}),
+            ...(msg.vocalGender === 'm' || msg.vocalGender === 'f' ? { vocal_gender: msg.vocalGender } : {}),
             ...(Object.keys(controlSliders).length > 0 ? { control_sliders: controlSliders } : {}),
             ...(canControl.length > 0 ? { can_control_sliders: canControl } : {})
           }
@@ -3917,13 +3966,54 @@ function extractAudioUrlFromClip(clip) {
   return null;
 }
 
-// Resolve a real download URL for a clip from Suno's download endpoint.
-// GET /api/download/clip/{clip_id}?format=wav returns {status:"processing"} then
-// {status:"ready", download_url} (a genuine .wav). The web client uses this for
-// WAV; a plain .mp3->.wav CDN rewrite returns 403. This route is metered by
-// Suno's download credits, so callers must treat failures as non-fatal and fall
-// back to the unlimited stream.
-async function resolveSunoDownloadUrl(clipId, format, token) {
+// Resolve a real WAV download URL for a clip.
+//
+// The V6-era web client (downloadClipWav) no longer uses the old
+// /api/download/clip route for WAV. It does:
+//   1. GET  /api/gen/{clip_id}/wav_file/   -> {wav_file_url} if already converted
+//   2. POST /api/gen/{clip_id}/convert_wav/ (204) to start conversion
+//   3. poll GET wav_file/ every 5s (up to 24 tries) until {wav_file_url}
+// The legacy endpoint is kept as a fallback. This route is metered by Suno's
+// download credits, so callers must treat failures as non-fatal and fall back
+// to the unlimited stream.
+async function sunoWavRequest(path, { method = 'GET', token } = {}) {
+  const headers = token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+  const res = await fetch(path, { method, headers });
+  if (res.status === 204) return { ok: true, status: 204, body: null };
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = await res.json();
+      detail = body?.detail || body?.error || body?.message || '';
+    } catch (e) {
+      // body was not JSON
+    }
+    const err = new Error(`Suno WAV endpoint unavailable: HTTP ${res.status}${detail ? ` (${detail})` : ''}`);
+    err.status = res.status;
+    throw err;
+  }
+  let body = null;
+  try { body = await res.json(); } catch (e) { body = null; }
+  return { ok: true, status: res.status, body };
+}
+
+async function resolveGenWavUrl(clipId, token) {
+  const base = `https://studio-api.prod.suno.com/api/gen/${encodeURIComponent(clipId)}`;
+
+  const initial = await sunoWavRequest(`${base}/wav_file/`, { token });
+  if (initial.body?.wav_file_url) return initial.body.wav_file_url;
+
+  await sunoWavRequest(`${base}/convert_wav/`, { method: 'POST', token });
+
+  for (let attempt = 0; attempt < 24; attempt++) {
+    await new Promise(r => setTimeout(r, 5000));
+    const polled = await sunoWavRequest(`${base}/wav_file/`, { token });
+    if (polled.body?.wav_file_url) return polled.body.wav_file_url;
+  }
+  throw new Error('Timed out waiting for Suno WAV conversion');
+}
+
+async function resolveLegacySunoDownloadUrl(clipId, format, token) {
   const path = `https://studio-api.prod.suno.com/api/download/clip/${encodeURIComponent(clipId)}?format=${encodeURIComponent(format)}`;
   const headers = token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
   for (let attempt = 0; attempt < 6; attempt++) {
@@ -3939,7 +4029,7 @@ async function resolveSunoDownloadUrl(clipId, format, token) {
       throw new Error(`Suno download unavailable: HTTP ${res.status}${detail ? ` (${detail})` : ''}`);
     }
     const data = await res.json();
-    if (data?.status === 'ready' && data?.download_url) return data.download_url;
+    if (data?.download_url) return data.download_url;
     if (data?.status === 'error') throw new Error(data?.error || 'Suno download failed');
     if (attempt >= 1 && (data?.ok === false || data?.status === 'not_available')) {
       throw new Error(data?.detail || data?.error || 'Suno download not available');
@@ -3947,6 +4037,17 @@ async function resolveSunoDownloadUrl(clipId, format, token) {
     await new Promise(r => setTimeout(r, 2000));
   }
   throw new Error('Timed out waiting for Suno download URL');
+}
+
+async function resolveSunoDownloadUrl(clipId, format, token) {
+  if (format === 'wav') {
+    try {
+      return await resolveGenWavUrl(clipId, token);
+    } catch (e) {
+      log(`resolveSunoDownloadUrl: convert_wav flow failed (${e.message}), trying legacy endpoint`);
+    }
+  }
+  return resolveLegacySunoDownloadUrl(clipId, format, token);
 }
 
 // ============================================================================
@@ -4231,7 +4332,7 @@ async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly, optio
   }
 
   try {
-    const response = await fetchLibraryPageWithRetry(token, 1, BULK_LIBRARY_PAGE_SIZE, controller.signal, {
+    const response = await fetchLibraryPageWithRetry(token, null, BULK_LIBRARY_PAGE_SIZE, controller.signal, {
       logPrefix: 'bulk-library'
     });
 
@@ -4280,8 +4381,9 @@ async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, opti
     const songs = [];
     const foundIds = new Set();
 
+    let cursor = null;
     for (let page = 1; page <= maxPages; page += 1) {
-      const response = await fetchLibraryPageWithRetry(token, page, pageSize, controller.signal, { logPrefix });
+      const response = await fetchLibraryPageWithRetry(token, cursor, pageSize, controller.signal, { logPrefix });
 
       if (!response.ok) {
         throw new Error(`${logPrefix} failed with HTTP ${response.status}`);
@@ -4314,13 +4416,10 @@ async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, opti
         }
       });
 
-      const totalResults = Number(data?.num_total_results ?? data?.total ?? data?.count ?? 0);
-      const hasMore = data?.has_more === true || data?.next_cursor != null;
-      const reachedEnd = !hasMore && clips.length < pageSize;
+      cursor = data?.next_cursor ?? null;
       const foundAllTargets = normalizedTargetIds && foundIds.size >= normalizedTargetIds.size;
-      const exhaustedCount = Number.isFinite(totalResults) && page * pageSize >= totalResults;
 
-      if (foundAllTargets || reachedEnd || exhaustedCount) {
+      if (foundAllTargets || !cursor) {
         break;
       }
     }
@@ -5129,9 +5228,17 @@ function buildPlaylistMutationCandidates(playlistId, data, mode) {
   }
 
   if (isReorder) {
-    return [
-      { label: 'update_clips', method: 'POST', url: 'https://studio-api.prod.suno.com/api/playlist/update_clips/', body: updateClipsBody }
-    ];
+    const candidates = [];
+    if (data.clipId) {
+      candidates.push({
+        label: 'v2-tracks-reorder',
+        method: 'POST',
+        url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/tracks/reorder-by-index`,
+        body: { positions: [{ clip_id: data.clipId, index: data.toIndex }] }
+      });
+    }
+    candidates.push({ label: 'update_clips', method: 'POST', url: 'https://studio-api.prod.suno.com/api/playlist/update_clips/', body: updateClipsBody });
+    return candidates;
   }
 
   const songIds = Array.isArray(data) ? data : [];
@@ -5142,6 +5249,7 @@ function buildPlaylistMutationCandidates(playlistId, data, mode) {
 
   if (isAdd) {
     return [
+      { label: 'v2-tracks-add', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/tracks/add`, body: clipIdsBody },
       { label: 'update_clips', method: 'POST', url: 'https://studio-api.prod.suno.com/api/playlist/update_clips/', body: updateClipsBody },
       { label: 'v2-songs-post-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/songs`, body: songIdsBody },
       { label: 'v1-songs-post-song_ids', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/songs`, body: songIdsBody },
@@ -5158,6 +5266,7 @@ function buildPlaylistMutationCandidates(playlistId, data, mode) {
 
   // isRemove — waterfall through multiple endpoint variants
   return [
+    { label: 'v2-tracks-remove', method: 'POST', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/tracks/remove`, body: clipIdsBody },
     { label: 'update_clips', method: 'POST', url: 'https://studio-api.prod.suno.com/api/playlist/update_clips/', body: updateClipsBody },
     { label: 'v2-songs-delete-song_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/v2/${encoded}/songs`, body: songIdsBody },
     { label: 'v1-songs-delete-song_ids', method: 'DELETE', url: `https://studio-api.prod.suno.com/api/playlist/${encoded}/songs`, body: songIdsBody },
@@ -5211,8 +5320,33 @@ function inferPlaylistMutationCount(data, requestedCount, mode) {
   return requestedCount;
 }
 
+async function resolvePlaylistClipIdAtIndex(token, playlistId, index) {
+  if (typeof index !== 'number' || index < 0) return null;
+  const page = Math.floor(index / PLAYLIST_CLIP_PAGE_SIZE) + 1;
+  const localIndex = index % PLAYLIST_CLIP_PAGE_SIZE;
+  try {
+    const response = await fetch(
+      `https://studio-api.prod.suno.com/api/playlist/${encodeURIComponent(playlistId)}?page=${page}&page_size=${PLAYLIST_CLIP_PAGE_SIZE}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!response.ok) return null;
+    const data = await response.json();
+    const clips = data?.playlist_clips || data?.playlist_songs || data?.songs || data?.clips || [];
+    const entry = clips[localIndex];
+    return entry?.clip?.id || entry?.id || null;
+  } catch {
+    return null;
+  }
+}
+
 async function runPlaylistMutation(token, playlistId, data, mode) {
-  const candidates = buildPlaylistMutationCandidates(playlistId, data, mode);
+  let effectiveData = data;
+  if (mode === 'reorder' && data && typeof data === 'object' && typeof data.fromIndex === 'number' && !data.clipId) {
+    const clipId = await resolvePlaylistClipIdAtIndex(token, playlistId, data.fromIndex);
+    if (clipId) effectiveData = { ...data, clipId };
+  }
+
+  const candidates = buildPlaylistMutationCandidates(playlistId, effectiveData, mode);
   const diagnostics = [];
 
   for (const candidate of candidates) {

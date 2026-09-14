@@ -585,6 +585,36 @@
         return 0;
     }
 
+    function normalizePlayCount(value) {
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+            return Math.floor(value);
+        }
+
+        if (typeof value === 'string') {
+            const parsed = Number(value.trim());
+            if (Number.isFinite(parsed) && parsed >= 0) {
+                return Math.floor(parsed);
+            }
+        }
+
+        return null;
+    }
+
+    function getModelVersionLabel(song) {
+        const modelName = (song?.model_name || '').toLowerCase();
+        const major = (song?.major_model_version || '').toLowerCase();
+
+        if (modelName === 'chirp-hawk') return 'V6';
+        if (modelName === 'chirp-hawk-wild') return 'V6-WILD';
+        if (modelName === 'chirp-goose') return 'V6-MINI';
+
+        if (major) {
+            return major.toUpperCase();
+        }
+
+        return song?.model_name || '';
+    }
+
     function areSongDetailsEqual(leftSong, rightSong) {
         return (
             (leftSong?.title || '') === (rightSong?.title || '') &&
@@ -599,6 +629,11 @@
             getSongReactionState(leftSong) === getSongReactionState(rightSong) &&
             leftSong?.is_stem === rightSong?.is_stem &&
             normalizeUpvoteCount(leftSong?.upvote_count) === normalizeUpvoteCount(rightSong?.upvote_count) &&
+            normalizePlayCount(leftSong?.play_count) === normalizePlayCount(rightSong?.play_count) &&
+            (leftSong?.model_name || '') === (rightSong?.model_name || '') &&
+            (leftSong?.major_model_version || '') === (rightSong?.major_model_version || '') &&
+            (leftSong?.task || '') === (rightSong?.task || '') &&
+            (leftSong?.cover_clip_id || '') === (rightSong?.cover_clip_id || '') &&
             (leftSong?.is_owned_by_current_user ?? null) === (rightSong?.is_owned_by_current_user ?? null)
         );
     }
@@ -637,6 +672,13 @@
             is_liked: reactionState === 'like',
             is_stem: freshSong.is_stem ?? existingSong.is_stem,
             upvote_count: freshSong.upvote_count !== undefined ? normalizeUpvoteCount(freshSong.upvote_count) : normalizeUpvoteCount(existingSong.upvote_count),
+            play_count: freshSong.play_count !== undefined && freshSong.play_count !== null
+                ? normalizePlayCount(freshSong.play_count)
+                : (existingSong.play_count ?? null),
+            model_name: freshSong.model_name || existingSong.model_name || null,
+            major_model_version: freshSong.major_model_version || existingSong.major_model_version || null,
+            task: freshSong.task || existingSong.task || null,
+            cover_clip_id: freshSong.cover_clip_id || existingSong.cover_clip_id || null,
             owner_user_id: freshSong.owner_user_id || existingSong.owner_user_id,
             owner_handle: freshSong.owner_handle || existingSong.owner_handle,
             owner_display_name: freshSong.owner_display_name || existingSong.owner_display_name,
@@ -712,6 +754,18 @@
             is_liked: reactionState === 'like',
             is_stem: isStemClip(clip),
             upvote_count: upvoteCount,
+            play_count: normalizePlayCount(
+                clip.play_count ??
+                rawClip?.play_count ??
+                clip.plays ??
+                rawClip?.plays ??
+                clip.playCount ??
+                rawClip?.playCount
+            ),
+            model_name: clip.model_name || rawClip?.model_name || null,
+            major_model_version: clip.major_model_version || rawClip?.major_model_version || null,
+            task: clip.metadata?.task || clip.task || rawClip?.metadata?.task || rawClip?.task || null,
+            cover_clip_id: clip.metadata?.cover_clip_id || clip.cover_clip_id || rawClip?.metadata?.cover_clip_id || rawClip?.cover_clip_id || null,
             owner_user_id: extractFirstMatchingValue(clip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null)
                 || extractFirstMatchingValue(rawClip, SONG_CLIP_FIELD_PATHS.ownerUserId, value => value || null),
             owner_handle: extractFirstMatchingValue(clip, ['handle', 'user_handle', 'owner_handle', 'creator_handle', 'author_handle', 'username'], value => (typeof value === 'string' ? value.trim() : null))
@@ -2358,6 +2412,8 @@
     const filterStems = document.getElementById("filterStems");
     const filterPublic = document.getElementById("filterPublic");
     const filterOffline = document.getElementById("filterOffline");
+    const filterUnplayed = document.getElementById("filterUnplayed");
+    const filterModel = document.getElementById("filterModel");
     const sortSelect = document.getElementById("sortSelect");
     const playlistFilter = document.getElementById("playlistFilter");
     const deletePlaylistBtn = document.getElementById("deletePlaylistBtn");
@@ -2956,7 +3012,13 @@
     }
 
     function libraryNeedsMetadataRefresh(songs) {
-        return Array.isArray(songs) && songs.some(song => song.upvote_count === undefined);
+        return Array.isArray(songs) && songs.some(song =>
+            song.upvote_count === undefined ||
+            !song.model_name ||
+            !song.major_model_version ||
+            song.play_count === undefined ||
+            song.play_count === null
+        );
     }
 
     async function saveToStorage() {
@@ -2984,6 +3046,8 @@
             await savePreferenceToIDB('sunoFilterStems', filterStems.checked);
             await savePreferenceToIDB('sunoFilterPublic', filterPublic.checked);
             await savePreferenceToIDB('sunoFilterOffline', !!filterOffline?.checked);
+            await savePreferenceToIDB('sunoFilterUnplayed', !!filterUnplayed?.checked);
+            await savePreferenceToIDB('sunoFilterModel', filterModel ? filterModel.value : '');
         } catch (e) {
             console.error('Failed to save filter preferences:', e);
         }
@@ -3003,6 +3067,8 @@
             const stems = await loadPreferenceFromIDB('sunoFilterStems');
             const pub = await loadPreferenceFromIDB('sunoFilterPublic');
             const offline = await loadPreferenceFromIDB('sunoFilterOffline');
+            const unplayed = await loadPreferenceFromIDB('sunoFilterUnplayed');
+            const model = await loadPreferenceFromIDB('sunoFilterModel');
             
             if (liked !== null) filterLiked.checked = liked;
             if (stems !== null) filterStems.checked = stems;
@@ -3010,11 +3076,23 @@
             if (filterOffline) {
                 filterOffline.checked = offline === true;
             }
+            if (filterUnplayed) {
+                filterUnplayed.checked = unplayed === true;
+            }
+            if (filterModel && typeof model === 'string') {
+                filterModel.value = model;
+            }
         } catch (e) {
             console.error('Failed to load filter preferences:', e);
             filterPublic.checked = true;
             if (filterOffline) {
                 filterOffline.checked = false;
+            }
+            if (filterUnplayed) {
+                filterUnplayed.checked = false;
+            }
+            if (filterModel) {
+                filterModel.value = '';
             }
         }
     }
@@ -3105,6 +3183,11 @@
 
         // If any primary fields are missing, refresh immediately.
         if (!song.title || !song.audio_url || song.upvote_count === undefined || song.is_public === undefined) {
+            return true;
+        }
+
+        // V6-era metadata may be missing on records cached before it existed.
+        if (!song.model_name || !song.major_model_version || song.play_count === undefined || song.play_count === null) {
             return true;
         }
 
@@ -3349,6 +3432,20 @@
 
     if (filterOffline) {
         filterOffline.addEventListener("change", () => {
+            applyFilter();
+            saveFilterPreferences();
+        });
+    }
+
+    if (filterUnplayed) {
+        filterUnplayed.addEventListener("change", () => {
+            applyFilter();
+            saveFilterPreferences();
+        });
+    }
+
+    if (filterModel) {
+        filterModel.addEventListener("change", () => {
             applyFilter();
             saveFilterPreferences();
         });
@@ -4416,6 +4513,35 @@
             return;
         }
 
+        if (message.action === "mcp_get_db_songs") {
+            (async () => {
+                try {
+                    const songs = await loadSongsFromIDB();
+                    const projected = (Array.isArray(songs) ? songs : []).map(song => ({
+                        id: song.id,
+                        title: song.title || null,
+                        model_name: song.model_name || null,
+                        major_model_version: song.major_model_version || null,
+                        play_count: song.play_count ?? null,
+                        upvote_count: song.upvote_count ?? 0,
+                        is_public: song.is_public !== false,
+                        is_liked: song.is_liked === true,
+                        is_stem: !!song.is_stem,
+                        created_at: song.created_at || null,
+                        task: song.task || null,
+                        cover_clip_id: song.cover_clip_id || null,
+                        is_owned_by_current_user: song.is_owned_by_current_user ?? null,
+                        owner_handle: song.owner_handle || null
+                    }));
+                    sendResponse({ ok: true, data: { songs: projected, total: projected.length, fetchedAt: Date.now() } });
+                } catch (error) {
+                    console.error('[Downloader] mcp_get_db_songs failed:', error);
+                    sendResponse({ ok: false, error: error?.message || String(error) });
+                }
+            })();
+            return true;
+        }
+
         if (message.action === "relay_generate") {
             (async () => {
                 try {
@@ -4428,7 +4554,7 @@
                             'Content-Type': 'application/json',
                             'Authorization': `Bearer ${token}`,
                         },
-                        body: JSON.stringify({ ...payload, params: {}, token: null, token_provider: null }),
+                        body: JSON.stringify({ ...payload, token: null, token_provider: null }),
                         credentials: 'include',
                     });
                     const data = await response.json();
@@ -4821,6 +4947,26 @@
         visibilitySpan.textContent = song.is_public ? '🌐 Public' : '🔒 Private';
         metaDiv.appendChild(visibilitySpan);
 
+        const modelLabel = getModelVersionLabel(song);
+        if (modelLabel) {
+            const modelSpan = document.createElement("span");
+            modelSpan.textContent = ` 🎛 ${modelLabel}`;
+            modelSpan.title = `Suno model: ${song.model_name || modelLabel}${song.major_model_version ? ` (${song.major_model_version})` : ''}`;
+            metaDiv.appendChild(modelSpan);
+        }
+
+        if (song.play_count !== undefined && song.play_count !== null) {
+            const playedSpan = document.createElement("span");
+            if (song.play_count > 0) {
+                playedSpan.textContent = ` ▶ ${song.play_count.toLocaleString()} play${song.play_count === 1 ? '' : 's'}`;
+                playedSpan.title = `${song.play_count.toLocaleString()} play${song.play_count === 1 ? '' : 's'}`;
+            } else {
+                playedSpan.textContent = ' 🆕 Unplayed';
+                playedSpan.title = 'This song has not been played yet';
+            }
+            metaDiv.appendChild(playedSpan);
+        }
+
         if (isSongLiked(song)) {
             const likedSpan = document.createElement("span");
             likedSpan.textContent = ' ❤️ Liked';
@@ -5167,8 +5313,39 @@
             showLikedOnly: filterLiked.checked,
             showStemsOnly: filterStems.checked,
             showPublicOnly: filterPublic.checked,
-            showOfflineOnly: !!filterOffline?.checked
+            showOfflineOnly: !!filterOffline?.checked,
+            showUnplayedOnly: !!filterUnplayed?.checked,
+            modelVersion: filterModel ? filterModel.value : ''
         };
+    }
+
+    function matchesModelFilter(song, filterValue) {
+        if (!filterValue) return true;
+
+        const major = (song.major_model_version || '').toLowerCase();
+        const modelName = (song.model_name || '').toLowerCase();
+
+        if (filterValue === '__unknown__') {
+            return !major && !modelName;
+        }
+
+        if (filterValue === 'v6') {
+            return major === 'v6' || modelName === 'chirp-hawk' || modelName === 'chirp-hawk-wild' || modelName === 'chirp-goose';
+        }
+
+        if (major === filterValue) return true;
+
+        const versionByModel = {
+            'chirp-fenix': 'v5.5',
+            'chirp-flounder': 'v5.5',
+            'chirp-crow': 'v5',
+            'chirp-bluejay': 'v4.5',
+            'chirp-auk': 'v4.5',
+            'chirp-v4': 'v4',
+            'chirp-v3-5': 'v3.5'
+        };
+
+        return versionByModel[modelName] === filterValue;
     }
 
     function matchesSongFilters(song, filterState) {
@@ -5189,6 +5366,14 @@
         }
 
         if (filterState.showOfflineOnly && !cachedSongIds.has(song.id)) {
+            return false;
+        }
+
+        if (filterState.showUnplayedOnly && song.play_count !== 0) {
+            return false;
+        }
+
+        if (!matchesModelFilter(song, filterState.modelVersion)) {
             return false;
         }
 

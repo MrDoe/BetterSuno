@@ -413,6 +413,20 @@
         return 0;
     }
 
+    function normalizeClipPlayCount(clip) {
+        const countCandidate =
+            clip?.play_count ??
+            clip?.plays ??
+            clip?.playCount;
+
+        const numberValue = Number(countCandidate);
+        if (Number.isFinite(numberValue) && numberValue >= 0) {
+            return Math.floor(numberValue);
+        }
+
+        return null;
+    }
+
     async function fetchPage(cursorValue) {
         const res = await Promise.race([
             api.runtime.sendMessage({
@@ -549,6 +563,11 @@
                     is_liked: normalizeClipReactionState(clip) === 'like',
                     is_stem: isStemClip(clip),
                     upvote_count: normalizeClipUpvoteCount(clip),
+                    play_count: normalizeClipPlayCount(clip),
+                    model_name: clip.model_name || null,
+                    major_model_version: clip.major_model_version || null,
+                    task: clip.metadata?.task || clip.task || null,
+                    cover_clip_id: clip.metadata?.cover_clip_id || clip.cover_clip_id || null,
                     ...ownership
                 });
 

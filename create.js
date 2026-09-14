@@ -32,9 +32,9 @@
             <button id="create-delete-prompt-btn" class="btn-danger create-small-btn" title="Delete selected prompt" type="button" disabled>🗑</button>
           <label class="create-label ml-5" for="create-model">Model</label>
           <select id="create-model" class="create-select">
-            <option value="chirp-fenix">v5.5</option>
-            <option value="chirp-crow">v5.0</option>
-            <option value="chirp-bluejay">v4.5+</option>
+            <option value="chirp-hawk" selected>v6</option>
+            <option value="chirp-hawk-wild">v6 wild</option>
+            <option value="chirp-goose">v6 mini</option>
           </select>
           </div>
         </div>
@@ -90,6 +90,54 @@
           <input type="range" id="create-audio-influence" class="create-range" min="0" max="100" value="50" />
         </div>
 
+        <div class="create-section">
+          <label class="create-label" for="create-vocal-gender">Vocal Gender</label>
+          <select id="create-vocal-gender" class="create-select">
+            <option value="">Auto</option>
+            <option value="m">Male</option>
+            <option value="f">Female</option>
+          </select>
+        </div>
+
+        <div class="create-section">
+          <label class="create-label" for="create-variety">Variety (V6)</label>
+          <select id="create-variety" class="create-select">
+            <option value="">Model default</option>
+            <option value="0">Off</option>
+            <option value="1">Normal</option>
+            <option value="2">High</option>
+            <option value="3">Extra</option>
+            <option value="4">Max</option>
+          </select>
+        </div>
+
+        <div class="create-section">
+          <label class="create-label">Duration (V6): <span id="create-duration-value">Auto</span></label>
+          <input type="range" id="create-duration" class="create-range" min="10" max="360" step="5" value="10" />
+          <label class="create-label create-toggle-label">
+            <input type="checkbox" id="create-duration-enabled" />
+            <span>Use custom duration</span>
+          </label>
+        </div>
+
+        <div class="create-section">
+          <label class="create-label create-toggle-label">
+            <input type="checkbox" id="create-personalize" />
+            <span>Personalize (V6 "My Taste")</span>
+          </label>
+          <label class="create-label create-toggle-label">
+            <input type="checkbox" id="create-personalize-lyrics" />
+            <span>Personalize lyrics too</span>
+          </label>
+        </div>
+
+        <div class="create-section">
+          <label class="create-label create-toggle-label">
+            <input type="checkbox" id="create-max-mode" />
+            <span>Max Mode (V6, full-length generation)</span>
+          </label>
+        </div>
+
         <div class="create-actions">
           <button id="create-generate-btn" class="btn-primary" type="button">🎵 Generate</button>
           <button id="create-save-btn" class="btn-secondary" type="button">💾 Save Prompt</button>
@@ -130,6 +178,16 @@
     document.getElementById('create-audio-influence').addEventListener('input', function() {
       document.getElementById('create-audio-influence-value').textContent = this.value;
     });
+
+    // Duration slider (V6): value only used when the custom-duration toggle is on
+    const durationSlider = document.getElementById('create-duration');
+    const durationToggle = document.getElementById('create-duration-enabled');
+    const syncDurationLabel = () => {
+      document.getElementById('create-duration-value').textContent =
+        durationToggle.checked ? `${durationSlider.value}s` : 'Auto';
+    };
+    durationSlider.addEventListener('input', syncDurationLabel);
+    durationToggle.addEventListener('change', syncDurationLabel);
 
     // Prompt dropdown selection
     document.getElementById('create-prompt-select').addEventListener('change', function() {
@@ -186,6 +244,12 @@
       weirdness: parseInt(document.getElementById('create-weirdness').value),
       styleInfluence: parseInt(document.getElementById('create-style-influence').value),
       audioInfluence: parseInt(document.getElementById('create-audio-influence').value),
+      vocalGender: document.getElementById('create-vocal-gender').value || undefined,
+      maxMode: document.getElementById('create-max-mode').checked,
+      variety: document.getElementById('create-variety').value === '' ? undefined : parseInt(document.getElementById('create-variety').value, 10),
+      duration: document.getElementById('create-duration-enabled').checked ? parseInt(document.getElementById('create-duration').value, 10) : undefined,
+      personalize: document.getElementById('create-personalize').checked,
+      personalizeLyrics: document.getElementById('create-personalize-lyrics').checked,
       personaId: document.getElementById('create-persona').value,
       personaModel: document.getElementById('create-persona-model').value || undefined
     };
@@ -209,6 +273,32 @@
     if (data.audioInfluence !== undefined) {
       document.getElementById('create-audio-influence').value = data.audioInfluence;
       document.getElementById('create-audio-influence-value').textContent = data.audioInfluence;
+    }
+    if (data.vocalGender !== undefined) {
+      document.getElementById('create-vocal-gender').value = data.vocalGender || '';
+    }
+    if (data.maxMode !== undefined) {
+      document.getElementById('create-max-mode').checked = !!data.maxMode;
+    }
+    if (data.variety !== undefined) {
+      const varietySelect = document.getElementById('create-variety');
+      varietySelect.value = (data.variety === undefined || data.variety === null) ? '' : String(data.variety);
+    }
+    if (data.duration !== undefined) {
+      const durationToggle = document.getElementById('create-duration-enabled');
+      durationToggle.checked = typeof data.duration === 'number';
+      if (typeof data.duration === 'number') {
+        document.getElementById('create-duration').value = data.duration;
+        document.getElementById('create-duration-value').textContent = `${data.duration}s`;
+      } else {
+        document.getElementById('create-duration-value').textContent = 'Auto';
+      }
+    }
+    if (data.personalize !== undefined) {
+      document.getElementById('create-personalize').checked = !!data.personalize;
+    }
+    if (data.personalizeLyrics !== undefined) {
+      document.getElementById('create-personalize-lyrics').checked = !!data.personalizeLyrics;
     }
     if (data.personaId !== undefined) {
       document.getElementById('create-persona').value = data.personaId || '';
@@ -441,6 +531,12 @@
       weirdness: data.weirdness,
       styleInfluence: data.styleInfluence,
       audioInfluence: data.audioInfluence,
+      vocalGender: data.vocalGender,
+      maxMode: data.maxMode,
+      variety: data.variety,
+      duration: data.duration,
+      personalize: data.personalize,
+      personalizeLyrics: data.personalizeLyrics,
       personaId: data.personaId,
       personaModel: data.personaModel,
       personaName: personaState.selectedName,
@@ -489,6 +585,12 @@
       weirdness: data.weirdness,
       styleInfluence: data.styleInfluence,
       audioInfluence: data.audioInfluence,
+      vocalGender: data.vocalGender,
+      maxMode: data.maxMode,
+      variety: data.variety,
+      duration: data.duration,
+      personalize: data.personalize,
+      personalizeLyrics: data.personalizeLyrics,
       personaId: data.personaId || undefined,
       personaModel: data.personaModel || undefined
     }, function(response) {

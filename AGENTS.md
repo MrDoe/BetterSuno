@@ -25,10 +25,21 @@ SW vs persistent bg; offscreen polling vs inline `ffPollOnce`; `world:"MAIN"` (C
 `background.js` gets a Bearer token via `window.Clerk.session.getToken()` in a live `suno.com` tab (needs ≥1 open tab). Cached 45 min, refreshed by alarm, pushed to MCP over WS on connect/refresh.
 
 ## Generation (`POST /api/generate/v2-web/`)
-- Pre-call `POST /api/c/check` `{ctype:"generation"}`; if `required:true` MCP asks the extension to solve Turnstile.
+- Pre-call `POST /api/c/check` `{ctype:"generation"}`. The response's `captcha_version` is **1 = hCaptcha, 2 = Turnstile**; `required:true` means a token is needed. MCP asks the extension to solve it and forwards `captcha_version` in the `captcha_required` WS message. The extension only solves Turnstile — it fails fast with a clear error for hCaptcha (Suno's own fallback when Turnstile times out).
 - **Always include `token:null, token_provider:null`** — else 422 `token_validation_failed`.
 - **Mode switch is `gpt_description_prompt`**: empty → Custom (uses `prompt` lyrics); non-empty → Inspiration (auto-lyrics, ignores `prompt`). `metadata.create_mode` is NOT the switch.
 - Sliders in `metadata.control_sliders` (`style_weight`, `weirdness_constraint`, `audio_weight`, 0–1) + `metadata.can_control_sliders` array.
+- **V6 models (2026-09)**: the create UI exposes only the current V6 family — `chirp-hawk` (V6, default), `chirp-hawk-wild` (V6-wild), `chirp-goose` (V6-mini). Old models (V5.5/V5/V4.5) were removed from the UI. Sent as top-level `mv`.
+- **`params: {}` is no longer required (2026-09)** — the V6 web client omits it and generation succeeds without it. It was removed from the extension payloads; don't re-add.
+- New optional `metadata` fields the web client sends: `is_max_mode` (V6 Max Mode, plan feature `max-mode`), `vocal_gender` (`"m"`/`"f"`, flag `vocal-gender-toggle`), `create_surface`, `user_tier`, `disable_volume_normalization`, `batch_offset`, `is_mumble`, `sound_configs`, `model_config`. Top-level: `duration`, `lyrics_project_id`, `lyricist_id`, `transaction_uuid`.
+
+## V6 API changes (2026-09, verified against live bundles + API)
+- **Library**: `GET /api/library?page=…` is **gone (404)**. Library pages now come from `GET /api/project/feed?scope=library&entity_type=clip&limit=30&cursor=…` (web client) or `POST /api/feed/v3` `{limit, cursor}` → `{clips, next_cursor}` (still supported; used by the extension's sync and the MCP server).
+- **WAV download**: the web client uses `GET /api/gen/{clip_id}/wav_file/` → `{wav_file_url}` and, when missing, `POST /api/gen/{clip_id}/convert_wav/` (204) followed by polling every 5s (≤24 tries). The legacy `GET /api/download/clip/{clip_id}?format=wav` still works (returns `{ok, download_url}`) and is the fallback.
+- **Playlists**: `/api/playlist/v2/{playlist_id}` now returns **metadata only** (`metadata/relationship/bio/stats`) — tracks still come from the v1 `GET /api/playlist/{id}?page=&page_size=` (`playlist_clips`). Mutations: `POST /api/playlist/v2/{id}/tracks/add|remove` (`{clip_ids}`) and `POST /api/playlist/v2/{id}/tracks/reorder-by-index` with `{positions:[{clip_id,index}]}` (reorder needs the clip id; resolve from the v1 listing). `/api/playlist/update_clips/` still works.
+- **Async edits**: `/api/edit/crop/{id}/` and `/api/edit/fade/{id}/` return `{action_clip_id}`; poll `GET /api/edit/action/{action_clip_id}/` until `status:"complete"` (error on `"error"`), then load `GET /api/clip/{action_clip_id}`. MCP's `crop_clip`/`fade_clip` now wait for completion.
+- **Stems**: the web client no longer calls `/api/edit/stems/…` (not present in bundles; likely replaced by `POST /api/generate/v2-web/` with `task:"gen_stem"` + `stem_type_id`/`stem_type_group_name`/`stem_task`, model override `chirp-v3-5-b`). The MCP `make_stems` tool still calls the legacy endpoint; verify before relying on it.
+- **New surfaces not yet covered**: `POST /api/video/hooks/create` + `/api/video/hooks/{id}` (Song Hooks; `enableTrustSafety…`), `/api/lyrics-projects/*`, `/api/unified/*` (home/explore/search), `/api/clip/{id}/permissions/*` (sharing), `/api/clips/{id}/set_remix_type`, `/api/gen/{id}/novelty-sections`, `/api/gen/{id}/aligned_lyrics/v3`, `/api/download/clips/zip/prepare` (batch zip), `/api/prompts/suggestions[/contextual]`, `/api/music_player/playbar_state`.
 
 ## MCP server (`bettersuno-mcp`)
 The MCP server is now a **separate package** at [MrDoe/bettersuno-mcp](https://github.com/MrDoe/bettersuno-mcp) on [npm](https://www.npmjs.com/package/bettersuno-mcp).

@@ -80,6 +80,20 @@
               <label class="checkbox-label" style="margin: 0; padding: 0">
                 <input type="checkbox" id="filterOffline" /> 💾 Offline
               </label>
+              <label class="checkbox-label" style="margin: 0; padding: 0">
+                <input type="checkbox" id="filterUnplayed" /> 🆕 Unplayed
+              </label>
+              <label style="margin-left: 12px !important">Model:</label>
+              <select id="filterModel" class="bettersuno-select">
+                <option value="">All</option>
+                <option value="v6">V6</option>
+                <option value="v5.5">V5.5</option>
+                <option value="v5">V5</option>
+                <option value="v4.5">V4.5</option>
+                <option value="v4">V4</option>
+                <option value="v3.5">V3.5</option>
+                <option value="__unknown__">Unknown</option>
+              </select>
               <label style="margin-left: 12px !important">Sort:</label>
               <select id="sortSelect" class="bettersuno-select">
                 <option value="date-desc">Newest</option>
