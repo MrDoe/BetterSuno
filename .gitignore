@@ -5,3 +5,15 @@ dist/
 .opencode/*
 .commandcode/*
 .agents/*
+
+# secrets — never commit signing keys or credentials
+*.pem
+*.key
+*.p12
+*.pfx
+.cws-credentials.env
+
+# release artifacts
+web-ext-artifacts/
+bettersuno-*.zip
+bettersuno-*.crx
