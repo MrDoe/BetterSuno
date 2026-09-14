@@ -4950,7 +4950,8 @@
         const modelLabel = getModelVersionLabel(song);
         if (modelLabel) {
             const modelSpan = document.createElement("span");
-            modelSpan.textContent = ` 🎛 ${modelLabel}`;
+            modelSpan.className = 'song-badge song-badge-model';
+            modelSpan.textContent = modelLabel;
             modelSpan.title = `Suno model: ${song.model_name || modelLabel}${song.major_model_version ? ` (${song.major_model_version})` : ''}`;
             metaDiv.appendChild(modelSpan);
         }
@@ -4958,10 +4959,12 @@
         if (song.play_count !== undefined && song.play_count !== null) {
             const playedSpan = document.createElement("span");
             if (song.play_count > 0) {
-                playedSpan.textContent = ` ▶ ${song.play_count.toLocaleString()} play${song.play_count === 1 ? '' : 's'}`;
+                playedSpan.className = 'song-badge song-badge-played';
+                playedSpan.textContent = `▶ ${song.play_count.toLocaleString()}`;
                 playedSpan.title = `${song.play_count.toLocaleString()} play${song.play_count === 1 ? '' : 's'}`;
             } else {
-                playedSpan.textContent = ' 🆕 Unplayed';
+                playedSpan.className = 'song-badge song-badge-unplayed';
+                playedSpan.textContent = 'Unplayed';
                 playedSpan.title = 'This song has not been played yet';
             }
             metaDiv.appendChild(playedSpan);

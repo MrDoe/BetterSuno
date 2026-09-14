@@ -238,6 +238,118 @@ async function handleMcpExtensionRequest(msg) {
 // discovered one from the suno.com tab below, but keep a known-good default).
 const FALLBACK_CAPTCHA_SITEKEY = '0x4AAAAAADI7xDNyj-3LcIbi';
 
+// Injected into the suno.com tab (MAIN world on Chrome; content-script world
+// with Xray access on Firefox). Strategy, in order:
+//   1. reuse a fresh token from a Turnstile widget Suno already rendered;
+//   2. ask an existing widget for a token (`execute`) instead of spawning one;
+//   3. render our own widget with a visible "tick the checkbox" hint.
+// Interactive challenges (Cloudflare escalates after bursts / automation
+// signals) cannot be solved silently; the hint asks the user to tick the box
+// and the promise settles only once they do (or on explicit failure).
+async function solveCaptchaInPage(fallbackSitekey) {
+  const wjs = typeof window.wrappedJSObject !== 'undefined' ? window.wrappedJSObject : window;
+
+  // AMO compliance: never load remote code. Only use Turnstile if Suno has
+  // already loaded it on the page.
+  if (typeof wjs.turnstile === 'undefined') {
+    for (let i = 0; i < 100; i++) {
+      if (typeof wjs.turnstile !== 'undefined') break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
+  if (typeof wjs.turnstile === 'undefined') {
+    throw new Error('Turnstile is not loaded on the Suno tab — open https://suno.com/create and retry');
+  }
+
+  const findWidgetIds = () => Array.from(document.querySelectorAll('input[name="cf-turnstile-response"]'))
+    .map(input => (input.id && input.id.endsWith('_response')) ? input.id.slice(0, -'_response'.length) : null)
+    .filter(Boolean);
+
+  // 1) Reuse an already-solved, unexpired token. Reset the widget afterwards so
+  // the next call gets a fresh token instead of the one we just consumed.
+  for (const id of findWidgetIds()) {
+    try {
+      const token = wjs.turnstile.getResponse(id);
+      if (token && !wjs.turnstile.isExpired(id)) {
+        try { wjs.turnstile.reset(id); } catch (e) {}
+        return token;
+      }
+    } catch (e) { /* widget not ready */ }
+  }
+
+  // 2) Ask an existing widget for a token rather than rendering a new one.
+  for (const id of findWidgetIds()) {
+    try {
+      wjs.turnstile.execute(id);
+      for (let waited = 0; waited < 25000; waited += 250) {
+        const token = wjs.turnstile.getResponse(id);
+        if (token) {
+          try { wjs.turnstile.reset(id); } catch (e) {}
+          return token;
+        }
+        await new Promise(r => setTimeout(r, 250));
+      }
+    } catch (e) { /* try the next widget */ }
+  }
+
+  // 3) Fallback: render our own widget with a visible instruction.
+  async function findSunoCaptchaSitekey() {
+    try {
+      const resources = performance.getEntriesByType('resource')
+        .map(e => e.name)
+        .filter(u => u.startsWith('https://suno.com') && /\.js($|\?)/.test(u));
+      for (const url of resources.slice(0, 60)) {
+        try {
+          const res = await fetch(url, { cache: 'force-cache' });
+          const text = await res.text();
+          const genMatch = text.match(/NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY_GEN\|\|"([A-Za-z0-9_-]{20,})"/);
+          if (genMatch) return genMatch[1];
+        } catch (e) { /* try next chunk */ }
+      }
+    } catch (e) { /* fall through to default */ }
+    return fallbackSitekey;
+  }
+
+  let sitekey = fallbackSitekey;
+  try {
+    const discovered = await findSunoCaptchaSitekey();
+    if (discovered) sitekey = discovered;
+  } catch (e) {}
+
+  return new Promise((resolve, reject) => {
+    const container = document.createElement('div');
+    container.style.cssText = 'position:fixed;top:14px;right:14px;z-index:2147483647;display:flex;flex-direction:column;align-items:flex-end;gap:6px;';
+
+    const hint = document.createElement('div');
+    hint.textContent = 'Suno verification — preparing…';
+    hint.style.cssText = 'background:#18181b;color:#fff;border:1px solid #3f3f46;border-radius:8px;padding:8px 12px;font:600 13px system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.45);max-width:340px;';
+    const widget = document.createElement('div');
+    container.appendChild(hint);
+    container.appendChild(widget);
+    document.body.appendChild(container);
+
+    let settled = false;
+    const cleanup = () => { if (settled) return; settled = true; clearTimeout(timeout); container.remove(); };
+    const succeed = (token) => { cleanup(); resolve(token); };
+    const fail = (message) => { cleanup(); reject(new Error(message)); };
+
+    const timeout = setTimeout(() => fail('Suno needs a Cloudflare Turnstile check and it was not completed in time — tick the "Verify you are human" checkbox in the Suno tab, then retry'), 110000);
+
+    try {
+      wjs.turnstile.render(widget, {
+        sitekey,
+        callback: (token) => succeed(token),
+        'before-interactive-callback': () => { hint.textContent = 'Suno needs a human check — tick the "Verify you are human" checkbox'; },
+        'after-interactive-callback': () => { hint.textContent = 'Verifying…'; },
+        'expired-callback': () => fail('Captcha expired before it was solved — please retry'),
+        'error-callback': () => fail('Cloudflare rejected the captcha solve — tick the checkbox in the Suno tab manually, then retry'),
+      });
+    } catch (e) {
+      fail(e && e.message ? e.message : 'Captcha render failed');
+    }
+  });
+}
+
 async function handleMcpCaptchaRequest(captchaVersion) {
   // Suno's /api/c/check reports which generation captcha is required:
   //   1 = hCaptcha, 2 = Turnstile. The web client prefers Turnstile and only
@@ -248,103 +360,29 @@ async function handleMcpCaptchaRequest(captchaVersion) {
   }
 
   const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
-  const tab = sunoTabs.find(t => typeof t.id === 'number');
-  if (!tab) throw new Error('No Suno tab available to render captcha');
+  // Prefer the create page: that is where Turnstile (and Suno's own widget) live.
+  const tab = sunoTabs.find(t => typeof t.id === 'number' && /suno\.com\/create/.test(t.url || ''))
+    || sunoTabs.find(t => typeof t.id === 'number');
+  if (!tab) throw new Error('No Suno tab available to solve the captcha — open https://suno.com/create');
 
   const executeOptions = {
     target: { tabId: tab.id, frameIds: [0] },
-    func: async (fallbackSitekey) => {
-      const wjs = typeof window.wrappedJSObject !== 'undefined' ? window.wrappedJSObject : window;
-
-      // AMO compliance: do not load remote code. Only use Turnstile if Suno
-      // has already loaded it on the page. Poll briefly for Suno's lazy load
-      // but never inject the Turnstile CDN script ourselves (remote code
-      // execution – rejected by Mozilla).
-      if (typeof wjs.turnstile === 'undefined') {
-        for (let i = 0; i < 50; i++) {
-          if (typeof wjs.turnstile !== 'undefined') break;
-          await new Promise(r => setTimeout(r, 100));
-        }
-      }
-      if (typeof wjs.turnstile === 'undefined') {
-        throw new Error('Turnstile not loaded on this page – please navigate to suno.com/create and retry');
-      }
-
-      // Sitekey discovery runs inside the suno.com page (MAIN world) so it can
-      // read Suno's own JS chunks. Suno exposes the generation sitekey as
-      // NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY_GEN in one of its bundles; we
-      // scan same-origin scripts for that constant and fall back to the default.
-      async function findSunoCaptchaSitekey() {
-        try {
-          const resources = performance.getEntriesByType('resource')
-            .map(e => e.name)
-            .filter(u => u.startsWith('https://suno.com') && /\.js($|\?)/.test(u));
-          for (const url of resources.slice(0, 60)) {
-            try {
-              const res = await fetch(url, { cache: 'force-cache' });
-              const text = await res.text();
-              const genMatch = text.match(/NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY_GEN\|\|"([A-Za-z0-9_-]{20,})"/);
-              if (genMatch) return genMatch[1];
-            } catch (e) { /* try next chunk */ }
-          }
-        } catch (e) { /* fall through to default */ }
-        return fallbackSitekey;
-      }
-
-      let sitekey = null;
-      try {
-        sitekey = await findSunoCaptchaSitekey();
-      } catch (e) {}
-      if (!sitekey) sitekey = fallbackSitekey;
-
-      return new Promise((resolve, reject) => {
-        const container = document.createElement('div');
-        container.style.cssText = 'position:fixed;top:10px;right:10px;z-index:999999;';
-        document.body.appendChild(container);
-
-        const timeout = setTimeout(() => {
-          container.remove();
-          reject(new Error('Captcha solve timed out'));
-        }, 55000);
-
-        wjs.turnstile.render(container, {
-          sitekey,
-          callback: (token) => {
-            clearTimeout(timeout);
-            container.remove();
-            resolve(token);
-          },
-          'expired-callback': () => {
-            clearTimeout(timeout);
-            container.remove();
-            reject(new Error('Captcha expired'));
-          },
-          'error-callback': () => {
-            clearTimeout(timeout);
-            container.remove();
-            reject(new Error('Captcha error'));
-          },
-        });
-      });
-    }
+    func: solveCaptchaInPage,
+    args: [{ value: FALLBACK_CAPTCHA_SITEKEY }],
   };
+  if (!isFirefox) executeOptions.world = 'MAIN';
 
-  const executeArgs = [{ value: FALLBACK_CAPTCHA_SITEKEY }];
-  if (!isFirefox) {
-    executeOptions.world = 'MAIN';
+  let results;
+  try {
+    results = await chrome.scripting.executeScript(executeOptions);
+  } catch (err) {
+    throw new Error(`Captcha solve failed: ${err && err.message ? err.message : String(err)}`);
   }
-  executeOptions.args = executeArgs;
-
-  const captchaToken = await Promise.race([
-    chrome.scripting.executeScript(executeOptions),
-    new Promise(resolve => setTimeout(() => resolve(null), 60000))
-  ]);
-
-  if (Array.isArray(captchaToken)) {
-    const validResult = captchaToken.find(r => r && r.result != null);
-    return validResult ? validResult.result : null;
+  const validResult = Array.isArray(results) ? results.find(r => r && r.result != null) : null;
+  if (!validResult) {
+    throw new Error('Suno requires a human Turnstile check — tick the "Verify you are human" checkbox in the Suno tab, then retry');
   }
-  return null;
+  return validResult.result;
 }
 
 // Retry MCP bridge connection periodically in case the server starts later

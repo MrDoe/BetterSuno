@@ -90,6 +90,10 @@
           <input type="range" id="create-audio-influence" class="create-range" min="0" max="100" value="50" />
         </div>
 
+        <div class="create-section create-section-divider">
+          <span class="create-label">V6 Options</span>
+        </div>
+
         <div class="create-section">
           <label class="create-label" for="create-vocal-gender">Vocal Gender</label>
           <select id="create-vocal-gender" class="create-select">

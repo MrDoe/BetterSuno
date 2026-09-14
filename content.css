@@ -2833,3 +2833,65 @@
 .persona-dialog-more-btn:active {
   background: var(--bettersuno-border);
 }
+
+/* ---- UX polish (2026-09): badges, desktop width, mobile titles ---- */
+
+/* Status chips for the V6 model version and played state */
+#bettersuno-panel .song-meta .song-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  padding: 1px 6px !important;
+  border-radius: 999px !important;
+  border: 1px solid var(--bettersuno-border) !important;
+  background: var(--bettersuno-bg-hover) !important;
+  color: var(--bettersuno-text-muted) !important;
+  font-size: 9px !important;
+  font-weight: 600 !important;
+  line-height: 1.6 !important;
+  letter-spacing: 0.03em !important;
+  text-transform: uppercase !important;
+  white-space: nowrap !important;
+}
+
+#bettersuno-panel .song-meta .song-badge-model {
+  color: var(--bettersuno-accent) !important;
+}
+
+#bettersuno-panel .song-meta .song-badge-played {
+  color: #38bdf8 !important;
+}
+
+#bettersuno-panel .song-meta .song-badge-unplayed {
+  color: #f59e0b !important;
+}
+
+/* Keep content readable on wide desktop screens instead of stretching edge to edge */
+@media (min-width: 900px) {
+  #bettersuno-downloader-wrapper,
+  #bettersuno-create-content,
+  #bettersuno-settings-content,
+  #bettersuno-list {
+    width: 100% !important;
+    max-width: 1180px !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+  }
+}
+
+/* Long titles get two lines on small phones instead of being cut to a few characters */
+@media (max-width: 480px) {
+  #bettersuno-panel .song-title {
+    white-space: normal !important;
+    display: -webkit-box !important;
+    -webkit-line-clamp: 2 !important;
+    -webkit-box-orient: vertical !important;
+    overflow: hidden !important;
+  }
+}
+
+/* Group heading for the V6-only generation options in the Create tab */
+.create-section-divider {
+  margin-top: 6px !important;
+  padding-top: 10px !important;
+  border-top: 1px solid var(--bettersuno-border) !important;
+}

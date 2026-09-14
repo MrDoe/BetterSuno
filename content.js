@@ -33,7 +33,7 @@
         <h3 id="bettersuno-title">BetterSuno</h3>
       </div>
       <div id="bettersuno-tabs" role="tablist" aria-label="Sections">
-        <button class="bettersuno-tab active" data-tab="library" role="tab" aria-selected="true" aria-controls="bettersuno-download-content">Song Library</button>
+        <button class="bettersuno-tab active" data-tab="library" role="tab" aria-selected="true" aria-controls="bettersuno-download-content">Library</button>
         <button class="bettersuno-tab" data-tab="player" role="tab" aria-selected="false" aria-controls="bettersuno-player-content">Player</button>
         <button class="bettersuno-tab" data-tab="create" role="tab" aria-selected="false" aria-controls="bettersuno-create-content">Create</button>
         <button class="bettersuno-tab" data-tab="notifications" role="tab" aria-selected="false" aria-controls="bettersuno-list">Notifications</button>
