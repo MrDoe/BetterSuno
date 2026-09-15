@@ -600,6 +600,15 @@
         return null;
     }
 
+    function mergePlayCounts(existingValue, freshValue) {
+        const existingCount = normalizePlayCount(existingValue);
+        const freshCount = normalizePlayCount(freshValue);
+
+        if (existingCount === null) return freshCount;
+        if (freshCount === null) return existingCount;
+        return Math.max(existingCount, freshCount);
+    }
+
     function getModelVersionLabel(song) {
         const modelName = (song?.model_name || '').toLowerCase();
         const major = (song?.major_model_version || '').toLowerCase();
@@ -672,9 +681,7 @@
             is_liked: reactionState === 'like',
             is_stem: freshSong.is_stem ?? existingSong.is_stem,
             upvote_count: freshSong.upvote_count !== undefined ? normalizeUpvoteCount(freshSong.upvote_count) : normalizeUpvoteCount(existingSong.upvote_count),
-            play_count: freshSong.play_count !== undefined && freshSong.play_count !== null
-                ? normalizePlayCount(freshSong.play_count)
-                : (existingSong.play_count ?? null),
+            play_count: mergePlayCounts(existingSong.play_count, freshSong.play_count),
             model_name: freshSong.model_name || existingSong.model_name || null,
             major_model_version: freshSong.major_model_version || existingSong.major_model_version || null,
             task: freshSong.task || existingSong.task || null,
@@ -1898,6 +1905,56 @@
         return blob;
     }
 
+    function markSongPlayed(songId) {
+        if (!songId) return false;
+
+        const bumpPlayCount = (song) => {
+            if (!song) return;
+            song.play_count = (normalizePlayCount(song.play_count) || 0) + 1;
+        };
+
+        let updated = false;
+        let inPlaylist = false;
+
+        const librarySong = allSongs.find(song => song.id === songId);
+        if (librarySong) {
+            bumpPlayCount(librarySong);
+            updated = true;
+            void saveSongsToIDB([librarySong]);
+        }
+
+        if (Array.isArray(playlistSongs)) {
+            const playlistSong = playlistSongs.find(song => song.id === songId);
+            if (playlistSong) {
+                inPlaylist = true;
+                if (playlistSong !== librarySong) {
+                    bumpPlayCount(playlistSong);
+                }
+                updated = true;
+            }
+        }
+
+        if (!updated) return false;
+
+        if (inPlaylist) {
+            const playlistId = getSelectedPlaylistMetadata()?.id;
+            if (playlistId) {
+                void savePreferenceToIDB(getPlaylistSongsCacheKey(playlistId), playlistSongs);
+            }
+        }
+
+        if (filterUnplayed?.checked) {
+            applyFilter({
+                preserveScroll: true,
+                minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
+            });
+        } else {
+            refreshVisibleSongItems([songId]);
+        }
+
+        return true;
+    }
+
     async function togglePlay(song) {
         if (!song || !song.audio_url) return;
 
@@ -1917,6 +1974,7 @@
             currentBlobUrl = null;
 
             currentPlayingSongId = song.id;
+            markSongPlayed(song.id);
 
             // Reset progress immediately so next/previous track changes are reflected
             // before metadata/timeupdate events arrive for the new source.
@@ -3046,7 +3104,6 @@
             await savePreferenceToIDB('sunoFilterStems', filterStems.checked);
             await savePreferenceToIDB('sunoFilterPublic', filterPublic.checked);
             await savePreferenceToIDB('sunoFilterOffline', !!filterOffline?.checked);
-            await savePreferenceToIDB('sunoFilterUnplayed', !!filterUnplayed?.checked);
             await savePreferenceToIDB('sunoFilterModel', filterModel ? filterModel.value : '');
         } catch (e) {
             console.error('Failed to save filter preferences:', e);
@@ -3067,7 +3124,6 @@
             const stems = await loadPreferenceFromIDB('sunoFilterStems');
             const pub = await loadPreferenceFromIDB('sunoFilterPublic');
             const offline = await loadPreferenceFromIDB('sunoFilterOffline');
-            const unplayed = await loadPreferenceFromIDB('sunoFilterUnplayed');
             const model = await loadPreferenceFromIDB('sunoFilterModel');
             
             if (liked !== null) filterLiked.checked = liked;
@@ -3075,9 +3131,6 @@
             filterPublic.checked = (pub !== null) ? pub : true;
             if (filterOffline) {
                 filterOffline.checked = offline === true;
-            }
-            if (filterUnplayed) {
-                filterUnplayed.checked = unplayed === true;
             }
             if (filterModel && typeof model === 'string') {
                 filterModel.value = model;
@@ -3087,9 +3140,6 @@
             filterPublic.checked = true;
             if (filterOffline) {
                 filterOffline.checked = false;
-            }
-            if (filterUnplayed) {
-                filterUnplayed.checked = false;
             }
             if (filterModel) {
                 filterModel.value = '';
@@ -3440,7 +3490,6 @@
     if (filterUnplayed) {
         filterUnplayed.addEventListener("change", () => {
             applyFilter();
-            saveFilterPreferences();
         });
     }
 
@@ -5318,6 +5367,7 @@
             showPublicOnly: filterPublic.checked,
             showOfflineOnly: !!filterOffline?.checked,
             showUnplayedOnly: !!filterUnplayed?.checked,
+            currentSongId: currentPlayingSongId,
             modelVersion: filterModel ? filterModel.value : ''
         };
     }
@@ -5372,7 +5422,7 @@
             return false;
         }
 
-        if (filterState.showUnplayedOnly && song.play_count !== 0) {
+        if (filterState.showUnplayedOnly && song.play_count !== 0 && song.id !== filterState.currentSongId) {
             return false;
         }
 
