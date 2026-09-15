@@ -2486,8 +2486,21 @@
     const songCount = document.getElementById("songCount");
     const songListContainer = document.getElementById("songListContainer");
 
-    function getVisibleSongIds() {
+    function isSongListVisible() {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+            return false;
+        }
+
         if (!songList) {
+            return false;
+        }
+
+        const containerRect = songList.getBoundingClientRect();
+        return containerRect.width > 0 && containerRect.height > 0;
+    }
+
+    function getVisibleSongIds() {
+        if (!isSongListVisible()) {
             return [];
         }
 
@@ -2498,6 +2511,9 @@
         return Array.from(songList.querySelectorAll('.song-item[data-song-id]'))
             .filter(item => {
                 const r = item.getBoundingClientRect();
+                if (r.width === 0 && r.height === 0) {
+                    return false;
+                }
                 return r.bottom >= bufferedTop && r.top <= bufferedBottom;
             })
             .map(item => item.dataset.songId)
@@ -2528,6 +2544,10 @@
 
             const song = activeSongMap.get(songId) || allSongMap.get(songId);
             if (!song) {
+                return;
+            }
+
+            if ((oldItem.dataset.renderSignature || '') === getSongItemRenderSignature(song)) {
                 return;
             }
 
@@ -2568,10 +2588,10 @@
         songListVisibleRefreshTimer = setTimeout(() => {
             refreshCurrentVisibleSongMetadata();
             songListVisibleRefreshFollowupTimer = setTimeout(() => {
-                refreshCurrentVisibleSongMetadata({ forceRefresh: true });
+                refreshCurrentVisibleSongMetadata();
             }, VISIBLE_SONG_REFRESH_REPEAT_MS);
             songListVisibleRefreshIntervalTimer = setInterval(() => {
-                refreshCurrentVisibleSongMetadata({ forceRefresh: true });
+                refreshCurrentVisibleSongMetadata();
             }, VISIBLE_SONG_REFRESH_INTERVAL_MS);
         }, VISIBLE_SONG_REFRESH_DEBOUNCE_MS);
     }
@@ -3011,7 +3031,6 @@
                 allSongs = savedSongs;
                 initSunoUserId();
                 filteredSongs = [...allSongs];
-                const needsMetadataRefresh = libraryNeedsMetadataRefresh(savedSongs);
 
                 // Restore settings from metadata
                 if (savedSongsMeta) {
@@ -3040,13 +3059,7 @@
                 }
 
                 console.log('[Downloader] Showing cached songs, checking for new songs...');
-                if (needsMetadataRefresh && !savedSelectedPlaylist) {
-                    statusDiv.innerText = 'Refreshing all songs metadata...';
-                    setTimeout(() => startFullRefresh({ confirmUser: false }), 100);
-                } else {
-                    // Check for new songs
-                    setTimeout(() => checkForNewSongs(), 100);
-                }
+                setTimeout(() => checkForNewSongs(), 100);
                 return;
             }
         } catch (e) {
@@ -3067,16 +3080,6 @@
 
     function checkForNewSongs() {
         startIncrementalSync({ automatic: true });
-    }
-
-    function libraryNeedsMetadataRefresh(songs) {
-        return Array.isArray(songs) && songs.some(song =>
-            song.upvote_count === undefined ||
-            !song.model_name ||
-            !song.major_model_version ||
-            song.play_count === undefined ||
-            song.play_count === null
-        );
     }
 
     async function saveToStorage() {
@@ -3224,6 +3227,77 @@
         };
     }
 
+    // Update-only merge for metadata refreshes: never adds unknown clips (feed/v3
+    // lookups can return other artists' playlist clips) and keeps the playlist
+    // collection in sync with the library collection.
+    function applySongMetadataUpdates(updatedSongs) {
+        if (!Array.isArray(updatedSongs) || updatedSongs.length === 0) {
+            return { metadataUpdateCount: 0 };
+        }
+
+        const updatesById = new Map(updatedSongs.map(song => [song.id, song]));
+        const changedIds = new Set();
+        const staleImageSongIds = new Set();
+
+        const applyToCollection = (collection) => {
+            if (!Array.isArray(collection) || collection.length === 0) {
+                return collection;
+            }
+
+            return collection.map(song => {
+                const fresh = updatesById.get(song.id);
+                if (!fresh) {
+                    return song;
+                }
+
+                const mergedSong = mergeSongMetadata(song, fresh);
+
+                if (!areSongDetailsEqual(song, mergedSong)) {
+                    changedIds.add(song.id);
+                    songItemCache.delete(song.id);
+
+                    const previousThumbnailSource = getSongThumbnailSource(song);
+                    const nextThumbnailSource = getSongThumbnailSource(mergedSong);
+                    if ((previousThumbnailSource?.url || '') !== (nextThumbnailSource?.url || '') || (previousThumbnailSource?.type || '') !== (nextThumbnailSource?.type || '')) {
+                        mergedSong.image_cache_bust = Date.now();
+                        staleImageSongIds.add(song.id);
+                    }
+
+                    if (currentPlayingSongId === song.id) {
+                        updatePlayerTabUi(mergedSong);
+                        if (playerTitle) {
+                            playerTitle.textContent = mergedSong.title || 'Untitled';
+                        }
+                    }
+                }
+
+                return mergedSong;
+            });
+        };
+
+        allSongs = applyToCollection(allSongs);
+        if (Array.isArray(playlistSongs)) {
+            playlistSongs = applyToCollection(playlistSongs);
+        }
+
+        if (changedIds.size > 0) {
+            if (!Array.isArray(playlistSongs)) {
+                filteredSongs = [...allSongs];
+            }
+            applyFilter({
+                preserveScroll: true,
+                minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
+            });
+            void saveToStorage();
+        }
+
+        if (staleImageSongIds.size > 0) {
+            void Promise.all(staleImageSongIds.map(songId => deleteImageBlobFromIDB(songId)));
+        }
+
+        return { metadataUpdateCount: changedIds.size };
+    }
+
     function shouldRefreshMetadataForSong(song) {
         if (!song || !song.id) return false;
 
@@ -3275,7 +3349,7 @@
 
             metadataRefreshInFlight = true;
             try {
-                const response = await sendMessageWithRetry({ action: 'fetch_songs_by_ids', songIds: idsToRefresh });
+                const response = await sendMessageWithRetry({ action: 'fetch_songs_by_ids', songIds: idsToRefresh, skipLibraryFallback: true });
                 if (!response?.ok) {
                     if (response?.status === 429) {
                         metadataRefreshBlockedUntil = Date.now() + METADATA_REFRESH_ERROR_BACKOFF_MS;
@@ -3295,7 +3369,7 @@
                     .filter(song => song.id);
 
                 if (updatedSongs.length > 0) {
-                    mergeSongs(updatedSongs);
+                    applySongMetadataUpdates(updatedSongs);
                 }
             } catch (e) {
                 console.debug('[Downloader] metadata refresh by visible items failed:', e);
@@ -3718,10 +3792,6 @@
             applyFilter();
         } else {
             statusDiv.innerText = 'Showing all songs.';
-            if (libraryNeedsMetadataRefresh(allSongs)) {
-                statusDiv.innerText = 'Refreshing all songs metadata...';
-                setTimeout(() => startFullRefresh({ confirmUser: false }), 100);
-            }
         }
 
         const nowPlaylistMode = Array.isArray(playlistSongs);
@@ -4335,6 +4405,10 @@
         startFullRefresh({ confirmUser: true });
     });
 
+    document.addEventListener('bettersuno:panel-opened', () => {
+        scheduleVisibleSongRefresh();
+    });
+
     document.addEventListener('bettersuno:settings-opened', () => {
         void refreshDbUsageDisplay();
     });
@@ -4860,11 +4934,31 @@
         updateSongListSentinelState();
     }
 
+    function getSongItemRenderSignature(song) {
+        return [
+            getSongDisplayTitle(song),
+            song?.is_public ? '1' : '0',
+            getModelVersionLabel(song) || '',
+            song?.play_count ?? '',
+            getSongReactionState(song),
+            song?.upvote_count ?? '',
+            song?.is_stem ? '1' : '0',
+            song?.created_at || '',
+            shouldShowOtherArtistBadge(song) ? (song?.owner_display_name || song?.owner_handle || '1') : '',
+            cachedSongIds.has(song?.id) ? '1' : '0',
+            song?.image_cache_bust || '',
+            getSongThumbnailSignature(song),
+            selectedSongIds.has(song?.id) ? '1' : '0',
+            currentPlayingSongId === song?.id ? '1' : '0'
+        ].join('|');
+    }
+
     function createSongListItem(song) {
         const item = document.createElement("div");
         item.className = "song-item";
         item.dataset.songId = song.id;
         item.dataset.thumbnailSignature = getSongThumbnailSignature(song);
+        item.dataset.renderSignature = getSongItemRenderSignature(song);
         if (currentPlayingSongId === song.id) {
             item.classList.add('playing');
         }

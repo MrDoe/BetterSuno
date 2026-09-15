@@ -766,6 +766,10 @@
     if (tabName === 'create') {
       document.dispatchEvent(new CustomEvent('bettersuno:create-tab-opened'));
     }
+
+    if (tabName === 'library') {
+      document.dispatchEvent(new CustomEvent('bettersuno:panel-opened'));
+    }
   }
   
   // ---- Toggle panel ----
@@ -779,6 +783,9 @@
       lastSeenCount = currentNotifCount;
       badge.style.display = 'none';
       badge.textContent = '0';
+      if (currentTab === 'library') {
+        document.dispatchEvent(new CustomEvent('bettersuno:panel-opened'));
+      }
     }
   });
 

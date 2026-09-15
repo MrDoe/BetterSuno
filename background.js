@@ -40,7 +40,7 @@ let currentDownloadJobId = 0;
 let activeDownloadIds = new Set();
 let downloadRequestorTabId = null;
 const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
-const BULK_LIBRARY_PAGE_SIZE = 10000;
+const BULK_LIBRARY_PAGE_SIZE = 100; // /api/feed/v3 rejects limit > 100 (verified 2026-09)
 const PLAYLIST_CLIP_PAGE_SIZE = 50;
 
 // Gate: resolves once loadState() has completed, so alarm handlers
@@ -1720,7 +1720,7 @@ async function fetchLibraryPageWithRetry(currentToken, cursor, pageSize, signal,
   let retries = 0;
   let delayMs = initialDelayMs;
   let renewed = false;
-  const limit = Math.min(Math.max(parseInt(pageSize, 10) || 50, 1), 50);
+  const limit = Math.min(Math.max(parseInt(pageSize, 10) || 50, 1), 100); // feed/v3 max limit is 100
 
   while (retries <= maxRetries) {
     const controller = new AbortController();
@@ -2381,16 +2381,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         const targetIds = new Set(songIds.map(id => id.trim()).filter(id => id));
+        const skipLibraryFallback = !!msg.skipLibraryFallback;
         const directFeedLookup = await fetchFeedSongsByIds(token, songIds, { logPrefix: 'fetch_songs_by_ids' });
         if (!directFeedLookup.ok && directFeedLookup.status === 429) {
           sendResponse({ ok: false, status: 429, error: 'Rate limited while fetching songs by ids' });
           return;
         }
+        const feedLookupFailed = !directFeedLookup.ok;
 
         let resultSongs = directFeedLookup.clips || [];
         let source = 'feed-by-ids';
 
-        if (resultSongs.length < targetIds.size) {
+        if (!skipLibraryFallback && resultSongs.length < targetIds.size) {
           const missingIds = songIds.filter(id => !resultSongs.some(song => song?.id === String(id).trim()));
           const identity = await fetchCurrentUserIdentity(token).catch(() => null);
           const allIdentityIds = new Set(getIdentityIds(identity));
@@ -2417,6 +2419,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (fallbackSource === 'paged-library') {
             fallbackSongs = await fetchLibrarySongsPaged(token, userId, allIdentityIds, false, {
               targetIds: new Set(missingIds.map(id => String(id).trim()).filter(Boolean)),
+              maxPages: 40, // cap id lookups so unresolvable ids can't trigger a full-library crawl
               trackAbortController: false,
               logPrefix: 'fetch_songs_by_ids'
             });
@@ -2434,6 +2437,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               .filter(Boolean);
             source = `feed-by-ids+${fallbackSource}`;
           }
+        }
+
+        if (resultSongs.length === 0 && feedLookupFailed) {
+          sendResponse({
+            ok: false,
+            status: directFeedLookup.status || 0,
+            error: directFeedLookup.error || `Song lookup failed with HTTP ${directFeedLookup.status || 'unknown'}`
+          });
+          return;
         }
 
         sendResponse({
@@ -4401,7 +4413,7 @@ async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly, optio
 async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, options = {}) {
   const {
     targetIds = null,
-    pageSize = 200,
+    pageSize = 100,
     maxPages = 200,
     trackAbortController = true,
     logPrefix = 'library'
