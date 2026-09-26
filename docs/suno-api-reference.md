@@ -12,7 +12,7 @@ browser-token: {"token":"eyJ0aW1lc3RhbXAiOjE3ODM3MTk4OTUxODN9"}
 device-id: <uuid>
 ```
 
-Token obtained from `window.Clerk.session.getToken()` (MAIN world). Also sent via `__session` cookie as fallback.
+Token is obtained from `window.Clerk.session.getToken()` in the Suno page context. The `__session` cookie is read only for session diagnostics; it is not assumed to be a valid API bearer token.
 
 ---
 

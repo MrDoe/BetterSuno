@@ -1955,16 +1955,30 @@
         return true;
     }
 
+    function setPlaybackState(state) {
+        document.dispatchEvent(new CustomEvent('bettersuno:playback-state', {
+            detail: { state }
+        }));
+    }
+
     async function togglePlay(song) {
-        if (!song || !song.audio_url) return;
+        if (!song || !song.audio_url) {
+            setPlaybackState('paused');
+            return;
+        }
 
         if (currentPlayingSongId === song.id) {
             if (audioElement.paused) {
                 haptic();
-                audioElement.play();
+                setPlaybackState('loading');
+                audioElement.play().catch((e) => {
+                    setPlaybackState('paused');
+                    console.debug('[Downloader] Play promise rejected:', e);
+                });
                 playPauseBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
             } else {
                 haptic();
+                setPlaybackState('paused');
                 audioElement.pause();
                 playPauseBtn.textContent = '▶';
             }
@@ -1984,6 +1998,8 @@
                 audioElement.load();
                 updatePlayerProgressUi();
             }
+
+            setPlaybackState('loading');
 
             // Use cached audio if available, otherwise stream online (respect requested format if available)
             const cachedBlob = await getAudioBlobFromIDB(song.id);
@@ -2028,13 +2044,23 @@
                     console.log('[Downloader] Playback failed, falling back to raw Suno URL:', rawUrl);
                     audioElement.src = rawUrl;
                     audioElement.load();
-                    audioElement.play().catch(e => console.error('[Downloader] Raw URL fallback also failed:', e));
+                    audioElement.play().catch(e => {
+                        if (currentPlayingSongId === currentSongIdForError) {
+                            setPlaybackState('paused');
+                        }
+                        console.error('[Downloader] Raw URL fallback also failed:', e);
+                    });
+                } else if (currentPlayingSongId === currentSongIdForError) {
+                    setPlaybackState('paused');
                 }
             };
             audioElement.addEventListener('error', onErrorHandler, { once: true });
 
             audioElement.load();
             audioElement.play().catch(e => {
+                if (currentPlayingSongId === currentSongIdForError) {
+                    setPlaybackState('paused');
+                }
                 console.debug('[Downloader] Play promise rejected:', e);
             });
             miniPlayer.style.display = 'block';
@@ -2259,6 +2285,7 @@
         const nextSong = getNextSongForPlayback();
         if (!nextSong) {
             currentPlayingSongId = null;
+            setPlaybackState('paused');
             playPauseBtn.textContent = '▶';
             playerTitle.textContent = 'Queue finished';
             updatePlayerTabUi(null);
@@ -2266,7 +2293,12 @@
             return;
         }
 
-        await togglePlay(nextSong);
+        try {
+            await togglePlay(nextSong);
+        } catch (e) {
+            setPlaybackState('paused');
+            console.debug('[Downloader] Auto-advance failed:', e);
+        }
     }
 
     if (playPauseBtn) {
@@ -2335,14 +2367,17 @@
         });
 
         audioElement.addEventListener('play', () => {
+            setPlaybackState('playing');
             refreshVisibleSongPlaybackState();
         });
 
         audioElement.addEventListener('pause', () => {
+            setPlaybackState('paused');
             refreshVisibleSongPlaybackState();
         });
 
         audioElement.addEventListener('ended', () => {
+            setPlaybackState(getNextSongForPlayback() ? 'loading' : 'paused');
             void playNextSongAutomatically();
         });
     }

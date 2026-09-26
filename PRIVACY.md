@@ -20,7 +20,7 @@ BetterSuno takes privacy seriously. The extension requests a small set of permis
   Enables the extension to run service worker tasks (like downloading files and generating notifications) when no browser window is open. All processing happens locally.
 
 - `storage` –
-  Stores user preferences (such as notification settings) and a small cache of recent tracks to avoid unnecessary network requests. Stored data is solely for the user's convenience and is not shared.
+  Stores user preferences (such as notification settings) and local caches used to avoid unnecessary network requests. A short-lived Suno/Clerk bearer token is kept in browser-session-scoped extension storage so a Chrome service-worker restart does not discard it; it is not exposed to page scripts or content-script message handlers.
 
 - `notifications` –
   Necessary to display desktop notifications about new tracks, completed downloads, or other user-visible events. No notification content is sent outside the extension.
@@ -50,4 +50,4 @@ If you have any privacy concerns or questions about the permissions, please open
 
 ---
 
-*Last updated: July 14, 2026*
+*Last updated: September 23, 2026*

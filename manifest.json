@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BetterSuno",
-  "version": "2.4.5",
+  "version": "2.4.6",
   "description": "Enhanced Suno.com experience with notifications and song downloads",
   "browser_specific_settings": {
     "gecko": {
@@ -23,7 +23,8 @@
     "scripting",
     "tabs",
     "notifications",
-    "downloads"
+    "downloads",
+    "storage"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://suno.com https://*.suno.com https://*.suno.ai https://*.cloudfront.net https://studio-api.prod.suno.com ws://localhost:9423 ws://127.0.0.1:9423"

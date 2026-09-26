@@ -5,6 +5,7 @@
   // Track how many notifications we've seen so we know which are "new"
   let lastSeenCount = 0;
   let panelOpen = false;
+  let betterSunoPlaybackActive = false;
   let currentTab = 'library';
   const NOTIFICATION_RENDER_BATCH_SIZE = 25;
   let currentNotifications = [];
@@ -789,17 +790,20 @@
     }
   });
 
-  // Close panel on outside click
-  document.addEventListener('click', (e) => {
-    // Don't close if a song is currently playing - keep the mini-player visible
-    const audio = document.getElementById('bettersuno-audio-element');
-    const isPlaying = audio && !audio.paused;
-    
-    if (panelOpen && !root.contains(e.target) && !isPlaying) {
-      panelOpen = false;
-      panel.classList.remove('open');
+  // Playback can take an async detour through IndexedDB/background decryption.
+  // Track that pending state so the panel cannot disappear before audio.paused
+  // flips to false.
+  document.addEventListener('bettersuno:playback-state', (e) => {
+    const state = e.detail?.state;
+    betterSunoPlaybackActive = state === 'loading' || state === 'playing';
+    if (betterSunoPlaybackActive && panelOpen) {
+      panel.classList.add('open');
     }
   });
+
+  // The panel is a full-viewport overlay, so the bell and Escape are the only
+  // explicit close paths. Playback (including its async source resolution) must
+  // never dismiss or strand the panel/mini-player.
 
   // Close panel with Escape key
   document.addEventListener('keydown', (e) => {
@@ -1371,6 +1375,10 @@
     bell.style.setProperty('visibility', 'visible', 'important');
     bell.style.setProperty('opacity', '1', 'important');
     bell.style.setProperty('pointer-events', 'auto', 'important');
+
+    if (panelOpen) {
+      panel.classList.add('open');
+    }
   }
 
   // Run periodic visibility check as a fallback for cases the MutationObserver misses.

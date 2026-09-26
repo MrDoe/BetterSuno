@@ -40,11 +40,21 @@ let currentDownloadJobId = 0;
 let activeDownloadIds = new Set();
 let downloadRequestorTabId = null;
 const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
+const AUTH_TOKEN_STORAGE_PREFIX = 'bettersunoAuthToken:';
+const TOKEN_MAX_AGE_MS = 45 * 60 * 1000;
+const BACKGROUND_AUTH_STATE_KEYS = [
+  'token',
+  'tokenTimestamp',
+  'tokenRefreshPromise',
+  'clerkSessionToken',
+  'clerkSessionExpiry',
+  'lastAuthFailure'
+];
 const BULK_LIBRARY_PAGE_SIZE = 100; // /api/feed/v3 rejects limit > 100 (verified 2026-09)
 const PLAYLIST_CLIP_PAGE_SIZE = 50;
 
-// Gate: resolves once loadState() has completed, so alarm handlers
-// don't operate on empty in-memory state after a service-worker restart.
+// Gate: resolves once persisted background state has loaded, so message and
+// alarm handlers do not race service-worker startup.
 let stateReady;
 const stateReadyPromise = new Promise(r => { stateReady = r; });
 
@@ -64,6 +74,7 @@ const REFRESH_HOST_LEASE_MS = 70000;
 (async function init() {
   log("Initializing background...");
   await loadState();
+  await loadAuthTokenCache();
   stateReady();
 
   // Recover download state after potential service-worker restart
@@ -474,10 +485,137 @@ function ensureTabState(tabId) {
       desktopNotificationsEnabled: true,
       androidFirefoxKeepAliveEnabled: false,
       clerkSessionToken: null,
-      clerkSessionExpiry: null
+      clerkSessionExpiry: null,
+      lastAuthFailure: null
     };
   }
   return tabState[tabId];
+}
+
+function toAuthSafeState(state) {
+  const safeState = { ...(state || {}) };
+  for (const key of BACKGROUND_AUTH_STATE_KEYS) {
+    delete safeState[key];
+  }
+  return safeState;
+}
+
+function authTokenStorageKey(tabId) {
+  return `${AUTH_TOKEN_STORAGE_PREFIX}${tabId}`;
+}
+
+function hasFreshAuthToken(authState, now = Date.now()) {
+  return !!(
+    authState &&
+    typeof authState.token === 'string' &&
+    authState.token &&
+    Number.isFinite(authState.tokenTimestamp) &&
+    now - authState.tokenTimestamp < TOKEN_MAX_AGE_MS
+  );
+}
+
+async function persistAuthTokenForTab(tabId) {
+  const storageSession = chrome.storage?.session;
+  if (!storageSession) return;
+
+  const st = tabState[tabId];
+  const key = authTokenStorageKey(tabId);
+
+  try {
+    if (hasFreshAuthToken(st)) {
+      await storageSession.set({
+        [key]: {
+          token: st.token,
+          tokenTimestamp: st.tokenTimestamp
+        }
+      });
+    } else {
+      await storageSession.remove(key);
+    }
+  } catch (err) {
+    log(`persistAuthTokenForTab(${tabId}) failed:`, err.message);
+  }
+}
+
+async function removePersistedAuthTokenForTab(tabId) {
+  const storageSession = chrome.storage?.session;
+  if (!storageSession) return;
+
+  try {
+    await storageSession.remove(authTokenStorageKey(tabId));
+  } catch (err) {
+    log(`removePersistedAuthTokenForTab(${tabId}) failed:`, err.message);
+  }
+}
+
+async function loadAuthTokenCache() {
+  const storageSession = chrome.storage?.session;
+  if (!storageSession) {
+    log('chrome.storage.session unavailable; auth tokens will remain in memory only');
+    return;
+  }
+
+  try {
+    const stored = await storageSession.get(null);
+    const staleKeys = [];
+    let restoredCount = 0;
+
+    for (const [key, authState] of Object.entries(stored)) {
+      if (!key.startsWith(AUTH_TOKEN_STORAGE_PREFIX)) continue;
+
+      const tabId = key.slice(AUTH_TOKEN_STORAGE_PREFIX.length);
+      if (!tabId) {
+        staleKeys.push(key);
+        continue;
+      }
+
+      if (hasFreshAuthToken(authState)) {
+        const st = ensureTabState(tabId);
+        st.token = authState.token;
+        st.tokenTimestamp = authState.tokenTimestamp;
+        restoredCount += 1;
+      } else {
+        staleKeys.push(key);
+      }
+    }
+
+    if (staleKeys.length > 0) {
+      await storageSession.remove(staleKeys);
+    }
+    if (restoredCount > 0) {
+      log(`loadAuthTokenCache: restored ${restoredCount} session token(s)`);
+    }
+  } catch (err) {
+    log('loadAuthTokenCache failed:', err.message);
+  }
+}
+
+async function invalidateAuthTokenForTab(tabId) {
+  const st = ensureTabState(tabId);
+  st.token = null;
+  st.tokenTimestamp = null;
+  await removePersistedAuthTokenForTab(tabId);
+}
+
+async function invalidateAllAuthTokens() {
+  for (const tabId of Object.keys(tabState)) {
+    const st = tabState[tabId];
+    st.token = null;
+    st.tokenTimestamp = null;
+  }
+
+  const storageSession = chrome.storage?.session;
+  if (!storageSession) return;
+
+  try {
+    const stored = await storageSession.get(null);
+    const authKeys = Object.keys(stored).filter(key => key.startsWith(AUTH_TOKEN_STORAGE_PREFIX));
+    if (authKeys.length > 0) {
+      await storageSession.remove(authKeys);
+    }
+  } catch (err) {
+    log('invalidateAllAuthTokens failed:', err.message);
+  }
 }
 
 async function hasLiveBetterSunoContentScript(tabId) {
@@ -732,10 +870,19 @@ async function executeWithTimeout(sunoTab, func, timeoutMs = 2000) {
     executeOptions.world = 'MAIN';
   }
 
-  return Promise.race([
-    chrome.scripting.executeScript(executeOptions),
-    new Promise(resolve => setTimeout(() => resolve(null), timeoutMs))
-  ]);
+  let timeoutId;
+  const timeoutPromise = new Promise(resolve => {
+    timeoutId = setTimeout(() => resolve(null), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      chrome.scripting.executeScript(executeOptions),
+      timeoutPromise
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function updateTabWithTimeout(tabId, updateInfo, timeoutMs = 1500) {
@@ -743,6 +890,15 @@ async function updateTabWithTimeout(tabId, updateInfo, timeoutMs = 1500) {
     chrome.tabs.update(tabId, updateInfo),
     new Promise(resolve => setTimeout(() => resolve(null), timeoutMs))
   ]);
+}
+
+function isLikelySunoAppUrl(url) {
+  try {
+    const path = new URL(url).pathname;
+    return path !== '/' && path !== '/auth' && !path.startsWith('/auth/');
+  } catch {
+    return false;
+  }
 }
 
 async function findSunoTabsForTokenRefresh(preferredTabId) {
@@ -763,8 +919,8 @@ async function findSunoTabsForTokenRefresh(preferredTabId) {
       return rightPreferred - leftPreferred;
     }
 
-    const leftScore = (left.active ? 100 : 0) + (left.discarded ? -50 : 0) + (left.frozen ? -25 : 0);
-    const rightScore = (right.active ? 100 : 0) + (right.discarded ? -50 : 0) + (right.frozen ? -25 : 0);
+    const leftScore = (isLikelySunoAppUrl(left.url) ? 200 : 0) + (left.active ? 100 : 0) + (left.discarded ? -50 : 0) + (left.frozen ? -25 : 0);
+    const rightScore = (isLikelySunoAppUrl(right.url) ? 200 : 0) + (right.active ? 100 : 0) + (right.discarded ? -50 : 0) + (right.frozen ? -25 : 0);
     return rightScore - leftScore;
   });
 
@@ -777,23 +933,30 @@ async function findSunoTabsForTokenRefresh(preferredTabId) {
  * token REST endpoint directly.
  */
 async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
-  let tabCount = 0;
+  let lastFailure = { reason: 'unknown', error: '' };
+  let foundTab = false;
+  const refreshDeadline = Date.now() + 35000;
 
   try {
-    for (let run = 1; run <= 4; run += 1) {
+    for (let run = 1; run <= 2; run += 1) {
       const sunoTabs = await findSunoTabsForTokenRefresh(preferredTabId);
-      tabCount = 0;
+      if (sunoTabs.length === 0) {
+        lastFailure = { reason: 'no-tabs', error: '' };
+        break;
+      }
+      foundTab = true;
 
       for (const sunoTab of sunoTabs) {
-        tabCount += 1;
-        let token = null;
-        let results = null;
+        if (Date.now() >= refreshDeadline) {
+          lastFailure = { reason: 'refresh-timeout', error: '' };
+          break;
+        }
 
         try {
           if (!isFirefox && run > 1) {
             const currentStatus = tabStatus(sunoTab);
             if (currentStatus === 'frozen' || currentStatus === 'discarded' || currentStatus === 'unloaded') {
-              if (run > 3) {
+              if (run === 2) {
                 try {
                   await chrome.windows.update(sunoTab.windowId, { focused: true });
                 } catch (focusError) {
@@ -803,13 +966,13 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
 
               const updatedTab = await updateTabWithTimeout(sunoTab.id, { active: true });
               if (!updatedTab) {
-                log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, activating tab ${sunoTab.id} timed out`);
+                lastFailure = { reason: 'tab-activation-timeout', error: '' };
                 continue;
               }
 
               await sleep(200);
 
-              if (run > 2) {
+              if (run === 2) {
                 const refreshedTab = await chrome.tabs.get(sunoTab.id);
                 if (refreshedTab?.frozen || refreshedTab?.discarded || refreshedTab?.status === 'unloaded') {
                   await chrome.tabs.reload(sunoTab.id);
@@ -819,163 +982,238 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
             }
           }
 
-          results = await executeWithTimeout(
+          const remainingMs = refreshDeadline - Date.now();
+          const scriptTimeoutMs = Math.min(15000, Math.max(1000, remainingMs));
+          const results = await executeWithTimeout(
             sunoTab,
             async () => {
               const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
               const pageWindow = (typeof wrappedJSObject !== 'undefined') ? wrappedJSObject : window;
-              const maxRetries = 10;
-              const delayMs = 100;
+              const bootstrapDeadline = Date.now() + 8000;
+              let reason = pageWindow?.Clerk ? 'no-session' : 'no-clerk';
+              let lastError = '';
+              let retryDelayMs = 250;
 
-              for (let index = 0; index < maxRetries; index += 1) {
-                const getToken = pageWindow?.Clerk?.session?.getToken;
-                if (typeof getToken === 'function') {
-                  try {
-                    return await getToken.call(pageWindow.Clerk.session);
-                  } catch (error) {
-                    console.error('refreshTokenViaClerkAPI getToken error:', error);
-                    return null;
-                  }
+              const getTokenWithTimeout = async (session, getToken) => {
+                let timeoutId;
+                try {
+                  return await Promise.race([
+                    Promise.resolve().then(() => getToken.call(session)),
+                    new Promise(resolve => {
+                      timeoutId = setTimeout(() => resolve({ timedOut: true }), 5000);
+                    })
+                  ]);
+                } finally {
+                  clearTimeout(timeoutId);
+                }
+              };
+
+              while (Date.now() < bootstrapDeadline) {
+                const clerk = pageWindow?.Clerk;
+                const session = clerk?.session;
+                const getToken = session?.getToken;
+
+                if (typeof getToken !== 'function') {
+                  reason = clerk ? 'no-session' : 'no-clerk';
+                  await wait(retryDelayMs);
+                  retryDelayMs = Math.min(retryDelayMs * 2, 1000);
+                  continue;
                 }
 
-                await wait(delayMs);
+                try {
+                  const rawToken = await getTokenWithTimeout(session, getToken);
+                  if (rawToken?.timedOut) {
+                    // Never overlap a still-pending Clerk call with another one.
+                    return { ok: false, reason: 'get-token-timeout', error: '' };
+                  }
+
+                  const token = typeof rawToken === 'string'
+                    ? rawToken
+                    : typeof rawToken?.jwt === 'string'
+                      ? rawToken.jwt
+                      : typeof rawToken?.token === 'string'
+                        ? rawToken.token
+                        : '';
+
+                  if (token) {
+                    return { ok: true, token };
+                  }
+
+                  reason = 'null-token';
+                } catch (error) {
+                  reason = 'get-token-error';
+                  lastError = String(error?.message || error).slice(0, 200);
+                }
+
+                await wait(retryDelayMs);
+                retryDelayMs = Math.min(retryDelayMs * 2, 1000);
               }
 
-              return null;
+              return { ok: false, reason, error: lastError };
             },
-            2000
+            scriptTimeoutMs
+          );
+
+          const result = results?.[0]?.result;
+          if (result?.ok && typeof result.token === 'string' && result.token) {
+            if (result.token === sessionToken) {
+              log(`refreshTokenViaClerkAPI: Run:${run}, tab ${sunoTab.id} returned the existing Clerk token:`, tokenSlice(result.token));
+            } else {
+              log(`refreshTokenViaClerkAPI: Run:${run}, tab ${sunoTab.id} returned a refreshed Clerk token:`, tokenSlice(result.token));
+            }
+
+            return {
+              ok: true,
+              token: result.token,
+              expiresAt: Date.now() + TOKEN_MAX_AGE_MS,
+              sourceTabId: sunoTab.id
+            };
+          }
+
+          const deadlineNote = scriptTimeoutMs < 15000
+            ? `deadline-clamped to ${scriptTimeoutMs}ms`
+            : '';
+          lastFailure = {
+            reason: result?.reason || 'script-timeout',
+            error: result?.error || deadlineNote
+          };
+          log(
+            `refreshTokenViaClerkAPI: Run:${run}, tab ${sunoTab.id} failed`,
+            lastFailure.reason,
+            lastFailure.error,
+            `(status: ${tabStatus(sunoTab)})`
           );
         } catch (err) {
-          log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, error in tab ${sunoTab.id}:`, err.message);
-          results = null;
+          lastFailure = { reason: 'scripting-error', error: String(err?.message || err).slice(0, 200) };
+          log(`refreshTokenViaClerkAPI: Run:${run}, tab ${sunoTab.id} threw:`, lastFailure.error);
         }
+      }
 
-        if (!results && isFirefox) {
-          // Slow-loading Clerk on Firefox: retry with a longer budget through
-          // the MV3 scripting API (`tabs.executeScript` was removed in MV3).
-          try {
-            const longResults = await Promise.race([
-              chrome.scripting.executeScript({
-                target: { tabId: sunoTab.id },
-                func: async () => {
-                  const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-                  const w = (typeof wrappedJSObject !== 'undefined') ? wrappedJSObject : window;
-                  for (let i = 0; i < 25; i++) {
-                    const g = w?.Clerk?.session?.getToken;
-                    if (typeof g === 'function') {
-                      try {
-                        return await g.call(w.Clerk.session);
-                      } catch (e) {
-                        return null;
-                      }
-                    }
-                    await wait(100);
-                  }
-                  return null;
-                }
-              }),
-              new Promise(resolve => setTimeout(() => resolve(null), 3000))
-            ]);
-            const longToken = longResults?.[0]?.result || null;
-            if (longToken) {
-              log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, Token via scripting.executeScript fallback in tab ${sunoTab.id}`);
-              return { token: longToken, expiresAt: Date.now() + (50 * 60 * 1000), sourceTabId: sunoTab.id };
-            }
-          } catch (scriptingErr) {
-            log(`refreshTokenViaClerkAPI: scripting.executeScript fallback also failed:`, scriptingErr.message);
-          }
-        }
-
-        if (results) {
-          token = results[0]?.result || null;
-        }
-
-        if (token) {
-          if (token === sessionToken) {
-            log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, OLD Bearer Token via Clerk session in tab ${sunoTab.id}:`, tokenSlice(token));
-          } else {
-            log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, NEW Bearer Token via Clerk session in tab ${sunoTab.id}:`, tokenSlice(token));
-          }
-
-          return {
-            token,
-            expiresAt: Date.now() + (50 * 60 * 1000),
-            sourceTabId: sunoTab.id
-          };
-        }
-
-        log(`refreshTokenViaClerkAPI: Run:${run}, Tab:${tabCount}, Clerk session token refresh in tab ${sunoTab.id} failed (status: ${tabStatus(sunoTab)})`);
+      if (run < 2 && Date.now() < refreshDeadline) {
+        await sleep(500 * run);
       }
     }
   } catch (err) {
-    log('refreshTokenViaClerkAPI: unexpected error while scanning Suno tabs:', err.message);
+    lastFailure = { reason: 'unexpected-error', error: String(err?.message || err).slice(0, 200) };
+    log('refreshTokenViaClerkAPI: unexpected error while scanning Suno tabs:', lastFailure.error);
   }
 
-  if (!tabCount) {
-    log('refreshTokenViaClerkAPI: Refreshing Bearer Token failed, because no relevant Suno tabs were found');
+  if (!foundTab) {
+    log('refreshTokenViaClerkAPI: no relevant Suno tabs were found');
+  } else {
+    log('refreshTokenViaClerkAPI: exhausted Clerk token refresh attempts:', lastFailure.reason, lastFailure.error);
   }
 
-  return null;
+  return { ok: false, ...lastFailure };
 }
 
-const TOKEN_MAX_AGE_MS = 45 * 60 * 1000;
+let activeTokenRefreshPromise = null;
+
+async function cacheAuthTokenForTab(tabId, tokenData, sessionToken = null) {
+  const st = ensureTabState(tabId);
+  st.token = tokenData.token;
+  st.tokenTimestamp = Date.now();
+  st.clerkSessionToken = sessionToken;
+  st.clerkSessionExpiry = tokenData.expiresAt;
+  st.lastAuthFailure = null;
+  st.lastError = null;
+  await persistAuthTokenForTab(tabId);
+  return st.token;
+}
+
+async function startClerkTokenRefresh(preferredTabId) {
+  const sessionToken = await getClerkSessionFromCookies();
+  if (!sessionToken) {
+    log('No Clerk Session Cookie found - continuing with live Clerk session only');
+  }
+
+  const tokenData = await refreshTokenViaClerkAPI(sessionToken, preferredTabId);
+  if (tokenData?.ok && tokenData.token && mcpWs && mcpWs.readyState === WebSocket.OPEN) {
+    try {
+      mcpWs.send(JSON.stringify({ type: 'auth', token: tokenData.token }));
+    } catch (err) {
+      log('Could not push refreshed token to MCP bridge:', err.message);
+    }
+  }
+
+  return { tokenData, sessionToken };
+}
 
 /**
- * Main function: provide token with automatic refresh.
- * Requires a reachable Suno tab because Clerk now refreshes inside page context.
+ * Main token provider. The cache survives MV3 service-worker restarts in
+ * chrome.storage.session, while a single in-flight refresh is shared by all
+ * callers and all Suno tabs.
  */
 async function ensureValidTokenViaClerkSession(tabId) {
-  log("ensureValidTokenViaClerkSession called for tab", tabId);
+  log('ensureValidTokenViaClerkSession called for tab', tabId);
+  await stateReadyPromise;
 
   const st = ensureTabState(tabId);
   const now = Date.now();
 
-  // Check if we have a valid cached token
-  if (st.token && st.tokenTimestamp && (now - st.tokenTimestamp < TOKEN_MAX_AGE_MS)) {
-    log("Returning CACHED token (age:", Math.floor((now - st.tokenTimestamp) / 60000), "min)");
+  if (hasFreshAuthToken(st, now)) {
+    log('Returning CACHED token (age:', Math.floor((now - st.tokenTimestamp) / 60000), 'min)');
     return st.token;
   }
 
-  // Deduplicate: if a refresh is already in flight, wait for it
   if (st.tokenRefreshPromise) {
-    log("Token refresh already in progress, waiting...");
+    log('Token refresh already in progress for this tab, waiting...');
     return st.tokenRefreshPromise;
   }
 
-  log("Token expired or missing - fetching new token via Clerk session in Suno tab");
+  log('Token expired or missing - fetching new token via Clerk session in Suno tab');
 
-  st.tokenRefreshPromise = (async () => {
-    // Step 1: Get session token from cookie for session continuity/debugging
-    const sessionToken = await getClerkSessionFromCookies();
-    if (!sessionToken) {
-      log("No Clerk Session Cookie found - continuing with live Clerk session only");
+  const refreshPromise = (async () => {
+    let startedRefresh = false;
+    let tokenData;
+    let sessionToken = null;
+
+    if (activeTokenRefreshPromise) {
+      log('Reusing token refresh already in progress for another tab');
+      ({ tokenData, sessionToken } = await activeTokenRefreshPromise);
+    } else {
+      startedRefresh = true;
+      activeTokenRefreshPromise = startClerkTokenRefresh(tabId).catch((err) => ({
+        tokenData: {
+          ok: false,
+          reason: 'refresh-error',
+          error: String(err?.message || err).slice(0, 200)
+        },
+        sessionToken: null
+      }));
+      try {
+        ({ tokenData, sessionToken } = await activeTokenRefreshPromise);
+      } finally {
+        activeTokenRefreshPromise = null;
+      }
     }
 
-    // Step 2: Get new Bearer Token via Clerk session inside a Suno tab
-    const tokenData = await refreshTokenViaClerkAPI(sessionToken, tabId);
-    if (!tokenData) {
-      log("ERROR: Clerk session token refresh failed - at least one usable Suno tab is required");
-      st.tokenRefreshPromise = null;
+    if (!tokenData?.ok || !tokenData.token) {
+      st.lastAuthFailure = {
+        reason: tokenData?.reason || 'unknown',
+        error: tokenData?.error || '',
+        at: Date.now()
+      };
+      st.lastError = `Token refresh failed (${st.lastAuthFailure.reason})`;
+      log('ERROR: Clerk session token refresh failed:', st.lastAuthFailure.reason, st.lastAuthFailure.error);
       return null;
     }
 
-    // Step 3: Cache token
-    st.token = tokenData.token;
-    st.tokenTimestamp = Date.now();
-    st.clerkSessionToken = sessionToken;
-    st.clerkSessionExpiry = tokenData.expiresAt;
-
-    // Push fresh token to MCP bridge if connected
-    if (mcpWs && mcpWs.readyState === WebSocket.OPEN) {
-      mcpWs.send(JSON.stringify({ type: 'auth', token: tokenData.token }));
-    }
-
-    log("Token successfully refreshed and cached");
-    st.tokenRefreshPromise = null;
-    return tokenData.token;
+    const token = await cacheAuthTokenForTab(tabId, tokenData, sessionToken);
+    log(startedRefresh
+      ? 'Token successfully refreshed and cached'
+      : 'Shared token refresh cached for tab');
+    return token;
   })();
 
-  return st.tokenRefreshPromise;
+  st.tokenRefreshPromise = refreshPromise;
+  try {
+    return await refreshPromise;
+  } finally {
+    if (st.tokenRefreshPromise === refreshPromise) {
+      st.tokenRefreshPromise = null;
+    }
+  }
 }
 
 // ============================================================================
@@ -1060,82 +1298,6 @@ chrome.alarms.create('keepAlive', {
   delayInMinutes: 1,
   periodInMinutes: 5
 });
-
-// ============================================================================
-// FALLBACK: Token from MAIN World (only if live Clerk session refresh fails)
-// ============================================================================
-
-async function fetchTokenDirect(tabId) {
-  if (typeof tabId !== 'number' || isNaN(tabId)) return null;
-  try {
-    const executeOptions = {
-      target: { tabId },
-      func: async () => {
-        const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        const pageWindow = (typeof wrappedJSObject !== 'undefined') ? wrappedJSObject : window;
-
-        const getClerkToken = async () => {
-          const getToken = pageWindow?.Clerk?.session?.getToken;
-          if (typeof getToken !== 'function') {
-            return { ok: false, reason: "no-session" };
-          }
-
-          try {
-            const token = await getToken.call(pageWindow.Clerk.session);
-            if (!token) {
-              console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect ERROR: Clerk returned null token at", Date.now());
-              return { ok: false, reason: "null-token" };
-            }
-
-            console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect NEW TOKEN created:", token.slice(0, 12), "…", "at", Date.now());
-            return { ok: true, token };
-          } catch (err) {
-            console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect ERROR:", err.message, "at", Date.now());
-            return { ok: false, reason: err.message };
-          }
-        };
-
-        try {
-          for (let attempt = 0; attempt < 10; attempt += 1) {
-            if (typeof pageWindow?.Clerk?.session?.getToken === 'function') {
-              return await getClerkToken();
-            }
-
-            if (attempt === 0 && !pageWindow?.Clerk) {
-              console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect: waiting for Clerk bootstrap at", Date.now());
-            }
-
-            await wait(250);
-          }
-
-          if (!pageWindow?.Clerk) {
-            return { ok: false, reason: "no-clerk" };
-          }
-
-          return { ok: false, reason: "no-session" };
-        } catch(err) {
-          console.log("[BACKGROUND-ASYNC]", "fetchTokenDirect ERROR:", err.message, "at", Date.now());
-          return { ok: false, reason: err.message };
-        }
-      }
-    };
-
-    if (!isFirefox) {
-      executeOptions.world = "MAIN";
-    }
-
-    const results = await chrome.scripting.executeScript(executeOptions);
-    const result = results?.[0]?.result;
-    if (!result?.ok) {
-      log("fetchTokenDirect failed:", result?.reason);
-      return null;
-    }
-    return result.token;
-  } catch (err) {
-    log("fetchTokenDirect exception:", err.message);
-    return null;
-  }
-}
 
 async function fetchCurrentUserIdentityDirect(tabId) {
   if (typeof tabId !== 'number' || isNaN(tabId)) return null;
@@ -1271,47 +1433,19 @@ async function fetchCurrentUserIdentityDirect(tabId) {
 }
 
 /**
- * Main token function with fallback strategy
+ * Main token function. Clerk page-context acquisition is the only supported
+ * source; transient readiness is handled inside the shared refresh above.
  */
 async function ensureValidToken(tabId) {
-  log("ensureValidToken called for tab", tabId);
-
-  // STRATEGY 1: Refresh via live Clerk session in an available Suno tab
-  const cookieToken = await ensureValidTokenViaClerkSession(tabId);
-  if (cookieToken) {
-    log("✓ Token obtained via live Clerk session");
-    return cookieToken;
+  log('ensureValidToken called for tab', tabId);
+  const token = await ensureValidTokenViaClerkSession(tabId);
+  if (token) {
+    log('✓ Token obtained via live Clerk session');
+    return token;
   }
 
-  log("⚠ Live Clerk session refresh failed, trying MAIN world fallback...");
-
-  // STRATEGY 2: Fallback to MAIN world (legacy approach)
-  const st = ensureTabState(tabId);
-
-  // Check cache
-  if (st.token && st.tokenTimestamp && Date.now() - st.tokenTimestamp < TOKEN_MAX_AGE_MS) {
-    log("✓ Returning cached token from MAIN world method");
-    return st.token;
-  }
-
-  // Try getting token from MAIN world
-  for (let i = 0; i < 3; i++) {
-    log(`Attempt ${i + 1}/3: fetchTokenDirect for tab`, tabId);
-    const token = await fetchTokenDirect(tabId);
-    
-    if (token) {
-      log("✓ NEW TOKEN via MAIN world:", token.slice(0, 12), "…");
-      st.token = token;
-      st.tokenTimestamp = Date.now();
-      return token;
-    }
-    
-    log("✗ fetchTokenDirect returned null, attempt", i + 1);
-    await new Promise(r => setTimeout(r, 500));
-  }
-
-  log("❌ ERROR: Both token strategies failed!");
-  st.lastError = "Token refresh failed - both strategies exhausted";
+  const failure = ensureTabState(tabId).lastAuthFailure;
+  log('✗ Token refresh failed:', failure?.reason || 'unknown', failure?.error || '');
   return null;
 }
 
@@ -1434,9 +1568,7 @@ async function ffPollOnce(tabId) {
   const token = await ensureValidToken(tabId);
   if (!token) {
     log("ffPollOnce: no token for tab", tabId);
-    const tst = ensureTabState(tabId);
-    tst.token = null;
-    tst.tokenTimestamp = null;
+    void invalidateAuthTokenForTab(tabId);
     return;
   }
 
@@ -1475,9 +1607,7 @@ async function ffPollOnce(tabId) {
 
     if (res.status === 401 || res.status === 403) {
       log("ffPollOnce: 401/403 → token expired for tab", tabId);
-      const tst = ensureTabState(tabId);
-      tst.token = null;
-      tst.tokenTimestamp = null;
+      void invalidateAuthTokenForTab(tabId);
       return;
     }
     if (!res.ok) return;
@@ -1510,14 +1640,14 @@ async function ffPollOnce(tabId) {
 
   // Update main tab state and broadcast to UI
   const mainState = ensureTabState(tabId);
-  Object.assign(mainState, st);
+  Object.assign(mainState, toAuthSafeState(st));
   showDesktopNotifications(tabId, mainState);
   saveState();
 
   safeRuntimeSendMessage({
     type: "stateUpdate",
     tabId,
-    state: { ...mainState }
+    state: toAuthSafeState(mainState)
   });
 }
 
@@ -1590,19 +1720,15 @@ async function syncNotificationWorkerState() {
 
 async function getApiTokenWithFallback(logPrefix = 'api', options = {}) {
   const { forceRefresh = false } = options;
+  await stateReadyPromise;
 
   if (forceRefresh) {
     log(`${logPrefix}: force-refreshing token cache for all tabs`);
-    for (const tid of Object.keys(tabState)) {
-      const st = tabState[tid];
-      st.token = null;
-      st.tokenTimestamp = null;
-      st.tokenRefreshPromise = null;
-    }
+    await invalidateAllAuthTokens();
   }
 
   try {
-    const sunoTabs = await chrome.tabs.query({ url: "https://suno.com/*" });
+    const sunoTabs = await findSunoTabsForTokenRefresh(null);
     for (const sunoTab of sunoTabs) {
       if (typeof sunoTab.id !== 'number') {
         continue;
@@ -1674,12 +1800,7 @@ async function fetchFeedV3WithRetry(currentToken, body, { maxRetries = 5, initia
         if (!renewed) {
           renewed = true;
           log(`${logPrefix}: 401/403 received, renewing token`);
-          for (const tid of Object.keys(tabState)) {
-            const st = tabState[tid];
-            st.token = null;
-            st.tokenTimestamp = null;
-            st.tokenRefreshPromise = null;
-          }
+          await invalidateAllAuthTokens();
           const freshToken = await getApiTokenWithFallback(logPrefix + '/renew');
           if (freshToken && freshToken !== currentToken) {
             log(`${logPrefix}: using renewed token, retrying request`);
@@ -1782,12 +1903,7 @@ async function fetchLibraryPageWithRetry(currentToken, cursor, pageSize, signal,
         if (!renewed) {
           renewed = true;
           log(`${logPrefix}: 401/403 received on page ${page}, renewing token`);
-          for (const tid of Object.keys(tabState)) {
-            const st = tabState[tid];
-            st.token = null;
-            st.tokenTimestamp = null;
-            st.tokenRefreshPromise = null;
-          }
+          await invalidateAllAuthTokens();
           const freshToken = await getApiTokenWithFallback(logPrefix + '/renew');
           if (freshToken && freshToken !== currentToken) {
             log(`${logPrefix}: using renewed token, retrying page ${page}`);
@@ -1943,7 +2059,7 @@ async function fetchExistingNotifications() {
       safeRuntimeSendMessage({
         type: "stateUpdate",
         tabId: "global",
-        state: { ...st }
+        state: toAuthSafeState(st)
       });
     }
 
@@ -2006,7 +2122,7 @@ async function fetchOlderNotifications(beforeUtc) {
     safeRuntimeSendMessage({
       type: "stateUpdate",
       tabId: "global",
-      state: { ...st }
+      state: toAuthSafeState(st)
     });
 
     return { ok: true, count: incoming.length };
@@ -2023,13 +2139,32 @@ async function fetchOlderNotifications(beforeUtc) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // All msg.action handlers must come from a content script (i.e. have a tab).
   // State-modifying msg.type handlers also require a content-script sender.
-  // Offscreen messages use msg.type with an "offscreen" prefix and are read-only or internal.
   const STATE_MODIFYING_TYPES = new Set(['setConfig', 'clearNotifications', 'contentUpdateSettings']);
   if ((msg.action || (msg.type && STATE_MODIFYING_TYPES.has(msg.type))) && !sender.tab?.id) {
     log("Blocked message from untrusted sender:", msg.action || msg.type);
     sendResponse({ ok: false, error: 'Forbidden' });
     return true;
   }
+
+  // Offscreen messages are extension-internal. sender.tab?.id is the
+  // load-bearing discriminator: it is present for content-script senders and
+  // absent for the offscreen page. offscreenRequestToken would otherwise
+  // disclose a token, and offscreenStateUpdate could overwrite auth state.
+  // sender.id is only an additional cross-extension rejection.
+  const OFFSCREEN_ONLY_TYPES = new Set([
+    'offscreenRequestToken',
+    'offscreenStateUpdate',
+    'offscreenTokenExpired',
+    'offscreenNoToken'
+  ]);
+  if (msg.type && OFFSCREEN_ONLY_TYPES.has(msg.type)) {
+    if (sender.tab?.id || sender.id !== chrome.runtime.id) {
+      log("Blocked internal-only message from untrusted sender:", msg.type);
+      sendResponse({ ok: false, error: 'Forbidden' });
+      return true;
+    }
+  }
+
   if (msg.type === "offscreenRequestToken") {
     log("[NVO] offscreenRequestToken received for tab", msg.tabId);
     ensureValidToken(msg.tabId).then(token => {
@@ -2044,9 +2179,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "offscreenStateUpdate") {
-    // Merge the incoming tab-specific state into memory
+    // Notification polling may update its tab state, but auth fields remain
+    // exclusively background-owned and must never be accepted from a sender.
     const st = ensureTabState(msg.tabId);
-    Object.assign(st, msg.state);
+    Object.assign(st, toAuthSafeState(msg.state));
 
     // desktop notifications use the per‑tab state
     showDesktopNotifications(msg.tabId, st);
@@ -2060,7 +2196,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     safeRuntimeSendMessage({
       type: "stateUpdate",
       tabId: msg.tabId,
-      state: { ...st }
+      state: toAuthSafeState(st)
     });
 
     // also update global state to keep content.js happy
@@ -2075,7 +2211,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     safeRuntimeSendMessage({
       type: "stateUpdate",
       tabId: "global",
-      state: { ...globalSt }
+      state: toAuthSafeState(globalSt)
     });
 
     sendResponse({ ok: true });
@@ -2085,12 +2221,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "offscreenTokenExpired" || msg.type === "offscreenNoToken") {
     log("[NVO] Token expired/missing for Tab", msg.tabId, "- triggering refresh");
     
-    // No tab reload needed!
-    // Token will be auto-refreshed on next ensureValidToken() call
-    const st = ensureTabState(msg.tabId);
-    st.token = null;  // Invalidate token
-    st.tokenTimestamp = null;
-    
+    // No tab reload needed! Token will be refreshed on the next API call.
+    void invalidateAuthTokenForTab(msg.tabId);
     sendResponse({ ok: true });
     return true;
   }
@@ -2207,7 +2339,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "uiInit") {
     const st = ensureTabState(msg.tabId);
-    sendResponse({ state: { ...st } });
+    sendResponse({ state: toAuthSafeState(st) });
     return true;
   }
 
@@ -2256,7 +2388,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       log('setConfig: could not synchronize notification worker:', err.message);
     });
 
-    sendResponse({ state: { ...st } });
+    sendResponse({ state: toAuthSafeState(st) });
     return true;
   }
 
@@ -2269,7 +2401,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       log('clearNotifications: could not synchronize notification worker:', err.message);
     });
 
-    sendResponse({ state: { ...st } });
+    sendResponse({ state: toAuthSafeState(st) });
     return true;
   }
 
@@ -2307,7 +2439,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       sendResponse({
         ok: true,
-        state: { ...st },
+        state: toAuthSafeState(st),
         androidKeepAlive: androidKeepAlive
           ? {
               ...androidKeepAlive,
@@ -2316,7 +2448,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           : null
       });
     }).catch(err => {
-      sendResponse({ ok: false, error: err.message, state: { ...st } });
+      sendResponse({ ok: false, error: err.message, state: toAuthSafeState(st) });
     });
     return true;
   }
@@ -3702,6 +3834,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
       safeRuntimeSendMessage({ type: "offscreenClearTab", tabId });
     }
     delete tabState[tabId];
+    void removePersistedAuthTokenForTab(tabId);
   }
 });
 
@@ -4673,6 +4806,10 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
       chrome.tabs.sendMessage(fetchRequestorTabId, message).catch(() => {});
     }
   };
+  const failFetch = (error) => {
+    isFetching = false;
+    notifyTab({ action: 'fetch_error', error });
+  };
   try {
     let tab = null;
     if (fetchRequestorTabId) {
@@ -4682,7 +4819,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
       tab = await getSunoTab();
     }
     if (!tab?.id || !tab.url || !tab.url.includes("suno.com")) {
-      notifyTab({ action: "fetch_error", error: "❌ Error: Please open Suno.com in the active tab." });
+      failFetch('❌ Error: Please open a logged-in Suno.com tab, then retry.');
       return;
     }
     const tabId = tab.id;
@@ -4694,7 +4831,11 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
     const token = await ensureValidToken(tabId);
 
     if (!token) {
-      notifyTab({ action: "fetch_error", error: "❌ Error: Could not find Auth Token. Log in first!" });
+      const failure = ensureTabState(tabId).lastAuthFailure;
+      const error = failure?.reason === 'no-tabs'
+        ? '❌ Error: Open a logged-in Suno.com tab, then retry.'
+        : '❌ Error: Suno’s login session is not ready. Wait a few seconds and retry; if this persists, reload Suno and log in again.';
+      failFetch(error);
       return;
     }
 
@@ -4799,7 +4940,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
 
   } catch (err) {
     log(err);
-    notifyTab({ action: "fetch_error", error: "❌ System Error: " + err.message });
+    failFetch('❌ System Error: ' + err.message);
   }
 }
 
@@ -6324,10 +6465,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   const st = notificationWorkerState();
 
   if (alarm.name === 'tokenRefresh') {
-    log("⏰ ALARM: Token Refresh triggered");
+    log('⏰ ALARM: Token Refresh triggered');
     if (st.enabled) {
-      log("⏰ Refreshing token for active collector", COLLECTOR_STATE_KEY);
-      await ensureValidTokenViaClerkSession(COLLECTOR_STATE_KEY);
+      await getApiTokenWithFallback('token-refresh-alarm');
     }
   }
 
