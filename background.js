@@ -45,6 +45,7 @@ const TOKEN_MAX_AGE_MS = 45 * 60 * 1000;
 const BACKGROUND_AUTH_STATE_KEYS = [
   'token',
   'tokenTimestamp',
+  'tokenExpiresAt',
   'tokenRefreshPromise',
   'clerkSessionToken',
   'clerkSessionExpiry',
@@ -484,6 +485,7 @@ function ensureTabState(tabId) {
       lastError: null,
       desktopNotificationsEnabled: true,
       androidFirefoxKeepAliveEnabled: false,
+      tokenExpiresAt: null,
       clerkSessionToken: null,
       clerkSessionExpiry: null,
       lastAuthFailure: null
@@ -510,7 +512,10 @@ function hasFreshAuthToken(authState, now = Date.now()) {
     typeof authState.token === 'string' &&
     authState.token &&
     Number.isFinite(authState.tokenTimestamp) &&
-    now - authState.tokenTimestamp < TOKEN_MAX_AGE_MS
+    now - authState.tokenTimestamp < TOKEN_MAX_AGE_MS &&
+    // A JWT with a readable `exp` must not outlive it, even inside the 45-minute
+    // cache window. Entries without a known expiry keep the TTL behaviour.
+    (!Number.isFinite(authState.tokenExpiresAt) || now < authState.tokenExpiresAt)
   );
 }
 
@@ -526,7 +531,8 @@ async function persistAuthTokenForTab(tabId) {
       await storageSession.set({
         [key]: {
           token: st.token,
-          tokenTimestamp: st.tokenTimestamp
+          tokenTimestamp: st.tokenTimestamp,
+          tokenExpiresAt: st.tokenExpiresAt ?? null
         }
       });
     } else {
@@ -573,6 +579,7 @@ async function loadAuthTokenCache() {
         const st = ensureTabState(tabId);
         st.token = authState.token;
         st.tokenTimestamp = authState.tokenTimestamp;
+        st.tokenExpiresAt = Number.isFinite(authState.tokenExpiresAt) ? authState.tokenExpiresAt : null;
         restoredCount += 1;
       } else {
         staleKeys.push(key);
@@ -594,6 +601,7 @@ async function invalidateAuthTokenForTab(tabId) {
   const st = ensureTabState(tabId);
   st.token = null;
   st.tokenTimestamp = null;
+  st.tokenExpiresAt = null;
   await removePersistedAuthTokenForTab(tabId);
 }
 
@@ -602,6 +610,7 @@ async function invalidateAllAuthTokens() {
     const st = tabState[tabId];
     st.token = null;
     st.tokenTimestamp = null;
+    st.tokenExpiresAt = null;
   }
 
   const storageSession = chrome.storage?.session;
@@ -823,6 +832,105 @@ async function getClerkSessionFromCookies() {
   return null;
 }
 
+/**
+ * Lightweight authenticated endpoint used only to prove that a candidate token
+ * is still accepted before it enters the cache. Chosen because it is cheap,
+ * paginated, and returns 401 for a bad token (verified 2026-09-27).
+ */
+const TOKEN_VALIDATION_URL = 'https://studio-api.prod.suno.com/api/notification/v2?page=1';
+
+/**
+ * Proves a candidate bearer token is still accepted by Suno before it is cached.
+ * Resolves to `{ ok: true }` or `{ ok: false, reason, error }`.
+ */
+async function validateBearerToken(token) {
+  let response;
+  try {
+    response = await fetch(TOKEN_VALIDATION_URL, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Authorization: `Bearer ${token}` }
+    });
+  } catch (err) {
+    return { ok: false, reason: 'probe-failed', error: String(err?.message || err).slice(0, 200) };
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    return { ok: false, reason: 'rejected', error: `HTTP ${response.status}` };
+  }
+
+  if (!response.ok) {
+    return { ok: false, reason: 'probe-failed', error: `HTTP ${response.status}` };
+  }
+
+  return { ok: true, reason: 'ok', error: '' };
+}
+
+/** Cheap structural gate so obvious non-JWTs never cost a network round-trip. */
+function looksLikeJwt(token) {
+  return typeof token === 'string' && token.length >= 100 && token.split('.').length === 3;
+}
+
+/**
+ * Reads the `exp` claim from a JWT payload without verifying the signature.
+ *
+ * Only used to decide when to stop *reusing* a token we already hold, never to
+ * decide whether a token is genuine — that is `validateBearerToken`'s job.
+ * Returns epoch milliseconds, or null when the payload cannot be read.
+ */
+function getJwtExpiryMs(token) {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
+    const claims = JSON.parse(atob(padded));
+    const exp = Number(claims?.exp);
+    if (!Number.isFinite(exp) || exp <= 0) return null;
+    return exp * 1000;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolves a bearer token from the Clerk `__session` cookie.
+ *
+ * Suno no longer exposes a Clerk browser SDK on the page: as of 2026-09-27
+ * `window.Clerk` is absent on every route (verified on /create, /discover and
+ * /explore with a signed-in session — no `clerk` script, no `clerk` global, no
+ * Clerk DOM node). The `__session` cookie is still a 3-segment JWT and is not
+ * httpOnly, and it is accepted as `Authorization: Bearer` by the studio API
+ * (verified 200 on /api/feed/v3, /api/persona/get-personas/ and
+ * /api/notification/v2, with a bogus token returning 401 on the same call).
+ *
+ * The token is validated against the server before being accepted, so an expired
+ * or stale cookie yields a precise diagnostic instead of a silent 401 loop.
+ */
+async function fetchTokenFromSessionCookie() {
+  const cookieToken = await getClerkSessionFromCookies();
+  if (!cookieToken) {
+    return { ok: false, reason: 'no-session-cookie', error: '' };
+  }
+
+  if (!looksLikeJwt(cookieToken)) {
+    return { ok: false, reason: 'session-cookie-not-jwt', error: `len=${cookieToken.length}` };
+  }
+
+  const verdict = await validateBearerToken(cookieToken);
+  if (!verdict.ok) {
+    return { ok: false, reason: `session-cookie-${verdict.reason}`, error: verdict.error };
+  }
+
+  log('Acquired bearer token from validated __session cookie:', tokenSlice(cookieToken));
+  return {
+    ok: true,
+    token: cookieToken,
+    expiresAt: Date.now() + TOKEN_MAX_AGE_MS,
+    source: 'session-cookie'
+  };
+}
+
 function tokenSlice(token, len = 12) {
   if (typeof token !== 'string' || !token) {
     return '';
@@ -1008,6 +1116,25 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
                 }
               };
 
+              // Suno no longer ships a Clerk browser SDK, so `window.Clerk` is
+              // absent on current builds (verified 2026-09-27 on /create,
+              // /discover and /explore with a signed-in session). The __session
+              // cookie is not httpOnly, so it is readable from page context as a
+              // fallback source. The background validates anything returned here
+              // against the server before it is cached.
+              const readSessionCookie = () => {
+                try {
+                  for (const part of pageWindow.document.cookie.split(';')) {
+                    const entry = part.trim();
+                    const eq = entry.indexOf('=');
+                    if (eq === -1 || entry.slice(0, eq) !== '__session') continue;
+                    const value = decodeURIComponent(entry.slice(eq + 1));
+                    if (value && value.split('.').length === 3) return value;
+                  }
+                } catch (e) { /* cookie access unavailable */ }
+                return null;
+              };
+
               while (Date.now() < bootstrapDeadline) {
                 const clerk = pageWindow?.Clerk;
                 const session = clerk?.session;
@@ -1015,6 +1142,10 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
 
                 if (typeof getToken !== 'function') {
                   reason = clerk ? 'no-session' : 'no-clerk';
+                  const pageCookieToken = readSessionCookie();
+                  if (pageCookieToken) {
+                    return { ok: true, token: pageCookieToken, source: 'page-cookie' };
+                  }
                   await wait(retryDelayMs);
                   retryDelayMs = Math.min(retryDelayMs * 2, 1000);
                   continue;
@@ -1056,16 +1187,20 @@ async function refreshTokenViaClerkAPI(sessionToken, preferredTabId) {
 
           const result = results?.[0]?.result;
           if (result?.ok && typeof result.token === 'string' && result.token) {
-            if (result.token === sessionToken) {
-              log(`refreshTokenViaClerkAPI: Run:${run}, tab ${sunoTab.id} returned the existing Clerk token:`, tokenSlice(result.token));
+            // `source` must be carried through: the caller validates anything that
+            // did not come from the live Clerk SDK before caching it.
+            const tokenSource = result.source === 'page-cookie' ? 'page-cookie' : 'clerk';
+            if (tokenSource === 'clerk') {
+              log(`refreshTokenViaClerkAPI: Run:${run}, tab ${sunoTab.id} returned a Clerk token:`, tokenSlice(result.token));
             } else {
-              log(`refreshTokenViaClerkAPI: Run:${run}, tab ${sunoTab.id} returned a refreshed Clerk token:`, tokenSlice(result.token));
+              log(`refreshTokenViaClerkAPI: Run:${run}, tab ${sunoTab.id} returned a page-context __session cookie (unvalidated):`, tokenSlice(result.token));
             }
 
             return {
               ok: true,
               token: result.token,
               expiresAt: Date.now() + TOKEN_MAX_AGE_MS,
+              source: tokenSource,
               sourceTabId: sunoTab.id
             };
           }
@@ -1111,13 +1246,27 @@ let activeTokenRefreshPromise = null;
 
 async function cacheAuthTokenForTab(tabId, tokenData, sessionToken = null) {
   const st = ensureTabState(tabId);
+  const now = Date.now();
+  const jwtExpiry = getJwtExpiryMs(tokenData.token);
+  // Never keep a token past its own `exp`, and never past the refresh cadence.
+  const effectiveExpiry = Math.min(
+    jwtExpiry ?? Number.POSITIVE_INFINITY,
+    tokenData.expiresAt ?? (now + TOKEN_MAX_AGE_MS)
+  );
+
   st.token = tokenData.token;
-  st.tokenTimestamp = Date.now();
+  st.tokenTimestamp = now;
+  st.tokenExpiresAt = Number.isFinite(effectiveExpiry) ? effectiveExpiry : null;
   st.clerkSessionToken = sessionToken;
   st.clerkSessionExpiry = tokenData.expiresAt;
   st.lastAuthFailure = null;
   st.lastError = null;
   await persistAuthTokenForTab(tabId);
+
+  if (jwtExpiry && jwtExpiry - now < TOKEN_MAX_AGE_MS) {
+    log(`Token expires in ${Math.max(0, Math.round((jwtExpiry - now) / 1000))}s (JWT exp is sooner than the cache TTL)`);
+  }
+
   return st.token;
 }
 
@@ -1189,14 +1338,61 @@ async function ensureValidTokenViaClerkSession(tabId) {
     }
 
     if (!tokenData?.ok || !tokenData.token) {
+      // Suno no longer ships a Clerk browser SDK, so the page-context path above
+      // is expected to fail with `no-clerk` on current builds. Fall back to the
+      // validated __session cookie, which is still accepted as a bearer token.
+      log('Clerk page-context token unavailable:', tokenData?.reason || 'unknown', tokenData?.error || '');
+      const cookieData = await fetchTokenFromSessionCookie();
+      if (cookieData.ok) {
+        const cookieCached = await cacheAuthTokenForTab(tabId, cookieData, sessionToken);
+        log('✓ Token obtained from validated __session cookie');
+        return cookieCached;
+      }
+
       st.lastAuthFailure = {
         reason: tokenData?.reason || 'unknown',
         error: tokenData?.error || '',
+        cookieReason: cookieData.reason,
+        cookieError: cookieData.error || '',
         at: Date.now()
       };
-      st.lastError = `Token refresh failed (${st.lastAuthFailure.reason})`;
-      log('ERROR: Clerk session token refresh failed:', st.lastAuthFailure.reason, st.lastAuthFailure.error);
+      st.lastError = `Token refresh failed (${st.lastAuthFailure.reason}; cookie: ${cookieData.reason})`;
+      log('ERROR: token refresh failed:', st.lastAuthFailure.reason, st.lastAuthFailure.error, '| cookie:', cookieData.reason, cookieData.error || '');
       return null;
+    }
+
+    // A token that came from page context was read out of document.cookie, so it
+    // is untrusted input until the server agrees. Clerk-derived tokens come from
+    // the live SDK and keep their existing trust.
+    if (tokenData.source === 'page-cookie') {
+      if (!looksLikeJwt(tokenData.token)) {
+        st.lastAuthFailure = { reason: 'page-cookie-not-jwt', error: '', at: Date.now() };
+        log('ERROR: page-context cookie was not a JWT; discarding');
+        return null;
+      }
+      const verdict = await validateBearerToken(tokenData.token);
+      if (!verdict.ok) {
+        log('ERROR: page-context cookie rejected by server:', verdict.reason, verdict.error);
+        // A partitioned page cookie (__session_<suffix>) can be visible to
+        // document.cookie yet rejected by the API, while the primary cookie is
+        // still good. Try the cookie API before giving up.
+        const cookieData = await fetchTokenFromSessionCookie();
+        if (cookieData.ok) {
+          const cookieCached = await cacheAuthTokenForTab(tabId, cookieData, sessionToken);
+          log('✓ Token obtained from validated __session cookie after page-cookie rejection');
+          return cookieCached;
+        }
+        st.lastAuthFailure = {
+          reason: `page-cookie-${verdict.reason}`,
+          error: verdict.error,
+          cookieReason: cookieData.reason,
+          cookieError: cookieData.error || '',
+          at: Date.now()
+        };
+        st.lastError = `Token refresh failed (page-cookie-${verdict.reason}; cookie: ${cookieData.reason})`;
+        return null;
+      }
+      log('Page-context __session cookie validated against server:', tokenSlice(tokenData.token));
     }
 
     const token = await cacheAuthTokenForTab(tabId, tokenData, sessionToken);

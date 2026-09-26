@@ -12,7 +12,7 @@ browser-token: {"token":"eyJ0aW1lc3RhbXAiOjE3ODM3MTk4OTUxODN9"}
 device-id: <uuid>
 ```
 
-Token is obtained from `window.Clerk.session.getToken()` in the Suno page context. The `__session` cookie is read only for session diagnostics; it is not assumed to be a valid API bearer token.
+Token acquisition prefers `window.Clerk.session.getToken()` in the Suno page context when the live Clerk client is present. Because the Clerk global is not always exposed, the extension also validates Suno’s JS-readable `__session` cookie as a bearer-token fallback. A stale or invalid cookie is rejected with a clear diagnostic rather than being sent to library/notification requests.
 
 ---
 

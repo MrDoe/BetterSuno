@@ -22,7 +22,18 @@ DB `BetterSunoicationsDB` v3: `tabStates`, `songsList`, `userPreferences`, `audi
 SW vs persistent bg; offscreen polling vs inline `ffPollOnce`; `world:"MAIN"` (Clerk token) vs `wrappedJSObject`; `build.js` strips `offscreen` perm and adds `browser_specific_settings.gecko` for FF.
 
 ## Auth & token
-`background.js` gets a Bearer token via `window.Clerk.session.getToken()` in a live `suno.com` tab (needs ≥1 open tab). Cached 45 min, refreshed by alarm, pushed to MCP over WS on connect/refresh.
+`background.js` needs a Bearer token; **a live `suno.com` tab is still required** (it is the only context that can read the cookie). Cached 45 min, refreshed by alarm, pushed to MCP over WS on connect/refresh.
+
+**`window.Clerk` no longer exists (verified 2026-09-27, Chrome 153).** On a signed-in session, `window.Clerk` is `undefined` on `/create`, `/discover` and `/explore` alike: zero `clerk` globals, zero of 127 `<script>` tags referencing Clerk, no Clerk DOM node. The old `window.Clerk.session.getToken()` path therefore always returned `no-clerk` — that was the real cause of "not acquiring a valid token", not retry tuning. Do not "fix" this by re-adding Clerk SDK waits.
+
+Token sources, in order:
+1. **Clerk page context** — `window.Clerk.session.getToken()` (kept as primary in case Suno re-exposes it; currently always absent).
+2. **Page-context `__session` cookie** — read from `document.cookie` in the MAIN-world injection. The cookie is **not httpOnly** and is a 3-segment JWT (~1681 chars).
+3. **Cookie API `__session`** — via `chrome.cookies`, same JWT.
+
+Sources 2 and 3 are **server-validated** against `GET /api/notification/v2?page=1` before being cached (`validateBearerToken`), so a stale cookie yields a precise reason instead of a 401 loop. A bogus token returns 401 on that endpoint, so the probe genuinely discriminates. Never cache an unvalidated cookie token.
+
+**Do not hardcode the token shape.** The bare-string contract is bundle-derived only — it was never confirmed against an authenticated `getToken()` call, because there is no longer a Clerk global to call.
 
 ## Generation (`POST /api/generate/v2-web/`)
 - Pre-call `POST /api/c/check` `{ctype:"generation"}`. The response's `captcha_version` is **1 = hCaptcha, 2 = Turnstile**; `required:true` means a token is needed. MCP asks the extension to solve it and forwards `captcha_version` in the `captcha_required` WS message. The extension only solves Turnstile — it fails fast with a clear error for hCaptcha (Suno's own fallback when Turnstile times out). `handleMcpCaptchaRequest` prefers a `/create` tab and tries, in order: (1) reuse a fresh token from an existing Turnstile widget (and `reset`s it afterwards so the next call gets a new one), (2) `turnstile.execute()` on an existing widget, (3) render its own widget with a visible "tick the checkbox" hint (110s wait). Failures throw a descriptive error that the MCP relays to the tool caller — the user must tick "Verify you are human" manually. Automated/remote-debugged browsers can't pass (`navigator.webdriver`).
@@ -67,3 +78,82 @@ Use OpenCodeRAG before reading/editing: `search_semantic` (search), `get_file_sk
 # Kill any existing Firefox first, then start with remote debugging + same profile
 /usr/lib/firefox/firefox --new-instance --profile ~/.mozilla/firefox/<profile> --remote-debugging-port 9222
 # The MCP will then find the browser via `--connect-existing`. You cannot use curl to the CDP port.
+
+<!-- BEGIN opencode-rag -->
+## Code Navigation
+
+ALWAYS use OpenCodeRAG tools before reading or editing:
+- **Search first** — `search_semantic(query)` instead of grep/glob
+- **Skeleton before read** — `get_file_skeleton(filePath)` then read specific lines
+- **Usages before edit** — `find_usages(symbolName)` before modifying any symbol
+- **Images via describe** — `describe_image(filePath, systemPrompt?)` — never read raw bytes
+- **Recall quirks** — `recall_quirks(query)` when you hit a known pitfall
+- **Add quirks** — `add_quirk(content)` when you discover a non-obvious fact
+- **Fix quirks** — `update_quirk(id, ...)` / `delete_quirk(id)` when a stored quirk is outdated or wrong
+
+If no results, run `opencode-rag index`.
+
+### Decision tree — ALWAYS follow this order
+1. User mentions code behavior/architecture → `search_semantic(query)`
+2. User mentions a file path → `get_file_skeleton(filePath)` THEN `read` on specific lines
+3. User mentions a function/class/variable to edit → `find_usages(symbolName)` THEN `search_semantic` THEN `edit`
+4. User asks a code question → `search_semantic` to gather context before answering
+5. User asks about an image or visual asset → `describe_image(filePath)` (optionally pass `systemPrompt` to focus on specific features) to retrieve its generated description, then optionally `search_semantic` for related code
+6. You encounter an error or need to recall a known pitfall → `recall_quirks(query)`
+7. You discover a non-obvious fact or workaround → `add_quirk(content)` to persist it for future sessions
+8. A recalled quirk is outdated or wrong → `update_quirk(id, ...)` to fix it, or `delete_quirk(id)` if it no longer applies
+
+### Proactive triggers — you MUST call these tools when
+- User asks about code behavior, architecture, or implementation details
+- User asks to edit, refactor, or fix code — call `find_usages` first
+- User references files or functions you haven't read yet
+- User says "find", "search", "look up", "where is", "how does"
+- User refers to an image, screenshot, diagram, or visual asset
+- Before answering ANY code-related question, retrieve context first
+- Before reading ANY file, call `get_file_skeleton` to orient first
+
+### Anti-patterns — NEVER do these
+- Reading full files without calling `get_file_skeleton` first (wastes tokens)
+- Editing a function without calling `find_usages` first (breaks call sites)
+- Answering code questions without calling `search_semantic` first (you guess at behavior)
+- Using `grep`/`glob` when `search_semantic` would find the answer faster
+- Treating image files as text — use `describe_image` instead of reading raw bytes
+- Using `npx opencode-rag quirk` shell commands instead of the built-in quirk tools (`add_quirk` / `recall_quirks` / `update_quirk` / `delete_quirk`) (the tools are faster, already loaded in-process, and go through the trust monitor)
+
+### MANDATORY quirk capture rules — you MUST call `add_quirk` when
+- A build, test, or type-check command fails and you resolve it
+- You discover an undocumented library constraint, peer dep, or workaround
+- You learn an environment-specific requirement (OS, tool version, etc.)
+- You make a design decision that future sessions should remember
+- You resolve a gotcha that cost more than one attempt
+
+### MANDATORY quirk hygiene — you MUST call `update_quirk` or `delete_quirk` when
+- A stored quirk is outdated, wrong, or has been fixed — update it or delete it instead of adding a contradicting duplicate
+- NEVER finish a coding session without adding quirks for resolved errors.
+<!-- END opencode-rag -->
+
+<!-- opencode-crosstalk:begin -->
+## OpenCode Crosstalk
+
+Other OpenCode sessions in this workspace are reachable through the
+`opencode-crosstalk` plugin: `crosstalk_status`, `crosstalk_peers`,
+`crosstalk_send`, `crosstalk_inbox`, `crosstalk_claim`, `crosstalk_wait`.
+Talk to each other, but keep working — only stop for coordination that prevents
+a real collision.
+
+- **Declare once, then keep moving.** `crosstalk_status` sets your role and goal;
+  `crosstalk_peers` shows active sessions and their leases. Work that does not
+  overlap theirs needs no coordination.
+- **Talk before you collide.** If you need something a peer holds, `crosstalk_send`
+  a short ask and continue elsewhere; replies are injected into live turns (use
+  `crosstalk_inbox` to catch up). Never force a claim.
+- **Lease what you are editing now.** `crosstalk_claim` takes an exclusive expiring
+  lease on exact paths — no globs (`resources`, `note`, `ttlSeconds`). `renew` if the
+  work runs long, `release` when done; a refusal names the holder.
+- **Identity is automatic** — never pass a "who am I". Blocking calls are capped by
+  `maxWaitMs` and may return early; that is normal.
+
+Installed globally (`npm run setup` in `/home/christoph/code/opencode-crosstalk`);
+`opencode api get /api/plugin` shows `opencode.crosstalk` active. Disable per
+workspace with `"plugins": ["-opencode.crosstalk"]`; no permission rule is required.
+<!-- opencode-crosstalk:end -->

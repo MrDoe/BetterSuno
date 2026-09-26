@@ -11,6 +11,12 @@
     let currentPlayingSongId = null;
     let cachedSongIds = new Set();
     let currentBlobUrl = null;
+    // The audio element is shared across songs, so the previous song's {once:true}
+    // error listener has to be detached explicitly — it only self-removes if an
+    // error actually fires, which a healthy playback never does.
+    let activeAudioErrorHandler = null;
+    // Same story for the MCP start_time seek, which waits on a 'playing' event.
+    let activeMcpSeekHandler = null;
     let stopCachingRequested = false;
     const SONG_RENDER_BATCH_SIZE = 40;
     let sortedFilteredSongs = [];
@@ -2001,8 +2007,17 @@
 
             setPlaybackState('loading');
 
-            // Use cached audio if available, otherwise stream online (respect requested format if available)
-            const cachedBlob = await getAudioBlobFromIDB(song.id);
+            // Use cached audio if available, otherwise stream online (respect requested format if
+            // available). A cache read must never be fatal: by this point the song is already
+            // marked as playing and audioElement.src has been cleared, so rejecting here would
+            // leave the UI showing a playing song with no audio and no mini-player, and most
+            // togglePlay callers do not catch. Treat a failed read as "nothing cached".
+            let cachedBlob = null;
+            try {
+                cachedBlob = await getAudioBlobFromIDB(song.id);
+            } catch (e) {
+                console.warn('[Downloader] Cached audio read failed, falling back to stream:', e?.message || e);
+            }
             if (cachedBlob) {
                 currentBlobUrl = URL.createObjectURL(cachedBlob);
                 audioElement.src = currentBlobUrl;
@@ -2054,6 +2069,10 @@
                     setPlaybackState('paused');
                 }
             };
+            if (activeAudioErrorHandler) {
+                audioElement.removeEventListener('error', activeAudioErrorHandler);
+            }
+            activeAudioErrorHandler = onErrorHandler;
             audioElement.addEventListener('error', onErrorHandler, { once: true });
 
             audioElement.load();
@@ -4649,13 +4668,24 @@
 
         if (message.action === "mcp_play_song") {
             if (message.song) {
-                togglePlay(message.song);
+                togglePlay(message.song).catch((e) => {
+                    setPlaybackState('paused');
+                    console.error('[Downloader] mcp_play_song failed:', e?.message || e);
+                });
                 const startTime = Number(message.start_time);
                 if (Number.isFinite(startTime) && startTime > 0 && audioElement) {
+                    // Drop any pending seek from a previous request first: {once:true}
+                    // only self-removes if 'playing' actually fires, so a failed
+                    // playback would otherwise leave it attached indefinitely.
+                    if (activeMcpSeekHandler) {
+                        audioElement.removeEventListener('playing', activeMcpSeekHandler);
+                    }
                     const onPlaying = () => {
                         try { audioElement.currentTime = startTime; } catch (e) {}
+                        if (activeMcpSeekHandler === onPlaying) activeMcpSeekHandler = null;
                         audioElement.removeEventListener('playing', onPlaying);
                     };
+                    activeMcpSeekHandler = onPlaying;
                     audioElement.addEventListener('playing', onPlaying, { once: true });
                 }
             }

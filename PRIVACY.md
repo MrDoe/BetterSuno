@@ -5,7 +5,7 @@ BetterSuno takes privacy seriously. The extension requests a small set of permis
 ## Requested Permissions
 
 - `cookies` –
-  Used to read the minimal session information required to determine if the user is logged in to Suno and to ensure notifications and downloads work in the correct context. We never read or transmit cookies to third parties.
+  Used to read Suno’s `__session` cookie. The extension first uses the live page-context Clerk client when available and validates the cookie as a bearer-token fallback when that client is absent. The cookie is never sent to any party other than Suno’s own API.
 
 - `alarms` –
   Employed to schedule periodic checks for new tracks or message updates so that desktop notifications can be delivered in a timely manner. Alarms run locally and no data leaves the user's machine.
@@ -14,10 +14,10 @@ BetterSuno takes privacy seriously. The extension requests a small set of permis
   Allows injected scripts (`content.js` and `downloader.js`) to interact with the Suno web page to enable features like the download button and to gather information for notifications. Scripts are executed only on `https://suno.com/*` as defined in host permissions.
 
 - `tabs` –
-  Used when opening new windows or tabs (for example when the user clicks a download link or when we need to redirect to a login page). We do not track or inspect tab contents beyond what is required for these actions.
+  Used to enumerate Suno tabs, activate a reachable page, and reload a discarded/frozen tab when refreshing authentication. We do not track or inspect tab contents beyond what is required for these actions.
 
 - `offscreen` –
-  Enables the extension to run service worker tasks (like downloading files and generating notifications) when no browser window is open. All processing happens locally.
+  Chrome/MV3-only. Enables a lightweight extension-owned document to poll notifications while the service worker may otherwise be suspended. Firefox uses its persistent background page and does not request or use this permission.
 
 - `storage` –
   Stores user preferences (such as notification settings) and local caches used to avoid unnecessary network requests. A short-lived Suno/Clerk bearer token is kept in browser-session-scoped extension storage so a Chrome service-worker restart does not discard it; it is not exposed to page scripts or content-script message handlers.
