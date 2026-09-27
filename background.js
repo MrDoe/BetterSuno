@@ -878,19 +878,65 @@ function looksLikeJwt(token) {
  * decide whether a token is genuine — that is `validateBearerToken`'s job.
  * Returns epoch milliseconds, or null when the payload cannot be read.
  */
-function getJwtExpiryMs(token) {
+/**
+ * Decodes a JWT payload without verifying the signature.
+ *
+ * The signature is deliberately not checked: the only job of this helper is to read
+ * non-authoritative metadata out of a token the extension already holds, never to decide
+ * whether a token is genuine. Authenticity is `validateBearerToken`'s responsibility.
+ */
+function decodeJwtClaims(token) {
   try {
-    const payload = token.split('.')[1];
+    const payload = String(token || '').split('.')[1];
     if (!payload) return null;
     const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
     const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
     const claims = JSON.parse(atob(padded));
-    const exp = Number(claims?.exp);
-    if (!Number.isFinite(exp) || exp <= 0) return null;
-    return exp * 1000;
+    return claims && typeof claims === 'object' ? claims : null;
   } catch {
     return null;
   }
+}
+
+function getJwtExpiryMs(token) {
+  const exp = Number(decodeJwtClaims(token)?.exp);
+  if (!Number.isFinite(exp) || exp <= 0) return null;
+  return exp * 1000;
+}
+
+/**
+ * Identity carried by the bearer token's own claims.
+ *
+ * Suno no longer exposes a Clerk browser SDK, so the page-context identity read
+ * (`fetchCurrentUserIdentityDirect`) can only ever return an empty identity. The `__session`
+ * JWT does carry the identity: `suno.com/claims/user_id` matches the `user_id` on the
+ * account's own feed clips (verified 2026-09-27), alongside `suno/handle` and `sub`.
+ *
+ * The token is the credential the API actually accepts, so this is a more direct source than
+ * anything scraped out of the page, and it needs no Suno tab. Claims only label data -
+ * they never authorise anything.
+ */
+function getIdentityFromToken(token) {
+  const claims = decodeJwtClaims(token);
+  if (!claims) {
+    return null;
+  }
+
+  const ids = collectNormalizedIds([
+    claims['suno.com/claims/user_id'],
+    claims['https://suno.ai/claims/clerk_id'],
+    claims.sub
+  ]);
+  const handle = normalizeHandle(pickFirstNonEmptyString([
+    claims['suno/handle'],
+    claims['https://suno.ai/claims/handle']
+  ]));
+
+  if (ids.length === 0 && !handle) {
+    return null;
+  }
+
+  return { id: ids[0] || null, ids, handle, displayName: null };
 }
 
 /**
@@ -5143,6 +5189,14 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
 async function fetchCurrentUserIdentity(token) {
   log('[fetchCurrentUserIdentity] START - token length:', token?.length || 0);
   const identity = { id: null, ids: [], handle: null, displayName: null };
+
+  // Prefer the token's own claims: they describe the credential the API accepted, and unlike
+  // the page context they do not depend on a Suno tab or on Clerk being present.
+  const tokenIdentity = getIdentityFromToken(token);
+  if (tokenIdentity) {
+    log('[fetchCurrentUserIdentity] Identity resolved from token claims:', tokenIdentity);
+    return tokenIdentity;
+  }
 
   try {
     const preferredTabs = [];
