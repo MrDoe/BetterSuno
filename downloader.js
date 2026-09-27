@@ -70,6 +70,14 @@
 
     let currentFetchMode = 'idle';
     let currentMetadataRefreshRequested = false;
+    // Songs merged by the incremental `songs_page_update` messages of the current run.
+    // The run's final `songs_fetched` message re-sends the same cumulative song list, so its
+    // own addedCount is always 0 - without these accumulators the end-of-run summary claimed
+    // "no new songs found" even though the run had just added songs.
+    let runAddedCount = 0;
+    let runMetadataUpdateCount = 0;
+    // Library size before the current fetch run started, for an honest "(was X)" baseline.
+    let runStartSongCount = 0;
     const METADATA_REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
     const metadataRefreshTimestamps = new Map();
     metadataRefreshInFlight = false;
@@ -2952,6 +2960,9 @@
         }
 
         currentFetchMode = 'full';
+        runAddedCount = 0;
+        runMetadataUpdateCount = 0;
+        runStartSongCount = allSongs.length;
         setFetchUiState(true);
         void saveSyncMeta({
             syncStatus: 'running',
@@ -2999,6 +3010,9 @@
         currentMetadataRefreshRequested = metadataRefreshIds.length > 0;
 
         currentFetchMode = 'incremental';
+        runAddedCount = 0;
+        runMetadataUpdateCount = 0;
+        runStartSongCount = allSongs.length;
         setFetchUiState(true);
         void saveSyncMeta({
             syncStatus: 'running',
@@ -4772,11 +4786,13 @@
 
             // Always merge fetched data into existing song list, never replace list mid-load
             const { addedCount, metadataUpdateCount } = mergeSongs(newSongs);
+            runAddedCount += addedCount;
+            runMetadataUpdateCount += metadataUpdateCount;
 
             if (currentFetchMode === 'incremental' || wasCheckingNew) {
                 statusDiv.innerText = currentMetadataRefreshRequested
                     ? `Page ${message.pageNum}: scanned ${message.totalSongs} song(s)...`
-                    : `Page ${message.pageNum}: ${message.totalSongs} new song(s) found...`;
+                    : `Page ${message.pageNum}: ${addedCount} new song(s) found, ${allSongs.length} total`;
             } else {
                 statusDiv.innerText = `Page ${message.pageNum}: ${allSongs.length} songs (added ${addedCount}, updated ${metadataUpdateCount}).`;
             }
@@ -4799,30 +4815,42 @@
             if (wasCheckingNew) {
                 // Merge with existing songs
                 const { addedCount, metadataUpdateCount } = mergeSongs(newSongs);
+                // Songs already merged by this run's page updates are counted here too,
+                // otherwise a successful run always reports zero new songs.
+                const totalAdded = addedCount + runAddedCount;
+                const totalUpdated = metadataUpdateCount + runMetadataUpdateCount;
+                runAddedCount = 0;
+                runMetadataUpdateCount = 0;
                 void saveSyncMeta({
                     lastSyncAt: completedAt,
                     lastIncrementalSyncAt: completedAt,
                     lastSyncMode: 'incremental',
-                    lastAddedCount: addedCount,
+                    lastAddedCount: totalAdded,
                     totalSongsAtLastSync: allSongs.length,
                     lastError: null,
                     syncStatus: 'complete'
                 });
                 if (currentMetadataRefreshRequested) {
-                    if (addedCount > 0 || metadataUpdateCount > 0) {
-                        statusDiv.innerText = `Updated ${metadataUpdateCount} existing song(s)${addedCount > 0 ? ` and found ${addedCount} new song(s)` : ''}. Total: ${allSongs.length}`;
+                    if (totalAdded > 0 || totalUpdated > 0) {
+                        statusDiv.innerText = `Updated ${totalUpdated} existing song(s)${totalAdded > 0 ? ` and found ${totalAdded} new song(s)` : ''}. Total: ${allSongs.length}`;
                     } else {
                         statusDiv.innerText = `${allSongs.length} songs already up to date.`;
                     }
-                } else if (addedCount > 0) {
-                    statusDiv.innerText = `Found ${addedCount} new song(s). Total: ${allSongs.length}`;
+                } else if (totalAdded > 0) {
+                    statusDiv.innerText = `Found ${totalAdded} new song(s). Total: ${allSongs.length}`;
                 } else {
                     statusDiv.innerText = `${allSongs.length} songs (no new songs found).`;
                 }
             } else {
                 // Fresh fetch complete: merge new data into existing library rather than replacing.
-                const preMergeCount = allSongs.length;
+                // Songs merged by this run's page updates are counted here too, and the
+                // baseline is the library size from before the run, not from mid-run.
                 const { addedCount, metadataUpdateCount } = mergeSongs(newSongs);
+                const totalAdded = addedCount + runAddedCount;
+                const totalUpdated = metadataUpdateCount + runMetadataUpdateCount;
+                const preMergeCount = runStartSongCount;
+                runAddedCount = 0;
+                runMetadataUpdateCount = 0;
 
                 if (!sunoUserId) {
                     initSunoUserId();
@@ -4847,13 +4875,13 @@
                     lastSyncAt: completedAt,
                     lastFullSyncAt: completedAt,
                     lastSyncMode: 'full',
-                    lastAddedCount: addedCount,
+                    lastAddedCount: totalAdded,
                     totalSongsAtLastSync: allSongs.length,
                     lastError: null,
                     syncStatus: 'complete'
                 });
-                const updatedPart = metadataUpdateCount > 0 ? `Updated ${metadataUpdateCount} existing song(s), ` : '';
-                statusDiv.innerText = `✅ Complete! ${updatedPart}Added ${addedCount} new song(s). Total: ${allSongs.length} (was ${preMergeCount}).`;
+                const updatedPart = totalUpdated > 0 ? `Updated ${totalUpdated} existing song(s), ` : '';
+                statusDiv.innerText = `✅ Complete! ${updatedPart}Added ${totalAdded} new song(s). Total: ${allSongs.length} (was ${preMergeCount}).`;
             }
             currentFetchMode = 'idle';
             currentMetadataRefreshRequested = false;
