@@ -2,6 +2,51 @@
 // Import IndexedDB functions
 import * as IDBStore from './idb-store.js';
 
+// Pure logic lives in lib/ so it is importable by node:test. background.js owns
+// all side effects (chrome APIs, listeners, fetch); lib/ owns the pure rules
+// (auth allowlists, JWT claim decoding, ownership predicates).
+import {
+  PERSIST_FIELDS,
+  toAuthSafeState,
+} from './lib/auth-state.js';
+import {
+  decodeJwtClaims,
+  getIdentityFromToken,
+  getIdentityIds,
+  getJwtExpiryMs,
+} from './lib/identity.js';
+import {
+  isSongExplicitlyKnownToBeOtherArtist,
+} from './lib/ownership.js';
+import { normalizeHandle, pickFirstNonEmptyString } from './lib/util.js';
+import {
+  resolveGenWavUrl,
+  resolveLegacySunoDownloadUrl,
+  resolveSunoAudioBytes,
+  resolveSunoDownloadUrl,
+  sunoAesCtrDecryptFull,
+  sunoDecodeContentIv,
+  sunoDecodeContentKey,
+  sunoGetUserKey,
+  sunoIncrementCounter,
+  sunoToWrappedKey,
+  sunoWavRequest,
+} from './lib/suno-audio.js';
+
+// Injected deps for the audio cluster. lib/suno-audio.js must not import
+// anything from this file, so background.js's own helpers are passed in.
+//   log                      — console wrapper
+//   fetchFeedSongsByIds      — shared with the library fetch path
+//   extractMediaUrlFromClip  — shared with the media-URL extractors
+//   delay                    — injectable so tests assert the 5s poll contract
+//                              without waiting on it
+const audioDeps = {
+  log,
+  fetchFeedSongsByIds,
+  extractMediaUrlFromClip,
+  delay: (ms) => new Promise(r => setTimeout(r, ms)),
+};
+
 // Verify module imported successfully
 console.log('[BACKGROUND-INIT] IDBStore module loaded:', typeof IDBStore, 'functions available:', Object.keys(IDBStore).length);
 
@@ -42,15 +87,6 @@ let downloadRequestorTabId = null;
 const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
 const AUTH_TOKEN_STORAGE_PREFIX = 'bettersunoAuthToken:';
 const TOKEN_MAX_AGE_MS = 45 * 60 * 1000;
-const BACKGROUND_AUTH_STATE_KEYS = [
-  'token',
-  'tokenTimestamp',
-  'tokenExpiresAt',
-  'tokenRefreshPromise',
-  'clerkSessionToken',
-  'clerkSessionExpiry',
-  'lastAuthFailure'
-];
 const BULK_LIBRARY_PAGE_SIZE = 100; // /api/feed/v3 rejects limit > 100 (verified 2026-09)
 const PLAYLIST_CLIP_PAGE_SIZE = 50;
 
@@ -405,16 +441,6 @@ setTimeout(connectMcpBridge, 2000);
 // ============================================================================
 
 // Fields that are worth saving across restarts.
-const PERSIST_FIELDS = [
-  'enabled',
-  'intervalMs',
-  'initialAfterUtc',
-  'lastNotificationTime',
-  'activatedAt',
-  'notifications',
-  'desktopNotificationsEnabled',
-  'androidFirefoxKeepAliveEnabled',
-];
 
 async function saveState() {
   try {
@@ -494,13 +520,6 @@ function ensureTabState(tabId) {
   return tabState[tabId];
 }
 
-function toAuthSafeState(state) {
-  const safeState = { ...(state || {}) };
-  for (const key of BACKGROUND_AUTH_STATE_KEYS) {
-    delete safeState[key];
-  }
-  return safeState;
-}
 
 function authTokenStorageKey(tabId) {
   return `${AUTH_TOKEN_STORAGE_PREFIX}${tabId}`;
@@ -885,24 +904,7 @@ function looksLikeJwt(token) {
  * non-authoritative metadata out of a token the extension already holds, never to decide
  * whether a token is genuine. Authenticity is `validateBearerToken`'s responsibility.
  */
-function decodeJwtClaims(token) {
-  try {
-    const payload = String(token || '').split('.')[1];
-    if (!payload) return null;
-    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
-    const claims = JSON.parse(atob(padded));
-    return claims && typeof claims === 'object' ? claims : null;
-  } catch {
-    return null;
-  }
-}
 
-function getJwtExpiryMs(token) {
-  const exp = Number(decodeJwtClaims(token)?.exp);
-  if (!Number.isFinite(exp) || exp <= 0) return null;
-  return exp * 1000;
-}
 
 /**
  * Identity carried by the bearer token's own claims.
@@ -916,28 +918,6 @@ function getJwtExpiryMs(token) {
  * anything scraped out of the page, and it needs no Suno tab. Claims only label data -
  * they never authorise anything.
  */
-function getIdentityFromToken(token) {
-  const claims = decodeJwtClaims(token);
-  if (!claims) {
-    return null;
-  }
-
-  const ids = collectNormalizedIds([
-    claims['suno.com/claims/user_id'],
-    claims['https://suno.ai/claims/clerk_id'],
-    claims.sub
-  ]);
-  const handle = normalizeHandle(pickFirstNonEmptyString([
-    claims['suno/handle'],
-    claims['https://suno.ai/claims/handle']
-  ]));
-
-  if (ids.length === 0 && !handle) {
-    return null;
-  }
-
-  return { id: ids[0] || null, ids, handle, displayName: null };
-}
 
 /**
  * Resolves a bearer token from the Clerk `__session` cookie.
@@ -2899,7 +2879,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         const token = await getApiTokenWithFallback('resolve_suno_audio');
-        const bytes = await resolveSunoAudioBytes(msg.clipId, msg.encryptedUrl, token);
+        const bytes = await resolveSunoAudioBytes(msg.clipId, msg.encryptedUrl, token, audioDeps);
         sendResponse({ ok: true, data: bytesToBase64(bytes), encoding: 'base64' });
       } catch (e) {
         log('resolve_suno_audio failed:', e?.message || String(e));
@@ -4391,215 +4371,16 @@ function extractAudioUrlFromClip(clip) {
   return null;
 }
 
-// Resolve a real WAV download URL for a clip.
-//
-// The V6-era web client (downloadClipWav) no longer uses the old
-// /api/download/clip route for WAV. It does:
-//   1. GET  /api/gen/{clip_id}/wav_file/   -> {wav_file_url} if already converted
-//   2. POST /api/gen/{clip_id}/convert_wav/ (204) to start conversion
-//   3. poll GET wav_file/ every 5s (up to 24 tries) until {wav_file_url}
-// The legacy endpoint is kept as a fallback. This route is metered by Suno's
-// download credits, so callers must treat failures as non-fatal and fall back
-// to the unlimited stream.
-async function sunoWavRequest(path, { method = 'GET', token } = {}) {
-  const headers = token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-  const res = await fetch(path, { method, headers });
-  if (res.status === 204) return { ok: true, status: 204, body: null };
-  if (!res.ok) {
-    let detail = '';
-    try {
-      const body = await res.json();
-      detail = body?.detail || body?.error || body?.message || '';
-    } catch (e) {
-      // body was not JSON
-    }
-    const err = new Error(`Suno WAV endpoint unavailable: HTTP ${res.status}${detail ? ` (${detail})` : ''}`);
-    err.status = res.status;
-    throw err;
-  }
-  let body = null;
-  try { body = await res.json(); } catch (e) { body = null; }
-  return { ok: true, status: res.status, body };
-}
 
-async function resolveGenWavUrl(clipId, token) {
-  const base = `https://studio-api.prod.suno.com/api/gen/${encodeURIComponent(clipId)}`;
 
-  const initial = await sunoWavRequest(`${base}/wav_file/`, { token });
-  if (initial.body?.wav_file_url) return initial.body.wav_file_url;
 
-  await sunoWavRequest(`${base}/convert_wav/`, { method: 'POST', token });
 
-  for (let attempt = 0; attempt < 24; attempt++) {
-    await new Promise(r => setTimeout(r, 5000));
-    const polled = await sunoWavRequest(`${base}/wav_file/`, { token });
-    if (polled.body?.wav_file_url) return polled.body.wav_file_url;
-  }
-  throw new Error('Timed out waiting for Suno WAV conversion');
-}
 
-async function resolveLegacySunoDownloadUrl(clipId, format, token) {
-  const path = `https://studio-api.prod.suno.com/api/download/clip/${encodeURIComponent(clipId)}?format=${encodeURIComponent(format)}`;
-  const headers = token ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const res = await fetch(path, { method: 'GET', headers });
-    if (!res.ok) {
-      let detail = '';
-      try {
-        const body = await res.json();
-        detail = body?.detail || body?.error || body?.message || '';
-      } catch (e) {
-        // body was not JSON
-      }
-      throw new Error(`Suno download unavailable: HTTP ${res.status}${detail ? ` (${detail})` : ''}`);
-    }
-    const data = await res.json();
-    if (data?.download_url) return data.download_url;
-    if (data?.status === 'error') throw new Error(data?.error || 'Suno download failed');
-    if (attempt >= 1 && (data?.ok === false || data?.status === 'not_available')) {
-      throw new Error(data?.detail || data?.error || 'Suno download not available');
-    }
-    await new Promise(r => setTimeout(r, 2000));
-  }
-  throw new Error('Timed out waiting for Suno download URL');
-}
 
-async function resolveSunoDownloadUrl(clipId, format, token) {
-  if (format === 'wav') {
-    try {
-      return await resolveGenWavUrl(clipId, token);
-    } catch (e) {
-      log(`resolveSunoDownloadUrl: convert_wav flow failed (${e.message}), trying legacy endpoint`);
-    }
-  }
-  return resolveLegacySunoDownloadUrl(clipId, format, token);
-}
 
-// ============================================================================
-// Suno encrypted audio ("mango" / m4a-opus) — replicated from Suno's own player
-// (their webpack module 913328 + the /api/mango/rights license flow).
-//
-// Suno now serves clip audio as an encrypted fragmented MP4. `audio_url` is a
-// decoy (`/api/forbidden`); the real stream lives in `media_urls[]` as an
-// entry with `encoding` set (e.g. cloudfront m4a-opus). To play it:
-//   1. POST /api/mango/rights  -> { key, iv, glt }  (AES-GCM-wrapped AES-CTR key)
-//   2. userKey = SHA-256(bearer token) or SHA-256(glt) for guests
-//   3. unwrap key/iv via AES-GCM (additionalData = clipId)
-//   4. fetch the encrypted media, AES-CTR decrypt the whole stream
-//   5. the result is a plain MP4 -> blob -> audio element (no MSE needed)
-// ============================================================================
 
-async function sunoGetUserKey(secret) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
-  return crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['decrypt']);
-}
 
-function sunoToWrappedKey(b64) {
-  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-}
 
-async function sunoDecodeContentKey(wrapped, contentId, userKey) {
-  const raw = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: wrapped.slice(0, 12), additionalData: new TextEncoder().encode(contentId) },
-    userKey,
-    wrapped.slice(12)
-  );
-  return crypto.subtle.importKey('raw', raw, { name: 'AES-CTR' }, false, ['decrypt']);
-}
-
-async function sunoDecodeContentIv(wrapped, contentId, userKey) {
-  return new Uint8Array(await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: wrapped.slice(0, 12), additionalData: new TextEncoder().encode(contentId) },
-    userKey,
-    wrapped.slice(12)
-  ));
-}
-
-function sunoIncrementCounter(iv, add) {
-  const out = new Uint8Array(16);
-  if (out.set(iv), add === 0) return out;
-  let n = BigInt(0);
-  for (let i = 0; i < 16; i++) n = (n << BigInt(8)) | BigInt(out[i]);
-  n += BigInt(add);
-  for (let i = 15; i >= 0; i--) { out[i] = Number(n & BigInt(255)); n >>= BigInt(8); }
-  return out;
-}
-
-async function sunoAesCtrDecryptFull(key, iv, data, chunkSize = 65536) {
-  const out = [];
-  let carry = new Uint8Array(0);
-  let counter = 0;
-  for (let pos = 0; pos < data.length; pos += chunkSize) {
-    const slice = data.slice(pos, pos + chunkSize);
-    const merged = new Uint8Array(carry.length + slice.length);
-    merged.set(carry); merged.set(slice, carry.length);
-    const fullLen = 16 * Math.floor(merged.length / 16);
-    if (fullLen > 0) {
-      const ctr = sunoIncrementCounter(iv, counter);
-      const dec = new Uint8Array(await crypto.subtle.decrypt(
-        { name: 'AES-CTR', counter: ctr, length: 128 },
-        key,
-        merged.buffer.slice(merged.byteOffset, merged.byteOffset + fullLen)
-      ));
-      out.push(dec);
-      counter += fullLen / 16;
-    }
-    carry = merged.slice(fullLen);
-  }
-  if (carry.length > 0) {
-    const ctr = sunoIncrementCounter(iv, counter);
-    out.push(new Uint8Array(await crypto.subtle.decrypt(
-      { name: 'AES-CTR', counter: ctr, length: 128 },
-      key,
-      carry.buffer.slice(carry.byteOffset, carry.byteOffset + carry.byteLength)
-    )));
-  }
-  const total = out.reduce((a, b) => a + b.length, 0);
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of out) { result.set(chunk, offset); offset += chunk.length; }
-  return result;
-}
-
-// Fetches the license + media and returns decrypted audio bytes for a clip.
-// Encrypted media URL is the `media_urls[]` entry with `encoding` set.
-async function resolveSunoAudioBytes(clipId, encryptedUrl, token) {
-  // If we only have the decoy/stale URL (older cached clips stored `audio_url`
-  // as /api/forbidden before the media_urls change), re-fetch the clip from the
-  // feed to obtain the real encrypted media URL. Suno's own player does the same
-  // (POST /api/feed/v3 with filters.ids.clipIds).
-  if (!encryptedUrl || /forbidden/i.test(String(encryptedUrl))) {
-    const lookup = await fetchFeedSongsByIds(token, [clipId], { logPrefix: 'resolve_suno_audio' });
-    const clip = Array.isArray(lookup?.clips) ? lookup.clips[0] : null;
-    const media = extractMediaUrlFromClip(clip);
-    encryptedUrl = media?.url || null;
-    if (!encryptedUrl) throw new Error('No playable media URL for clip');
-  }
-
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const rightsResp = await fetch('https://studio-api-prod.suno.com/api/mango/rights', {
-    method: 'POST',
-    cache: 'no-store',
-    headers,
-    credentials: 'include',
-    body: JSON.stringify({ content_params: { content_id: clipId, content_type: 'clip' } })
-  });
-  if (!rightsResp.ok) throw new Error(`Suno license request failed: HTTP ${rightsResp.status}`);
-  const rights = await rightsResp.json();
-  if (!rights?.key || !rights?.iv) throw new Error('Suno license response missing key/iv');
-
-  const userKey = token && rights.glt
-    ? await sunoGetUserKey(token)
-    : await sunoGetUserKey(rights.glt || token);
-  const aesKey = await sunoDecodeContentKey(sunoToWrappedKey(rights.key), clipId, userKey);
-  const aesIv = await sunoDecodeContentIv(sunoToWrappedKey(rights.iv), clipId, userKey);
-
-  const mediaResp = await fetch(encryptedUrl, { cache: 'no-store' });
-  if (!mediaResp.ok) throw new Error(`Suno media fetch failed: HTTP ${mediaResp.status}`);
-  const encData = new Uint8Array(await mediaResp.arrayBuffer());
-  return await sunoAesCtrDecryptFull(aesKey, aesIv, encData);
-}
 
 function extractOwnershipMetadataFromClip(clip, currentUserId, currentUserIds) {
   const idSet = currentUserIds || new Set();
@@ -4857,190 +4638,16 @@ async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, opti
   }
 }
 
-function pickFirstNonEmptyString(values) {
-  for (const value of values) {
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (trimmed) {
-        return trimmed;
-      }
-    }
-  }
-  return null;
-}
 
-function normalizeHandle(value) {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const trimmed = value.trim().replace(/^@+/, '').toLowerCase();
-  return trimmed || null;
-}
 
-function collectNormalizedIds(values) {
-  const ids = [];
 
-  values.forEach(value => {
-    if (typeof value !== 'string') {
-      return;
-    }
 
-    const trimmed = value.trim();
-    if (trimmed) {
-      ids.push(trimmed);
-    }
-  });
 
-  return Array.from(new Set(ids));
-}
 
-function collectUuidLikeIds(obj) {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  const stack = [obj];
-  const found = new Set();
-  let safety = 0;
 
-  while (stack.length && safety < 5000) {
-    safety += 1;
-    const cur = stack.pop();
-    if (!cur || typeof cur !== 'object') continue;
 
-    for (const value of Object.values(cur)) {
-      if (typeof value === 'string' && uuidRegex.test(value)) {
-        found.add(value.trim());
-      } else if (value && typeof value === 'object') {
-        stack.push(value);
-      }
-    }
-  }
 
-  return Array.from(found);
-}
 
-function getIdentityIds(identity) {
-  return collectNormalizedIds([
-    identity?.id,
-    ...(Array.isArray(identity?.ids) ? identity.ids : [])
-  ]);
-}
-
-function getNormalizedSongOwnerIds(song) {
-  const values = [
-    song?.owner_user_id,
-    song?.user_id,
-    song?.creator_user_id,
-    song?.author_user_id,
-    song?.owner_profile_id,
-    song?.profile_id
-  ];
-
-  return new Set(values.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()));
-}
-
-function getNormalizedSongOwnerHandles(song) {
-  const values = [
-    song?.owner_handle,
-    song?.handle,
-    song?.user_handle,
-    song?.creator_handle,
-    song?.author_handle,
-    song?.username
-  ];
-
-  return new Set(values.map(normalizeHandle).filter(Boolean));
-}
-
-function hasSongOwnershipMetadata(song) {
-  if (!song || typeof song !== 'object') {
-    return false;
-  }
-
-  return song.is_owned_by_current_user === true ||
-    song.is_owned_by_current_user === false ||
-    song.is_own_song === true ||
-    song.is_own_song === false ||
-    getNormalizedSongOwnerIds(song).size > 0 ||
-    getNormalizedSongOwnerHandles(song).size > 0 ||
-    typeof song?.owner_display_name === 'string';
-}
-
-function isSongOwnedByIdentity(song, identity) {
-  if (!song || !identity) {
-    return false;
-  }
-
-  const identityIds = getIdentityIds(identity);
-  const identityHandle = normalizeHandle(identity.handle);
-  const identityDisplayName = pickFirstNonEmptyString([identity.displayName]);
-
-  const ownerIds = getNormalizedSongOwnerIds(song);
-  if (identityIds.some(id => ownerIds.has(id))) {
-    return true;
-  }
-
-  const ownerHandles = getNormalizedSongOwnerHandles(song);
-  if (identityHandle && ownerHandles.has(identityHandle)) {
-    return true;
-  }
-
-  if (song.is_owned_by_current_user === true || song.is_own_song === true) {
-    return true;
-  }
-
-  if (identityDisplayName && typeof song?.owner_display_name === 'string') {
-    return song.owner_display_name.trim().toLowerCase() === identityDisplayName.trim().toLowerCase();
-  }
-
-  return false;
-}
-
-function isSongExplicitlyKnownToBeOtherArtist(song) {
-  return !!song && (song.is_owned_by_current_user === false || song.is_own_song === false);
-}
-
-function canDownloadSongForIdentity(song, identity) {
-  if (!song || typeof song !== 'object') {
-    return false;
-  }
-
-  // Positive ownership match (multi-ID check) — always allow
-  if (isSongOwnedByIdentity(song, identity)) {
-    return true;
-  }
-
-  if (isSongExplicitlyKnownToBeOtherArtist(song)) {
-    return false;
-  }
-
-  // If the song has an owner ID and the identity has IDs, but none overlap verify before blocking
-  const identityIds = getIdentityIds(identity);
-  const ownerIds = getNormalizedSongOwnerIds(song);
-
-  if (identityIds.length > 0 && ownerIds.size > 0) {
-    const isMatch = identityIds.some(id => ownerIds.has(id));
-    if (!isMatch) {
-      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-      const identityHasUuid = identityIds.some(id => uuidRegex.test(id));
-      const ownerHasUuid = Array.from(ownerIds).some(id => uuidRegex.test(id));
-      
-      if (identityHasUuid && ownerHasUuid) {
-        return false; // Confident mismatch on UUIDs
-      }
-
-      const clerkRegex = /^user_[a-zA-Z0-9]+$/i;
-      const identityHasClerk = identityIds.some(id => clerkRegex.test(id));
-      const ownerHasClerk = Array.from(ownerIds).some(id => clerkRegex.test(id));
-
-      if (identityHasClerk && ownerHasClerk) {
-        return false; // Confident mismatch on Clerk IDs
-      }
-    }
-  }
-
-  // Otherwise: ownership is inconclusive (IDs might use different formats).
-  // Allow the download rather than blocking the user's own songs.
-  return true;
-}
 
 async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, knownIds = [], metadataRefreshIds = []) {
   const notifyTab = (message) => {
@@ -6193,11 +5800,11 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
 
     const fetchStreamBytes = async () => {
       try {
-        return await resolveSunoAudioBytes(song.id, song.audio_url, token);
+        return await resolveSunoAudioBytes(song.id, song.audio_url, token, audioDeps);
       } catch (firstError) {
         // Stale cached URL: force a fresh media lookup and retry once.
         try {
-          return await resolveSunoAudioBytes(song.id, null, token);
+          return await resolveSunoAudioBytes(song.id, null, token, audioDeps);
         } catch (retryError) {
           throw firstError;
         }
@@ -6246,7 +5853,7 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
 
     if (requested === 'wav_credit') {
       try {
-        const url = await resolveSunoDownloadUrl(song.id, 'wav', token);
+        const url = await resolveSunoDownloadUrl(song.id, 'wav', token, audioDeps);
         return { kind: 'url', url, ext: 'wav' };
       } catch (e) {
         notifyDownloadUi({

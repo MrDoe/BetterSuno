@@ -29,6 +29,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 - **Save to DB** - Cache selected songs for offline playback
 - **Offline-only filter** - Show only tracks that are stored locally
 - **Delete from DB** - Remove selected cached tracks from local storage
+- **Auto-cache played songs** - Optional: save a song to the local DB the first time you play it
 - **Usage display** - See local DB usage in Settings
 
 ### ▶️ Mini Player
@@ -41,12 +42,13 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 - **Customizable polling** - Choose how often to check for new notifications
 - **Desktop notifications toggle** - Enable/disable desktop alerts
 - **Android Firefox keepalive** - Experimental opt-in silent media session to reduce MIUI/HyperOS tab reloads on Firefox for Android
+- **Auto-cache songs I listen to** - Opt in to caching a song locally as soon as you play it
 - **Library actions** - Refetch library, stop fetch, or delete local library
 
 ### 🤖 MCP Server (AI Agent Integration)
 - **59 tools** via the [bettersuno-mcp](https://github.com/MrDoe/bettersuno-mcp) package — Expose Suno's full API to AI agents (OpenCode, Claude Desktop, etc.) via the Model Context Protocol
 - **Direct API calls** - The MCP server calls Suno's API directly using the extension's auth token
-- **WebSocket bridge** - Extension shares Clerk token with the MCP server over `ws://localhost:9423`
+- **WebSocket bridge** - Extension shares its Suno session token with the MCP server over `ws://localhost:9423`
 - **Full feature coverage** - Song creation, covering, remastering, personas, uploads, downloads, playlists, workspaces, and more
 - Install: `npx bettersuno-mcp` (separate package, requires this extension at runtime)
 
@@ -70,7 +72,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 
 1. **Open Suno.com** and log in to your account
 2. **Click the bell icon** in the top-left corner to open the panel
-3. **Use Song Library** (default tab) to load, filter, play, cache, and download tracks
+3. **Use Song Library** (default tab) to load, filter, play, cache, and download tracks. Optionally enable **Settings → Auto-cache songs I listen to** to save each song locally the first time you play it.
 4. **Select a playlist** from the Playlist dropdown (optional) to load playlist tracks
 5. **Choose download options** (M4A/WAV, music/lyrics/image) next to the Download button. File downloads are limited to songs you own; tracks by other artists can still be saved to the local DB for offline playback.
 6. **Use the mini player** to play songs, seek by clicking the progress bar, and auto-advance through the list
@@ -102,7 +104,7 @@ npm install -g bettersuno-mcp
 AI Client ←stdio→ bettersuno-mcp ←ws://localhost:9423→ BetterSuno Extension → Suno API
 ```
 
-The **extension** acquires a Clerk auth token (via Suno.com tab) and pushes it to the MCP server over WebSocket. The **MCP server** receives the token and makes direct HTTP calls to `studio-api.prod.suno.com`. The **AI client** (opencode, Claude) calls MCP tools which translate to Suno API requests.
+The **extension** acquires a Suno session token (from the `__session` cookie in a signed-in Suno.com tab; Suno no longer exposes a Clerk browser SDK, and any candidate token is validated server-side before use) and pushes it to the MCP server over WebSocket. The **MCP server** receives the token and makes direct HTTP calls to `studio-api.prod.suno.com`. The **AI client** (opencode, Claude) calls MCP tools which translate to Suno API requests.
 
 The extension pushes the token on connect and on every 45-minute refresh. If Suno requires a captcha challenge, the MCP server requests a Turnstile solve from the extension over WebSocket.
 

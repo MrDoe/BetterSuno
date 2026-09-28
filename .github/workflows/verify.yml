@@ -1,0 +1,25 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # No `npm ci`: the only dependencies are devDeps that nothing imports,
+      # and the build/test/verify toolchain is pure Node (node:test, node --check).
+      - name: Verify (syntax, tests, build)
+        run: npm run verify
+
+      - name: web-ext lint (Firefox target)
+        run: npx --yes web-ext lint --source-dir dist/firefox --self-hosted
+        continue-on-error: true

@@ -1,7 +1,8 @@
 # BetterSuno — Agent Guide
 
 ## Build
-- `node build.js` → `dist/chrome/` + `dist/firefox/` (arg `chrome`/`firefox` for one). No dev server, tests, typecheck, or linter.
+- `node build.js` → `dist/chrome/` + `dist/firefox/` (arg `chrome`/`firefox` for one).
+- `npm run verify` → syntax check + `node:test` + build both targets. **Run this before declaring any change done** (see Verification below).
 - Load unpacked: `dist/chrome/` (`chrome://extensions`) or `dist/firefox/` (`about:debugging#/runtime/this-firefox`).
 
 ## Architecture
@@ -14,12 +15,23 @@
 | `content-idb.js` / `idb-store.js` | Frontend / background IndexedDB wrappers (same DB, separate contexts). |
 | `idb-helpers.js` | Shared IDB utils. |
 | `offscreen.js` | Chrome-only offscreen polling doc. |
+| `lib/auth-state.js` `lib/identity.js` `lib/ownership.js` `lib/util.js` | **Pure logic** (auth allowlists, JWT claim decoding, ownership gate, string helpers), imported by `background.js`. Split out so `node:test` can import it — the service worker cannot be. New pure logic goes here. |
+| `build.js` | Copies `SHARED_FILES` + `SHARED_DIRS`; `verifyRelativeImports()` fails the build when a module is not shipped. |
 
 Content scripts ↔ `background.js` via `chrome.runtime.sendMessage`. `content.js` builds the DOM, `downloader.js` consumes it.
 DB `BetterSunoicationsDB` v3: `tabStates`, `songsList`, `userPreferences`, `audioCache`, `imageCache`.
 
+`audioCache` has two record classes. Untagged records (manual **Save to DB**, and any plain play of an encrypted clip) age out after 7 days via `evictStaleBlobs`. Records with `auto_cached: true` (written only by Settings → **Auto-cache songs I listen to**, via `downloader.cacheSongInDb(song, { autoCached: true })`) are exempt from the age sweep and survive until the 500 MB `evictBySize` trim or **Delete from DB** — that exemption is the point of the feature. Both `saveAudioBlobToIDB` and `resolveEncryptedAudioBlob` take the flag so the encrypted and plain paths tag identically.
+
+`content-fetcher.js` keeps private copies of `normalizeHandle`/`pickFirstNonEmptyString` **on purpose**: it is MAIN-world injected as a classic script and cannot use ES module imports. Don't "deduplicate" it.
+
+## Verification
+`npm run verify` = `node --check` on every runtime source and test file, `node --test tests/*.test.js`, then `node build.js` for both targets. CI runs the same (`.github/workflows/verify.yml`). There are no runtime or dev dependencies; the toolchain is pure Node.
+
+`node --check` alone is **not** sufficient — it passes on valid-but-wrong code. `tests/service-worker-smoke.test.js` loads `background.js` against a stubbed `chrome` to prove the module graph resolves, and asserts exactly one `onMessage` listener is registered. **Add a test with every fix**; a fix without one is how the same class of bug ships twice.
+
 ## Browser differences (Chrome vs Firefox)
-SW vs persistent bg; offscreen polling vs inline `ffPollOnce`; `world:"MAIN"` (Clerk token) vs `wrappedJSObject`; `build.js` strips `offscreen` perm and adds `browser_specific_settings.gecko` for FF.
+SW vs persistent bg; offscreen polling vs inline `ffPollOnce`; `world:"MAIN"` (`__session` cookie read) vs `wrappedJSObject`; `build.js` adds `browser_specific_settings.gecko` for FF. Note `offscreen` is **not** in `manifest.permissions` at all — the MV3 offscreen API needs no permission declaration, so the old "strips the offscreen perm" filter in `build.js` is a no-op.
 
 ## Auth & token
 `background.js` needs a Bearer token; **a live `suno.com` tab is still required** (it is the only context that can read the cookie). Cached 45 min, refreshed by alarm, pushed to MCP over WS on connect/refresh.
@@ -61,14 +73,14 @@ Run: `npx bettersuno-mcp`. Registered globally in `~/.config/opencode/opencode.j
 **59 tools / 12 modules.** The server sits behind a WS bridge (`ws-bridge.js`); the MCP server's `suno-client.js` calls the Suno API directly (429 → exponential backoff 1s→30s, 5 retries; 401 → token auto-refreshed).
 
 Extension-side semantics that agents need to know:
-- **Playback** (`play_song`): works for ANY song (incl. other users' public playlists). Relays MCP→WS→`background.relayMcpPlaybackToTab`→suno tab→`downloader.togglePlay`; `start_time` seeks; `stop_playback` pauses. Needs the extension connected.
+- **Playback** (`play_song`): works for ANY song (incl. other users' public playlists). Relays MCP→WS→`background.relayMcpPlaybackToTab`→suno tab→`downloader.togglePlay`; `start_time` seeks; `stop_playback` pauses. Needs the extension connected. Because `togglePlay` is the single funnel for every playback path, MCP `play_song` also triggers **Auto-cache songs I listen to** when the user has that setting on — MCP-initiated playback writes to the local DB like any other play.
 - **Prompts**: stored in the extension's IndexedDB; relayed via WS `extension_request`/`response` (`background.handleMcpExtensionRequest`). Needs the extension connected.
 - **Library DB**: `handleMcpExtensionRequest` also handles `get_db_songs` (relays to the suno tab's `mcp_get_db_songs`, which projects `songsList` records). Song records cache `model_name`/`major_model_version`, `play_count`, `task`, `cover_clip_id`; the library UI shows model + played chips and has Unplayed/Model filters, and MCP reads the same data through `get_db_songs`/`get_library_stats {source:"db"}`. Playing a song via BetterSuno bumps its cached `play_count` immediately (merges keep the higher local/server value), so the Unplayed badge/filter update without waiting for a sync; the Unplayed filter itself starts unchecked on every panel load (not persisted).
 - **Captcha**: MCP server requests Turnstile solve from the extension over WS when Suno requires it. `background.handleMcpCaptchaRequest` runs in the suno.com tab (MAIN world) and **discovers the generation sitekey dynamically** by scanning Suno's own JS chunks for `NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY_GEN` (pattern `...||"0x4AAAA..."`), falling back to `FALLBACK_CAPTCHA_SITEKEY`. Do NOT hardcode Cloudflare's test key (`0x4AAA...AAAQAAA`) — Suno rejects those tokens. The returned token is sent back over WS as `captcha_token`; the MCP server passes it as `token` with `token_provider = captcha_version` from `/api/c/check`.
-- **`params: {}` required** in `POST /api/generate/v2-web/` bodies (2026-08). The extension's `generate_song` payload and `downloader.js` `relay_generate` both add it; missing it → 422 `token_validation_failed` / "We couldn't verify your request".
+- **`params: {}` is no longer sent by the extension** (verified 2026-09-28). Neither the `generate_song` body in `background.js` nor `downloader.js` `relay_generate` adds it; `grep -n params` over `create.js`/`downloader.js` returns nothing, and the only `params` hits in `background.js` are `URLSearchParams` (notification polling) and `content_params` (clip content). Note `relay_generate` forwards `...message.payload` **verbatim** from the WS bridge, so whatever the MCP server sends is what Suno receives — the `bettersuno-mcp` package lives outside this repo and its payload is not verifiable here. Missing `params: {}` on the extension's own path does not cause a 422.
 
 ## Code navigation
-Use OpenCodeRAG before reading/editing: `search_semantic` (search), `get_file_skeleton` (orient), `find_usages` (before edits), `describe_image` (images). The index can be stale — verify with `read`.
+Use OpenCodeRAG before reading/editing: `search_semantic` (search), `get_file_skeleton` (orient), `find_usages` (before edits), `describe_image` (images). The index goes stale — it once served pre-fix code that inverted a trust-boundary conclusion. **Confirm anything security-relevant with `read`**, and refer to guards by name (`OFFSCREEN_ONLY_TYPES`, `STATE_MODIFYING_TYPES`) rather than line number.
 
 ## Inspection (Firefox DevTools MCP)
 `npx -y @mozilla/firefox-devtools-mcp@latest --connect-existing`. Tabs `_list_pages`; DOM `_take_snapshot`; network `_list_network_requests`→`_get_network_request`; screenshot `_screenshot_page`. Console/network need BiDi (`--headless`). After code changes: `node build.js` + reload the extension.
@@ -138,14 +150,14 @@ If no results, run `opencode-rag index`.
 Other OpenCode sessions in this workspace are reachable through the
 `opencode-crosstalk` plugin: `crosstalk_status`, `crosstalk_peers`,
 `crosstalk_send`, `crosstalk_inbox`, `crosstalk_claim`, `crosstalk_wait`.
-Talk to each other, but keep working — only stop for coordination that prevents
+Talk to each other briefly, but keep working — only stop for coordination that prevents
 a real collision.
 
-- **Declare once, then keep moving.** `crosstalk_status` sets your role and goal;
+- **Declare once - precisely and concisely - then keep moving.** `crosstalk_status` sets your role and goal;
   `crosstalk_peers` shows active sessions and their leases. Work that does not
   overlap theirs needs no coordination.
 - **Talk before you collide.** If you need something a peer holds, `crosstalk_send`
-  a short ask and continue elsewhere; replies are injected into live turns (use
+  a short precise ask and continue elsewhere; replies are injected into live turns (use
   `crosstalk_inbox` to catch up). Never force a claim.
 - **Lease what you are editing now.** `crosstalk_claim` takes an exclusive expiring
   lease on exact paths — no globs (`resources`, `note`, `ttlSeconds`). `renew` if the
@@ -153,7 +165,5 @@ a real collision.
 - **Identity is automatic** — never pass a "who am I". Blocking calls are capped by
   `maxWaitMs` and may return early; that is normal.
 
-Installed globally (`npm run setup` in `/home/christoph/code/opencode-crosstalk`);
-`opencode api get /api/plugin` shows `opencode.crosstalk` active. Disable per
-workspace with `"plugins": ["-opencode.crosstalk"]`; no permission rule is required.
+Installed globally - `opencode api get /api/plugin` shows if `opencode.crosstalk` is active.
 <!-- opencode-crosstalk:end -->

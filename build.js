@@ -21,6 +21,11 @@ const SHARED_FILES = [
   'README.md',
 ];
 
+// Directories copied verbatim (e.g. lib/ — pure modules background.js imports).
+const SHARED_DIRS = [
+  'lib',
+];
+
 const CHROME_ONLY_FILES = [
   'offscreen.html',
   'offscreen.js',
@@ -53,6 +58,31 @@ function copyDir(src, dest) {
       copyFile(srcPath, destPath);
     }
   }
+}
+
+// A module that background.js imports but that build.js forgets to copy produces
+// a build that loads the service worker and then fails at import time, with no
+// build-time signal. Verify relative imports resolve inside the dist tree.
+function verifyRelativeImports(destDir) {
+  const problems = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walk(p); continue; }
+      if (!entry.name.endsWith('.js')) continue;
+      const src = fs.readFileSync(p, 'utf8');
+      const re = /(?:^|\s)(?:import|export)[^'"]*?from\s*['"](\.[^'"]+)['"]/g;
+      let m;
+      while ((m = re.exec(src)) !== null) {
+        const resolved = path.resolve(path.dirname(p), m[1]);
+        if (!fs.existsSync(resolved)) {
+          problems.push(`${path.relative(destDir, p)} imports missing ${m[1]}`);
+        }
+      }
+    }
+  };
+  walk(destDir);
+  return problems;
 }
 
 function buildManifest(browser) {
@@ -90,6 +120,14 @@ function build(browser) {
     }
   }
 
+  // Copy shared directories
+  for (const dir of SHARED_DIRS) {
+    const src = path.join(SRC, dir);
+    if (fs.existsSync(src)) {
+      copyDir(src, path.join(destDir, dir));
+    }
+  }
+
   // Copy Chrome-only files
   if (browser === 'chrome') {
     for (const file of CHROME_ONLY_FILES) {
@@ -112,6 +150,14 @@ function build(browser) {
     path.join(destDir, 'manifest.json'),
     JSON.stringify(manifest, null, 2) + '\n'
   );
+
+  const importProblems = verifyRelativeImports(destDir);
+  if (importProblems.length) {
+    console.error(`✗ ${browser}: unresolved relative imports in build output:`);
+    for (const p of importProblems) console.error(`   - ${p}`);
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(`✓ Built ${browser} extension → dist/${browser}/`);
 }

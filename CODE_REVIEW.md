@@ -317,7 +317,7 @@ BetterSuno is a mature, feature-rich browser extension with broadly sound archit
 | **P2**   | Fix [M5]: add confirmation for destructive playlist ops | 2 hours | ✅ Fixed |
 | **P3**   | Fix [L1]: implement blob eviction | 2 hours | ✅ Fixed |
 | **P3**   | Fix [L2]/[L4]: clean up fragile patterns (wrappedJSObject, SVG innerHTML) | 1 hour | ✅ Fixed |
-| **P1**   | Fix [M1]: refactor message handler into named function map | 4 hours | 🚧 Reference file created (`bg-handlers.js`), not wired |
+| **P1**   | Fix [M1]: refactor message handler into named function map | 4 hours | 🔁 Handlers stay inline in `background.js`; the `bg-handlers.js` reference was deleted 2026-09-28 (unwired, and it held pre-fix unguarded copies) |
 
 ---
 
