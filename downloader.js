@@ -18,6 +18,11 @@
     // Same story for the MCP start_time seek, which waits on a 'playing' event.
     let activeMcpSeekHandler = null;
     let stopCachingRequested = false;
+    // Settings > "Auto-cache songs I listen to". Stored in the userPreferences IDB
+    // store (not background tabState) because it is a purely local playback concern.
+    const AUTO_CACHE_PREF_KEY = 'autoCacheListened';
+    let autoCacheListenedEnabled = false;
+    const autoCacheInFlight = new Set();
     const SONG_RENDER_BATCH_SIZE = 40;
     let sortedFilteredSongs = [];
     let renderedSongCount = 0;
@@ -1899,7 +1904,7 @@
         return !!url && /forbidden/i.test(String(url));
     }
 
-    async function resolveEncryptedAudioBlob(song) {
+    async function resolveEncryptedAudioBlob(song, { autoCached = false } = {}) {
         const response = await sendMessageWithRetry({
             action: 'resolve_suno_audio',
             clipId: song.id,
@@ -1912,7 +1917,7 @@
         const bytes = typeof response.data === 'string' ? base64ToBytes(response.data) : response.data;
         const blob = new Blob([bytes], { type: 'audio/mp4' });
         try {
-            await saveAudioBlobToIDB(song.id, blob);
+            await saveAudioBlobToIDB(song.id, blob, { autoCached });
         } catch (e) {
             // caching failure is non-fatal for playback
         }
@@ -1969,6 +1974,45 @@
         return true;
     }
 
+    // Opt-in "auto-cache what I listen to": cache a song to the local DB the moment it
+    // starts playing, if it isn't cached yet. togglePlay is the single funnel for
+    // song rows, the mini player, the Player tab, auto-next and MCP play_song, so this
+    // one call site covers every playback path (including other artists' public
+    // playlists) with no new wiring.
+    //
+    // The audio element streams from Suno's CDN, so its bytes can't be captured - this
+    // re-fetches the track. That is why the option is off by default and why we skip
+    // anything already in the cache.
+    async function autoCachePlayedSong(song) {
+        if (!autoCacheListenedEnabled) return;
+        if (!song || !song.id || !song.audio_url) return;
+        if (cachedSongIds.has(song.id)) return;
+        if (autoCacheInFlight.has(song.id)) return;
+
+        autoCacheInFlight.add(song.id);
+        try {
+            // Don't fight the size evictor: at/over the cap the next save would trip
+            // evictBySize's oldest-20% trim, so skip until eviction has made room.
+            const usageBytes = await estimateDbUsageBytes();
+            const maxBytes = (typeof MAX_DB_SIZE_BYTES === 'number') ? MAX_DB_SIZE_BYTES : 0;
+            if (maxBytes > 0 && usageBytes >= maxBytes) {
+                console.log(`[Downloader] Auto-cache skipped for "${song.title || 'Untitled'}" — local DB is at ${usageBytes}/${maxBytes} bytes`);
+                return;
+            }
+
+            await cacheSongInDb(song, { autoCached: true });
+            // cacheSongInDb already refreshes the item cache; repaint the visible row so
+            // the 💾 chip and the Offline filter agree with the DB immediately.
+            refreshVisibleSongItems([song.id]);
+            console.log(`[Downloader] Auto-cached "${song.title || 'Untitled'}" after playback`);
+        } catch (e) {
+            // Never surface this in statusDiv — that line reports sync/bulk progress.
+            console.error(`[Downloader] Auto-cache failed for "${song.title || song.id}":`, e);
+        } finally {
+            autoCacheInFlight.delete(song.id);
+        }
+    }
+
     function setPlaybackState(state) {
         document.dispatchEvent(new CustomEvent('bettersuno:playback-state', {
             detail: { state }
@@ -2003,6 +2047,8 @@
 
             currentPlayingSongId = song.id;
             markSongPlayed(song.id);
+            // Fire-and-forget: caching must never delay or block playback.
+            void autoCachePlayedSong(song);
 
             // Reset progress immediately so next/previous track changes are reflected
             // before metadata/timeupdate events arrive for the new source.
@@ -2444,6 +2490,7 @@
         getImageBlobFromIDB,
         loadPreferenceFromIDB,
         loadSongsFromIDB,
+        MAX_DB_SIZE_BYTES,
         saveAudioBlobToIDB,
         saveImageBlobToIDB,
         savePreferenceToIDB,
@@ -2781,6 +2828,19 @@
     // Load from storage on startup
     loadFromStorage();
 
+    // Settings > "Auto-cache songs I listen to" can be toggled while this page stays
+    // open, and must also work with the panel closed, so re-read the pref on demand
+    // instead of only at startup.
+    document.addEventListener('bettersuno:settings-changed', (event) => {
+        if (event?.detail && typeof event.detail.autoCacheListened === 'boolean') {
+            autoCacheListenedEnabled = event.detail.autoCacheListened;
+            return;
+        }
+        void (async () => {
+            autoCacheListenedEnabled = (await loadPreferenceFromIDB(AUTO_CACHE_PREF_KEY)) === true;
+        })();
+    });
+
     // Save format preference when changed
     formatRadios.forEach(r => r.addEventListener("change", async () => {
         await savePreferenceToIDB('sunoFormat', getSelectedFormat());
@@ -3066,15 +3126,17 @@
         try {
             console.log('[Downloader] Loading songs from IndexedDB...');
             // Load songs and cached audio IDs from IndexedDB in parallel
-            const [savedSongs, savedFormat, savedSongsMeta, cachedIds, savedSyncMeta, persistedSelectedPlaylist] = await Promise.all([
+            const [savedSongs, savedFormat, savedSongsMeta, cachedIds, savedSyncMeta, persistedSelectedPlaylist, savedAutoCache] = await Promise.all([
                 loadSongsFromIDB(),
                 loadPreferenceFromIDB('sunoFormat'),
                 loadPreferenceFromIDB('sunoSongsList'),
                 getAllCachedSongIdsFromIDB(),
                 loadPreferenceFromIDB(SYNC_META_KEY),
-                loadPreferenceFromIDB(SELECTED_PLAYLIST_KEY)
+                loadPreferenceFromIDB(SELECTED_PLAYLIST_KEY),
+                loadPreferenceFromIDB(AUTO_CACHE_PREF_KEY)
             ]);
             savedSelectedPlaylist = persistedSelectedPlaylist || '';
+            autoCacheListenedEnabled = savedAutoCache === true;
 
             cachedSongIds = new Set(cachedIds);
             syncMeta = {
@@ -3454,6 +3516,48 @@
         } catch (e) {}
     }
 
+    // Single place that writes audio (+ thumbnail) into the local DB. Shared by the
+    // manual "Save to DB" bulk loop and by autoCachePlayedSong so the two paths can
+    // never drift apart.
+    //
+    // `autoCached` marks the record so evictStaleBlobs leaves it alone (a track the
+    // user listened to is the one thing the cache exists to keep); it never changes
+    // the bytes, only the record's lifecycle.
+    async function cacheSongInDb(song, { autoCached = false } = {}) {
+        const desiredFormat = getSelectedFormat();
+        let blob;
+        if (song.audio_encrypted || isSunoDecoyUrl(song.audio_url)) {
+            // The resolver persists the blob itself, so the flag has to travel with it.
+            blob = await resolveEncryptedAudioBlob(song, { autoCached });
+        } else {
+            const audioUrl = getPlayableAudioUrl(song, desiredFormat) || song.audio_url;
+            const response = await fetch(audioUrl);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            blob = await response.blob();
+            await saveAudioBlobToIDB(song.id, blob, { autoCached });
+        }
+
+        // Also cache a small thumbnail (64px wide via CDN query param)
+        const rawImageUrl = song.image_url || song.thumbnail_url || song.cover_image_url || song.artwork_url || null;
+        if (rawImageUrl) {
+            try {
+                const thumbUrl = rawImageUrl.split('?')[0] + '?width=64';
+                const imgResponse = await fetch(thumbUrl);
+                if (imgResponse.ok) {
+                    const imgBlob = await imgResponse.blob();
+                    await saveImageBlobToIDB(song.id, imgBlob);
+                    delete song.image_cache_bust;
+                }
+            } catch (imgErr) {
+                // thumbnail failure is non-fatal
+            }
+        }
+
+        cachedSongIds.add(song.id);
+        songItemCache.delete(song.id); // force re-creation so cached thumbnail is shown
+        void refreshDbUsageDisplay();
+    }
+
     async function cacheAllSongs() {
         const activeSongs = getActiveSongs();
         if (activeSongs.length === 0) {
@@ -3490,38 +3594,8 @@
             statusDiv.innerText = `💾 Saving to DB ${cached + failed + 1}/${total}: ${song.title || 'Untitled'}...`;
 
             try {
-                const desiredFormat = getSelectedFormat();
-                let blob;
-                if (song.audio_encrypted || isSunoDecoyUrl(song.audio_url)) {
-                    blob = await resolveEncryptedAudioBlob(song);
-                } else {
-                    const audioUrl = getPlayableAudioUrl(song, desiredFormat) || song.audio_url;
-                    const response = await fetch(audioUrl);
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    blob = await response.blob();
-                }
-                await saveAudioBlobToIDB(song.id, blob);
-
-                // Also cache a small thumbnail (64px wide via CDN query param)
-                const rawImageUrl = song.image_url || song.thumbnail_url || song.cover_image_url || song.artwork_url || null;
-                if (rawImageUrl) {
-                    try {
-                        const thumbUrl = rawImageUrl.split('?')[0] + '?width=64';
-                        const imgResponse = await fetch(thumbUrl);
-                        if (imgResponse.ok) {
-                            const imgBlob = await imgResponse.blob();
-                            await saveImageBlobToIDB(song.id, imgBlob);
-                            delete song.image_cache_bust;
-                        }
-                    } catch (imgErr) {
-                        // thumbnail failure is non-fatal
-                    }
-                }
-
-                cachedSongIds.add(song.id);
-                songItemCache.delete(song.id); // force re-creation so cached thumbnail is shown
+                await cacheSongInDb(song);
                 cached++;
-                void refreshDbUsageDisplay();
             } catch (e) {
                 failed++;
                 console.error(`[Downloader] Failed to cache "${song.title}":`, e);

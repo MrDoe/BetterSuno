@@ -225,6 +225,15 @@
             <label>Local DB Usage:</label>
             <div id="bettersuno-db-usage" class="bettersuno-setting-value">Calculating...</div>
           </div>
+          <div class="bettersuno-setting-row">
+            <label>
+              <input type="checkbox" id="bettersuno-setting-auto-cache" class="bettersuno-setting" data-key="autoCacheListened" />
+              💾 Auto-cache songs I listen to
+            </label>
+          </div>
+          <div class="bettersuno-setting-row">
+            <div id="bettersuno-setting-auto-cache-note" class="bettersuno-setting-value">Saves a song to the local database the first time you play it, so it plays offline later. Already-cached songs are skipped, and the 500 MB local DB limit still applies.</div>
+          </div>
           <div class="bettersuno-setting-row" style="display: inline-flex; gap: 5px; align-items: flex-start;">
             <button id="bettersuno-fetch-songs-btn" class="btn-primary" style="padding: 8px 16px; cursor: pointer;">Refetch Library</button>
             <button id="bettersuno-stop-fetch-btn" class="btn-stop" style="padding: 8px 16px; cursor: pointer; display: none;">Stop Fetch</button>
@@ -827,6 +836,20 @@
 
   // ---- Load settings from background ----
   function loadSettings() {
+    // This one lives in IndexedDB (userPreferences) rather than background state: it
+    // is a purely local playback behaviour that downloader.js reads directly.
+    // content-idb.js is injected immediately after this file, and loadSettings only
+    // runs on a user click, so the API is present by now.
+    void (async () => {
+      try {
+        const autoCache = await window.BetterSunoIDB?.loadPreferenceFromIDB('autoCacheListened');
+        const autoCacheCheckbox = document.getElementById('bettersuno-setting-auto-cache');
+        if (autoCacheCheckbox) autoCacheCheckbox.checked = autoCache === true;
+      } catch (e) {
+        console.debug('[BetterSuno] Could not load auto-cache setting');
+      }
+    })();
+
     try {
       chrome.runtime.sendMessage({ type: 'contentGetState' }, (response) => {
         if (chrome.runtime.lastError || !response) return;
@@ -854,6 +877,26 @@
   const settingsControls = root.querySelectorAll('.bettersuno-setting');
   settingsControls.forEach(control => {
     control.addEventListener('change', () => {
+      // Auto-cache is local-only (IndexedDB), not part of the background settings
+      // broadcast below, so it handles itself and returns.
+      if (control.id === 'bettersuno-setting-auto-cache') {
+        const enabled = !!control.checked;
+        void (async () => {
+          try {
+            await window.BetterSunoIDB?.savePreferenceToIDB('autoCacheListened', enabled);
+            // downloader.js listens for this so the change applies without a reload,
+            // and it keeps working while the panel is closed.
+            document.dispatchEvent(new CustomEvent('bettersuno:settings-changed', {
+              detail: { autoCacheListened: enabled }
+            }));
+            console.log('[BetterSuno] Auto-cache listened songs:', enabled ? 'on' : 'off');
+          } catch (e) {
+            console.debug('[BetterSuno] Could not save auto-cache setting');
+          }
+        })();
+        return;
+      }
+
       const intervalSeconds = Number(document.getElementById('bettersuno-setting-interval').value);
       const intervalMs = intervalSeconds * 1000;
       const desktopNotifications = document.getElementById('bettersuno-setting-desktop').checked;

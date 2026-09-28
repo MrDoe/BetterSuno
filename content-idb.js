@@ -124,10 +124,14 @@
         }
     }
 
-    async function saveAudioBlobToIDB(songId, blob) {
+    // `autoCached` marks a record that was cached because the user listened to the
+    // song (Settings > "Auto-cache songs I listen to"). Such records survive the age
+    // based sweep in evictStaleBlobs, because auto-caching exists precisely to keep
+    // those tracks around; they are still removable by the size cap and by the UI.
+    async function saveAudioBlobToIDB(songId, blob, { autoCached = false } = {}) {
         try {
             await withObjectStore('audioCache', 'readwrite', (store) => {
-                store.put({ songId, blob, timestamp: Date.now() });
+                store.put({ songId, blob, timestamp: Date.now(), auto_cached: autoCached === true });
             });
             scheduleEviction();
         } catch (e) {
@@ -228,7 +232,12 @@
             try {
                 const records = await getAllRecordsFromStore(storeName);
                 const stale = records
-                    .filter(r => !r.timestamp || (now - r.timestamp) > maxAge)
+                    // `auto_cached` audio is exempt from the age sweep - see
+                    // saveAudioBlobToIDB. Size eviction still applies to it.
+                    .filter(r => {
+                        if (storeName === 'audioCache' && r.auto_cached === true) return false;
+                        return !r.timestamp || (now - r.timestamp) > maxAge;
+                    })
                     .slice(0, EVICT_BATCH_SIZE);
 
                 for (const r of stale) {
@@ -362,6 +371,7 @@
     }
 
     window.BetterSunoIDB = {
+        MAX_DB_SIZE_BYTES,
         clearStore,
         deleteAudioBlobFromIDB,
         deleteImageBlobFromIDB,
