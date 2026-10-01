@@ -34,6 +34,7 @@ const RUNTIME_SOURCES = [
   'lib/ownership.js',
   'lib/util.js',
   'lib/suno-audio.js',
+  'lib/library-stats.js',
 ];
 
 // The extension's own test files, syntax-checked alongside the sources.
