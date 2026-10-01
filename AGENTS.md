@@ -5,6 +5,9 @@
 - `npm run verify` → syntax check + `node:test` + build both targets. **Run this before declaring any change done** (see Verification below).
 - Load unpacked: `dist/chrome/` (`chrome://extensions`) or `dist/firefox/` (`about:debugging#/runtime/this-firefox`).
 
+### Release scripts
+`npm run bump:firefox` bumps `package.json` + `manifest.json` to the next patch and rebuilds the Firefox target. It does **not** sign. It was called `sign-firefox` until 2026-10-01, which overclaimed: running it silently took 2.5.0 → 2.5.1 during the 2.5.0 release. Do not rename it back — the name is the fix, not the behaviour. Actual signing is `npx web-ext sign --config ~/.web-ext-config.mjs --source-dir dist/firefox --artifacts-dir web-ext-artifacts --no-input`; note that `web-ext sign` also *submits* to AMO.
+
 ## Architecture
 | File | Role |
 |------|------|

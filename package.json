@@ -7,7 +7,7 @@
     "test": "node --test tests/*.test.js",
     "verify": "node scripts/verify.mjs",
     "publish": "npm version patch --no-git-tag-version && node -e \"const p=require('./package.json');const m=require('./manifest.json');m.version=p.version;require('fs').writeFileSync('./manifest.json',JSON.stringify(m,null,2)+'\\n')\" && node build.js",
-    "sign-firefox": "npm version patch --no-git-tag-version && node -e \"const p=require('./package.json');const m=require('./manifest.json');m.version=p.version;require('fs').writeFileSync('./manifest.json',JSON.stringify(m,null,2)+'\\n')\" && node build.js firefox",
+    "bump:firefox": "npm version patch --no-git-tag-version && node -e \"const p=require('./package.json');const m=require('./manifest.json');m.version=p.version;require('fs').writeFileSync('./manifest.json',JSON.stringify(m,null,2)+'\\n')\" && node build.js firefox",
     "pack:chrome": "node build.js chrome && node scripts/publish-chrome.mjs --pack-only",
     "publish:chrome": "node build.js chrome && node scripts/publish-chrome.mjs",
     "setup:cws": "bash scripts/setup-cws-credentials.sh"
