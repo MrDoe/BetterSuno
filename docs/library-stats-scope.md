@@ -1,8 +1,9 @@
 # Library Stats — Scope
 
-**Status:** scope for review. No implementation until this is agreed.
+**Status:** approved 2026-10-01. Not yet implemented.
 **Date:** 2026-10-01
-**Reviewed by:** pending (peer session `ses_f1658ab75ffeGBqnl1AveBSezW`)
+**Reviewed by:** peer session `ses_f1658ab75ffeGBqnl1AveBSezW` — all eight citations in the verified
+table re-checked and confirmed; approved as written
 
 ## The premise, and the trap in it
 
@@ -80,23 +81,44 @@ playlist record. Their divergence is the interesting case (a track you keep play
 your library), so the panel should present one number, not two that look like independent
 confirmation.
 
-## Scope decision required: `last_played_at`
+## Decision: add `last_played_at` now — as a field only, not a feature
 
-Recency is not implementable today and adding the field is **cheaper now than later**, because it
-would only ever be correct going forward.
+Agreed on review. The field and the recency UI are **separate decisions with different expiry
+dates**, and the original draft of this document wrongly bundled them into one question, which made
+the cheap thing look contingent on the expensive one.
 
-Proposed: add `last_played_at`, written on every play, **independent of `markSongPlayed`'s early
-return**. Inheriting that return would reproduce the exact blind spot we are trying to remove —
-the timestamp would be silently missing for exactly the songs that are most interesting.
+- **Field: add now.** ~2 lines. Its only cost is that existing records have no value, and that cost
+  grows with every release skipped — the value is only ever correct going forward, so it decays
+  exactly as fast as it is deferred. Adding it forecloses nothing.
+- **Filter: defer.** The "recently played" *filter* is a UI decision depending on sort machinery
+  and on what "recently" should mean when records only have the field for six weeks. Its cost is
+  roughly flat. Do not build it yet.
+
+Write it on every play, **independent of `markSongPlayed`'s early return** — see the implementation
+notes below for why that matters more than it looks.
 
 Two consequences to accept:
 1. Existing records have no value. No migration is worth it; the field is correct from release on.
-2. It should be added to `areSongDetailsEqual`, so a play re-renders the panel in place. Without
-   it the value is still written correctly on disk — it just goes stale in the UI. See the verified
-   table above for why those are different failures.
+2. Add it to `areSongDetailsEqual`, so a play re-renders the panel in place. Without it the value is
+   still written correctly on disk — it just goes stale in the UI. See the verified table above for
+   why those are different failures.
 
-**Decision needed:** add now (unlocks "recently played" as a *filter*, reusing existing sort
-machinery) or defer (ships no recency feature this cycle).
+## Implementation notes (requirements, not suggestions)
+
+**1. The write must be visibly separate from `markSongPlayed`, with a comment saying why.**
+The instinct at implementation time will be to fold it into `bumpPlayCount`, where it looks
+tidier. Folding it in reintroduces `markSongPlayed`'s early return as the blind spot, and does so
+in a way that reads as *good* engineering — which is what makes it dangerous. The comment must name
+the early return as the reason the write lives elsewhere, not merely state its location.
+
+**2. The UI copy must carry a comment naming the qualifier it has to keep.**
+The copy is simultaneously the load-bearing part of this feature *and* the part no test touches.
+Those compound: a later edit that drops "via the BetterSuno player" leaves every number
+arithmetically correct while the panel quietly claims something broader — reintroducing precisely
+the artifact this scope exists to prevent, with the suite green throughout. A one-line comment beside
+the string is proportionate insurance for whoever edits it without reading this document.
+
+Both notes belong in this document as well as the code, so the reasoning survives a refactor.
 
 ## Shape
 
