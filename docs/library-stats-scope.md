@@ -23,23 +23,31 @@ the numbers do *not* mean as on what they do.
 | No play timestamp exists anywhere | `grep -rE "last_played\|played_at"` → 0 hits | verified |
 | `timestamp` is a record-write marker, not a play time | `content-idb.js:134`, moves on every metadata refresh | verified |
 | `markSongPlayed` early-returns `false` for songs absent from `allSongs`/`playlistSongs` | `downloader.js:1927` | verified |
-| `mergeSongMetadata` spreads `existingSong`, so unknown local fields survive | `downloader.js:669`, `:690` | verified |
+| The object returned by `mergeSongMetadata` spreads `...existingSong`, so local-only fields survive a merge. **The spread is inside the `return`, below the reaction-state resolution** — not at the top of the function | `downloader.js:689-690` | verified |
 | `areSongDetailsEqual` compares `play_count`, `is_stem`, `model_name` | `downloader.js:646-667` | verified |
 | `audioCache` records are `{songId, blob, timestamp, auto_cached}` | `content-idb.js:134` | verified |
-| **`areSongDetailsEqual` does not gate persistence** — at both call sites (`:3311`, `:3385`) it only drives a counter / `changedIds`, which in turn only drives `applyFilter` + `saveToStorage` | `:3311`, `:3385`, `:3413` | verified |
+| **`changedIds` gates `saveToStorage()`** at `:3413` (`if (changedIds.size > 0)`), with the `applyFilter` re-render inside that same block | `:3385`, `:3413` | verified |
 
-### The last row matters more than it looks
+### The last two rows matter more than they look
 
-Asked whether a `last_played_at` bump would be swallowed by a library sync: **no.** The save is not
-gated by the equality check, and `mergeSongMetadata`'s `...existingSong` spread preserves a
-local-only field regardless. The real consequence is narrower: a change the equality function does
-not compare will not trigger `applyFilter`, so the panel would not refresh in place — the same
-behaviour `play_count` already has by being in the comparison set. Failure mode is **cosmetic, not
-data loss**. The field therefore still belongs in the comparison set, but the reason is "so the UI
-updates without a reload", not "or the write is lost".
+Asked whether a `last_played_at` bump would be swallowed by a library sync. The precise answer
+separates two things that are easy to conflate:
 
-*(Both function names above were named by the peer from recall rather than a fresh read; I then read
-both bodies, which is why this row is marked verified.)*
+- **The record survives.** `mergeSongMetadata`'s returned object spreads `...existingSong`, so a
+  local-only field is preserved regardless of what the equality check compares.
+- **The save is gated.** `changedIds` — populated from `areSongDetailsEqual` — gates
+  `saveToStorage()`. A field the comparison ignores will not, by itself, trigger a write from this
+  path, nor re-render the filter.
+
+So the failure mode is **not data loss**. It is a field that is correct on disk and stale in the
+panel — arguably worse to diagnose, because nothing looks broken. `last_played_at` therefore
+belongs in the comparison set, and the reason is "so the panel refreshes without a reload", not
+"or the write is lost".
+
+*(Both function names were first named by the peer from recall rather than a fresh read; both bodies
+were then read, which is why these rows are marked verified. Corrected after peer review: an earlier
+draft said the merge "begins with" the spread, and that `changedIds` merely "drives" the save —
+both inaccurate, and both would have been misread by anyone grepping at the top of the function.)*
 
 ## Peer-reported, NOT re-verified at implementation time
 
@@ -83,8 +91,9 @@ the timestamp would be silently missing for exactly the songs that are most inte
 
 Two consequences to accept:
 1. Existing records have no value. No migration is worth it; the field is correct from release on.
-2. It should be added to `areSongDetailsEqual`, so a play refreshes the panel in place. Note this
-   is a UI-refresh concern, **not** a persistence concern — see the verified table above.
+2. It should be added to `areSongDetailsEqual`, so a play re-renders the panel in place. Without
+   it the value is still written correctly on disk — it just goes stale in the UI. See the verified
+   table above for why those are different failures.
 
 **Decision needed:** add now (unlocks "recently played" as a *filter*, reusing existing sort
 machinery) or defer (ships no recency feature this cycle).
