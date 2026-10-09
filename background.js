@@ -18,7 +18,17 @@ import {
 import {
   isSongExplicitlyKnownToBeOtherArtist,
 } from './lib/ownership.js';
-import { normalizeHandle, pickFirstNonEmptyString } from './lib/util.js';
+import {
+  inferAudioExtension,
+  replaceFilenameExtension,
+  verifyAudioDownloadFilename,
+} from './lib/audio-filename.js';
+import {
+  decodeDataUrl,
+  isDataUrl,
+  normalizeHandle,
+  pickFirstNonEmptyString,
+} from './lib/util.js';
 import {
   resolveGenWavUrl,
   resolveLegacySunoDownloadUrl,
@@ -2059,7 +2069,12 @@ async function fetchFeedV3WithRetry(currentToken, body, { maxRetries = 5, initia
 // returns 404 — the V6 web client reads the library from the unified feed
 // (`/api/project/feed`), and `/api/feed/v3` (still used by the MCP server)
 // exposes the same clips with `{ clips, next_cursor }` pagination.
-async function fetchLibraryPageWithRetry(currentToken, cursor, pageSize, signal, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'library' } = {}) {
+// The caller owns the page number: this helper is a single-page fetch with
+// retries, so it cannot know its own page. `page` is only used for log text,
+// but it is interpolated on every retry branch — an undeclared identifier
+// there throws a ReferenceError out of the retry loop before any result is
+// returned, which is what made a Refresh appear to do nothing.
+async function fetchLibraryPageWithRetry(currentToken, cursor, pageSize, page, signal, { maxRetries = 5, initialDelayMs = 1000, timeoutMs = 20000, logPrefix = 'library' } = {}) {
   let retries = 0;
   let delayMs = initialDelayMs;
   let renewed = false;
@@ -2096,12 +2111,27 @@ async function fetchLibraryPageWithRetry(currentToken, cursor, pageSize, signal,
         if (signal) {
           signal.removeEventListener('abort', onAbort);
         }
-        if (e instanceof TypeError) {
+        // A timeout on this page's own controller is NOT a user stop. Only the
+        // caller's `signal` being aborted means Stop was requested; the inner
+        // `controller` is just this page's 20s deadline. Re-throwing a timeout
+        // AbortError used to make fetchSongsList return silently, so a Refresh
+        // that hit one slow page did nothing at all: no fallback to the cursor
+        // fetch, no message, and a button stuck on "Stop".
+        const callerStopped = !!signal?.aborted;
+        const timedOutOnThisPage = controller.signal.aborted && !callerStopped;
+        if (!callerStopped && (e instanceof TypeError || timedOutOnThisPage)) {
           if (retries >= maxRetries) {
-            return { ok: false, status: 0, data: null, networkError: true, error: e.message };
+            return {
+              ok: false,
+              status: 0,
+              data: null,
+              networkError: !timedOutOnThisPage,
+              timeout: timedOutOnThisPage,
+              error: e.message
+            };
           }
           retries += 1;
-          log(`${logPrefix}: network error on page ${page} (${e.message}), waiting ${Math.round(delayMs / 1000)}s before retry ${retries}/${maxRetries}`);
+          log(`${logPrefix}: ${timedOutOnThisPage ? 'timeout' : 'network error'} on page ${page} (${e.message}), waiting ${Math.round(delayMs / 1000)}s before retry ${retries}/${maxRetries}`);
           await new Promise(resolve => setTimeout(resolve, delayMs));
           delayMs = Math.min(delayMs * 2, 30000);
           continue;
@@ -4526,19 +4556,61 @@ function normalizeLibraryClip(clip, currentUserId, currentUserIds) {
     is_liked: reactionState === 'like',
     is_stem: isStemClip(rawClip),
     upvote_count: upvoteCount,
+    // The library API is one of two sources for song records, and the UI reads
+    // these fields directly. A song that first arrives via this normalizer
+    // (Refresh / library sync) never gets them filled in later, because
+    // mergeSongs only merges metadata into songs that already exist locally.
+    // Without them the fresh song renders with no model or played chips, is
+    // invisible to the Model filter, and is wrongly excluded from the
+    // Unplayed filter.
+    play_count: normalizeLibraryPlayCount(
+      rawClip?.play_count ?? rawClip?.plays ?? rawClip?.playCount
+    ),
+    model_name: rawClip.model_name || null,
+    major_model_version: rawClip.major_model_version || null,
+    task: rawClip.metadata?.task || rawClip.task || null,
+    cover_clip_id: rawClip.metadata?.cover_clip_id || rawClip.cover_clip_id || null,
+    video_cover_url: rawClip?.video_cover_url
+      || rawClip?.metadata?.video_cover_url
+      || rawClip?.meta?.video_cover_url
+      || null,
     ...extractOwnershipMetadataFromClip(rawClip, currentUserId, currentUserIds)
   };
 }
 
+// Play counts arrive as 0 (never played) or a positive integer. Anything else
+// is "unknown", which must stay distinguishable from 0 — the Unplayed filter
+// passes on `play_count === 0` only, so collapsing unknown into 0 would show
+// already-played songs there, and collapsing it into null would hide new ones.
+function normalizeLibraryPlayCount(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return null;
+}
+
 async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly, options = {}) {
-  const { trackAbortController = true } = options;
+  const {
+    trackAbortController = true,
+    // When true, a truncated page is returned as { truncated, cursor, songs }
+    // instead of null so the caller can continue the crawl from it rather than
+    // re-fetching the same 100 clips as page 1. Without a next cursor there is
+    // nothing to continue from, so the null contract is kept.
+    reportTruncatedPage = false
+  } = options;
   const controller = new AbortController();
   if (trackAbortController) {
     activeFetchAbortController = controller;
   }
 
   try {
-    const response = await fetchLibraryPageWithRetry(token, null, BULK_LIBRARY_PAGE_SIZE, controller.signal, {
+    const response = await fetchLibraryPageWithRetry(token, null, BULK_LIBRARY_PAGE_SIZE, 'bulk', controller.signal, {
       logPrefix: 'bulk-library'
     });
 
@@ -4553,6 +4625,15 @@ async function fetchLibrarySongsBulk(token, userId, userIds, isPublicOnly, optio
     const mayBeTruncated = hasMore || (Number.isFinite(totalResults) && totalResults > clips.length) || clips.length >= BULK_LIBRARY_PAGE_SIZE;
 
     if (mayBeTruncated) {
+      if (reportTruncatedPage && data?.next_cursor != null) {
+        return {
+          truncated: true,
+          cursor: data.next_cursor,
+          songs: clips
+            .filter(clip => !isPublicOnly || clip?.is_public)
+            .map(clip => normalizeLibraryClip(clip, userId, userIds))
+        };
+      }
       return null;
     }
 
@@ -4572,7 +4653,17 @@ async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, opti
     pageSize = 100,
     maxPages = 200,
     trackAbortController = true,
-    logPrefix = 'library'
+    logPrefix = 'library',
+    // Optional per-page progress hook: onPage({ page, pageSongs, totalSongs, cursor }).
+    // Used by the Refresh path so a multi-page crawl reports progress instead of
+    // stalling silently; failures inside the hook must never break the crawl.
+    onPage = null,
+    // A page the caller already fetched (the bulk metadata-refresh call) plus
+    // the cursor that follows it. Seeding skips re-fetching it as page 1: for a
+    // 100+ song library that is one full round trip of the crawl, and the one
+    // that runs before any progress is visible.
+    seedSongs = null,
+    startCursor = null
   } = options;
 
   const controller = new AbortController();
@@ -4586,10 +4677,41 @@ async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, opti
       : null;
     const songs = [];
     const foundIds = new Set();
+    // Ids already accepted on earlier pages. A replayed cursor (same page twice)
+    // must not duplicate records downstream.
+    const seenIds = new Set();
 
-    let cursor = null;
-    for (let page = 1; page <= maxPages; page += 1) {
-      const response = await fetchLibraryPageWithRetry(token, cursor, pageSize, controller.signal, { logPrefix });
+    // Seed the crawl with the caller's page instead of re-fetching it. The seed
+    // is page 1, so the fetch loop below starts at page 2.
+    const canSeed = Array.isArray(seedSongs) && seedSongs.length > 0 && startCursor != null;
+    let cursor = canSeed ? startCursor : null;
+
+    if (canSeed) {
+      seedSongs.forEach(seed => {
+        if (!seed?.id || seenIds.has(seed.id)) {
+          return;
+        }
+        if (isPublicOnly && seed?.is_public === false) {
+          return;
+        }
+        if (normalizedTargetIds && !normalizedTargetIds.has(seed.id)) {
+          return;
+        }
+
+        songs.push(seed);
+        seenIds.add(seed.id);
+        if (normalizedTargetIds) {
+          foundIds.add(seed.id);
+        }
+      });
+
+      if (!cursor || (normalizedTargetIds && foundIds.size >= normalizedTargetIds.size)) {
+        return songs;
+      }
+    }
+
+    for (let page = canSeed ? 2 : 1; page <= maxPages; page += 1) {
+      const response = await fetchLibraryPageWithRetry(token, cursor, pageSize, page, controller.signal, { logPrefix });
 
       if (!response.ok) {
         throw new Error(`${logPrefix} failed with HTTP ${response.status}`);
@@ -4602,6 +4724,7 @@ async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, opti
         break;
       }
 
+      const pageSongs = [];
       clips.forEach(clip => {
         if (isPublicOnly && clip?.is_public === false) {
           return;
@@ -4612,15 +4735,29 @@ async function fetchLibrarySongsPaged(token, userId, userIds, isPublicOnly, opti
           return;
         }
 
+        if (seenIds.has(normalized.id)) {
+          return;
+        }
+
         if (normalizedTargetIds && !normalizedTargetIds.has(normalized.id)) {
           return;
         }
 
         songs.push(normalized);
+        pageSongs.push(normalized);
+        seenIds.add(normalized.id);
         if (normalizedTargetIds) {
           foundIds.add(normalized.id);
         }
       });
+
+      if (typeof onPage === 'function') {
+        try {
+          await onPage({ page, pageSongs, totalSongs: songs.length, cursor: data?.next_cursor ?? null });
+        } catch {
+          // Progress reporting must never break the crawl.
+        }
+      }
 
       cursor = data?.next_cursor ?? null;
       const foundAllTargets = normalizedTargetIds && foundIds.size >= normalizedTargetIds.size;
@@ -4728,7 +4865,11 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
         let bulkSongs = null;
 
         try {
-          bulkSongs = await fetchLibrarySongsBulk(token, userId, new Set(allIdentityIds), isPublicOnly);
+          // reportTruncatedPage: when the first page is full, keep those clips
+          // and their cursor so the crawl below continues from page 2. For a
+          // 100+ song library the bulk call used to be pure duplicate work in
+          // front of the whole crawl — and it ran before any visible progress.
+          bulkSongs = await fetchLibrarySongsBulk(token, userId, new Set(allIdentityIds), isPublicOnly, { reportTruncatedPage: true });
         } catch (err) {
           notifyTab({ action: "log", text: `ℹ️ Bulk library metadata refresh failed (${err.message}). Falling back to paged library fetch...` });
         }
@@ -4743,9 +4884,47 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
           return;
         }
 
-        notifyTab({ action: "log", text: "ℹ️ Bulk library metadata refresh appears truncated. Falling back to paged library fetch..." });
+        const seededPage = bulkSongs && bulkSongs.truncated ? bulkSongs : null;
+
+        if (!seededPage) {
+          notifyTab({ action: "log", text: "ℹ️ Bulk library metadata refresh appears truncated. Falling back to paged library fetch..." });
+        } else {
+          // The bulk page is page 1 of the crawl; stream it so the panel shows
+          // progress from the very first song instead of after a second request.
+          notifyTab({ action: "log", text: `📄 Library page 1 | ${seededPage.songs.length} songs` });
+          if (!stopFetchRequested) {
+            notifyTab({
+              action: "songs_page_update",
+              songs: seededPage.songs,
+              pageNum: 1,
+              totalSongs: seededPage.songs.length,
+              checkNewOnly: true
+            });
+          }
+        }
+
         const pagedSongs = await fetchLibrarySongsPaged(token, userId, new Set(allIdentityIds), isPublicOnly, {
-          logPrefix: 'refresh_library_metadata'
+          logPrefix: 'refresh_library_metadata',
+          seedSongs: seededPage ? seededPage.songs : null,
+          startCursor: seededPage ? seededPage.cursor : null,
+          onPage: ({ page, pageSongs, totalSongs }) => {
+            notifyTab({ action: "log", text: `📄 Library page ${page} | ${totalSongs} songs` });
+            // Stream this page's songs so the panel re-renders while the crawl
+            // runs: a large library shows progress instead of a silent stall, and
+            // songs already streamed are merged — the final songs_fetched below
+            // re-merges the cumulative list and adds 0 (runAddedCount accounting
+            // in downloader.js), so totals stay honest.
+            if (stopFetchRequested) {
+              return;
+            }
+            notifyTab({
+              action: "songs_page_update",
+              songs: pageSongs,
+              pageNum: page,
+              totalSongs,
+              checkNewOnly: true
+            });
+          }
         });
 
         if (stopFetchRequested) {
@@ -5457,6 +5636,13 @@ async function getDownloadTargetTabId() {
 }
 
 async function fetchDownloadPayload(url) {
+  if (isDataUrl(url)) {
+    // The downloads API rejects data: URLs on Firefox, and the
+    // download flow has seen fetch(data:) fail with "NetworkError
+    // when attempting to fetch resource" — decode locally instead.
+    return decodeDataUrl(url);
+  }
+
   const isRemoteUrl = /^https?:/i.test(String(url || ''));
   const token = isRemoteUrl ? await getApiTokenWithFallback('downloadViaInject') : null;
   const fetchOptions = {};
@@ -5541,47 +5727,19 @@ async function downloadViaInject(url, filename) {
   if (typeof tabId !== 'number') throw new Error('No Suno tab found for in-page download.');
 
   const payload = await fetchDownloadPayload(url);
-  await saveBytesInPage(tabId, payload.bytes, payload.mimeType, filename);
+  // Same verification as the desktop fallback in downloadSelectedSongs:
+  // the requested container (m4a/mp3) is only a hint — name the file
+  // after the content Suno actually served. Also repairs double
+  // extensions ("song.m4a.mp4") that browser download managers append
+  // from a blob's MIME type.
+  const verifiedFilename = verifyAudioDownloadFilename(filename, url, payload.mimeType);
+  await saveBytesInPage(tabId, payload.bytes, payload.mimeType, verifiedFilename);
   await sleep(150);
   return true;
 }
 
-function replaceFilenameExtension(filename, nextExtension) {
-  if (typeof filename !== 'string' || !filename) {
-    return filename;
-  }
-
-  const cleanExtension = String(nextExtension || '').trim().replace(/^\./, '').toLowerCase();
-  if (!cleanExtension) {
-    return filename;
-  }
-
-  return filename.replace(/\.[^.\/]+$/, `.${cleanExtension}`);
-}
-
-function inferAudioExtension(url, contentType, fallbackExtension = 'm4a') {
-  const normalizedType = String(contentType || '').toLowerCase();
-  if (normalizedType.includes('audio/wav') || normalizedType.includes('audio/x-wav') || normalizedType.includes('audio/wave')) {
-    return 'wav';
-  }
-  if (normalizedType.includes('audio/mpeg') || normalizedType.includes('audio/mp3')) {
-    return 'mp3';
-  }
-  if (normalizedType.includes('audio/mp4') || normalizedType.includes('audio/x-m4a')) {
-    return 'm4a';
-  }
-  if (normalizedType.includes('audio/ogg')) {
-    return 'ogg';
-  }
-
-  const normalizedUrl = String(url || '').split('?')[0].toLowerCase();
-  const extensionMatch = normalizedUrl.match(/\.([a-z0-9]{2,5})$/i);
-  if (extensionMatch?.[1]) {
-    return extensionMatch[1].toLowerCase();
-  }
-
-  return String(fallbackExtension || 'm4a').toLowerCase();
-}
+// (replaceFilenameExtension / inferAudioExtension moved to
+// lib/audio-filename.js so node:test can import them.)
 
 async function fetchResourceBlob(url, token) {
   const attempts = [];
@@ -5692,6 +5850,12 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
   }
 
   async function downloadOneFile(url, filename) {
+    if (isDataUrl(url)) {
+      // The downloads API rejects data: URLs on Firefox — route
+      // them to the in-page save path, which decodes locally.
+      return await downloadViaInject(url, filename);
+    }
+
     if (isAndroid && isFirefox) {
       return await downloadViaInject(url, filename);
     }
@@ -6069,18 +6233,14 @@ async function downloadSelectedSongs(folderName, songs, format = 'm4a', jobId = 
         }
       }
 
-      // 2. Download Lyrics (Blob/Data URL approach)
+      // 2. Download Lyrics (saved as bytes via the live Suno tab —
+      // Firefox's downloads API rejects data: URLs, so never
+      // round-trip the text through a data: URL at all)
       if (shouldDownloadLyrics && (song.lyrics || song.metadata?.prompt)) {
         const lyrics = song.lyrics || song.metadata?.prompt;
-        const blob = new Blob([lyrics], { type: 'text/plain' });
-        const reader = new FileReader();
-        const lyricsDataUrl = await new Promise((resolve) => {
-          reader.onload = () => resolve(reader.result);
-          reader.readAsDataURL(blob);
-        });
         const baseName = `${safeTitle}_${song.id.slice(-4)}.txt`;
         const filename = buildDownloadFilename(baseName);
-        await downloadOneFile(lyricsDataUrl, filename);
+        await saveDownloadBytes(new TextEncoder().encode(lyrics), 'text/plain', filename);
         downloadedSomething = true;
         downloadedFileCount += 1;
       }

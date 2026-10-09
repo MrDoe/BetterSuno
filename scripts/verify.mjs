@@ -30,6 +30,7 @@ const RUNTIME_SOURCES = [
   'offscreen.js',
   'build.js',
   'lib/auth-state.js',
+  'lib/audio-filename.js',
   'lib/identity.js',
   'lib/ownership.js',
   'lib/util.js',

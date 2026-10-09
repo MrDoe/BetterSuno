@@ -18,7 +18,7 @@
 | `content-idb.js` / `idb-store.js` | Frontend / background IndexedDB wrappers (same DB, separate contexts). |
 | `idb-helpers.js` | Shared IDB utils. |
 | `offscreen.js` | Chrome-only offscreen polling doc. |
-| `lib/auth-state.js` `lib/identity.js` `lib/ownership.js` `lib/util.js` | **Pure logic** (auth allowlists, JWT claim decoding, ownership gate, string helpers), imported by `background.js`. Split out so `node:test` can import it — the service worker cannot be. New pure logic goes here. |
+| `lib/auth-state.js` `lib/identity.js` `lib/ownership.js` `lib/util.js` `lib/audio-filename.js` | **Pure logic** (auth allowlists, JWT claim decoding, ownership gate, string helpers, audio download filename rules), imported by `background.js`. Split out so `node:test` can import it — the service worker cannot be. New pure logic goes here. |
 | `build.js` | Copies `SHARED_FILES` + `SHARED_DIRS`; `verifyRelativeImports()` fails the build when a module is not shipped. |
 
 Content scripts ↔ `background.js` via `chrome.runtime.sendMessage`. `content.js` builds the DOM, `downloader.js` consumes it.
@@ -107,6 +107,14 @@ ALWAYS use OpenCodeRAG tools before reading or editing:
 - **Fix quirks** — `update_quirk(id, ...)` / `delete_quirk(id)` when a stored quirk is outdated or wrong
 
 If no results, run `opencode-rag index`.
+
+### Decision model (`make_decision`)
+
+- Classify, route, or score short text with the local tev1 model (`state` + 1-64 questions).
+- Question types: `choice` (options map to descriptions), `noul` (true/false probability), `score` (ordered rubric levels, lowest first).
+- Keep `state` short (~2k-token context); add a `none` option when no listed option may fit.
+- Never use it as the only check for a high-stakes decision.
+- With `decision.routeBeforeAsking` enabled: route option choices through `make_decision` before asking the user; ask the user only when the model is undecided (low confidence) or the choice is preference-based.
 
 ### Decision tree — ALWAYS follow this order
 1. User mentions code behavior/architecture → `search_semantic(query)`

@@ -131,6 +131,15 @@
       "timeoutMs": 180000
     }
   },
+  "decision": {
+    "enabled": true,
+    "provider": "ollama",
+    "baseUrl": "http://127.0.0.1:11434/api",
+    "model": "tev1:0.8b",
+    "timeoutMs": 120000,
+    "keepAlive": "30m",
+    "routeBeforeAsking": true
+  },
   "description": {
     "enabled": true,
     "provider": "openai",

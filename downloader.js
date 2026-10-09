@@ -2893,7 +2893,14 @@
             throw new Error('Invalid download payload');
         }
 
-        const blob = new Blob([payload], { type: mimeType || 'application/octet-stream' });
+        // Always application/octet-stream: the filename (anchor.download)
+        // already carries the correct extension, and Firefox for Android
+        // appends the extension it maps from the blob's MIME type
+        // (audio/mp4 -> .mp4), producing double extensions like
+        // "song.m4a.mp4". An opaque blob type keeps the filename
+        // authoritative. (The mimeType parameter is kept for the message
+        // shape but must not influence the saved filename.)
+        const blob = new Blob([payload], { type: 'application/octet-stream' });
         const objectUrl = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
         anchor.href = objectUrl;
@@ -3231,6 +3238,27 @@
         }
     }
 
+    // A streaming crawl merges once per `songs_page_update`, and every merge used
+    // to persist the whole library — every song, lyrics included — to IndexedDB,
+    // plus three more writes and a usage recount. That is five full-library
+    // writes for a 500-song refresh, serializing megabytes while the fetch loop
+    // is still running. Coalesce them into one write, flushed when the run ends
+    // (songs_fetched / fetch_stopped / fetch_error every set currentFetchMode
+    // back to 'idle', so all three paths flush).
+    let pendingLibrarySave = false;
+
+    function scheduleLibrarySave() {
+        pendingLibrarySave = true;
+    }
+
+    function flushLibrarySave() {
+        if (!pendingLibrarySave) {
+            return;
+        }
+        pendingLibrarySave = false;
+        void saveToStorage();
+    }
+
     async function saveFilterPreferences() {
         try {
             await savePreferenceToIDB('sunoFilterLiked', filterLiked.checked);
@@ -3344,7 +3372,9 @@
                 preserveScroll: true,
                 minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
             });
-            void saveToStorage();
+            // One coalesced write for the whole run instead of one per page;
+            // flushed when the run ends.
+            scheduleLibrarySave();
         }
 
         if (staleImageSongIds.length > 0) {
@@ -4959,6 +4989,7 @@
             }
             currentFetchMode = 'idle';
             currentMetadataRefreshRequested = false;
+            flushLibrarySave();
         }
         if (message.action === "fetch_stopped") {
             setFetchUiState(false);
@@ -4969,6 +5000,8 @@
             statusDiv.innerText = "⏹️ Fetch stopped by user – song list may be incomplete.";
             currentFetchMode = 'idle';
             currentMetadataRefreshRequested = false;
+            // A partial crawl's merges are still worth persisting once.
+            flushLibrarySave();
         }
         if (message.action === "fetch_error") {
             setFetchUiState(false);
@@ -4980,6 +5013,8 @@
             statusDiv.innerText = message.error;
             currentFetchMode = 'idle';
             currentMetadataRefreshRequested = false;
+            // Pages that did merge before the failure are still persisted.
+            flushLibrarySave();
         }
 
         if (message.action === "download_complete") {
