@@ -10,6 +10,10 @@
   const NOTIFICATION_RENDER_BATCH_SIZE = 25;
   let currentNotifications = [];
   let renderedNotificationCount = 0;
+  // Identity of the notification array currently materialised in the DOM. Lets
+  // renderNotifications() recognise a re-delivered identical list and skip the
+  // rebuild — the main per-tab idle cost when several Suno tabs are open.
+  let renderedNotificationFingerprint = null;
   let notificationsSentinel = null;
   let notificationsObserver = null;
   let olderNotificationsFetching = false;
@@ -784,7 +788,33 @@
   
   // ---- Toggle panel ----
   bell.addEventListener('click', () => {
-    panelOpen = !panelOpen;
+    // What the user can actually see right now — not the cached `panelOpen`.
+    // Two failure modes made a tap look like a no-op, both typical of Firefox
+    // Android after the phone wakes from sleep:
+    //   1. our root was detached (Suno's SPA replacing body children, or a
+    //      back/forward-cache restore), so the whole subtree was not rendered;
+    //   2. `panelOpen` survived the restore as `true` while the panel was not
+    //      actually open, so a blind toggle *closed* it instead of opening it.
+    // Reading the pre-tap visible state makes the tap open the panel whenever it
+    // is not on screen, and only close it when it genuinely is.
+    //
+    // The `open` class is deliberately NOT the test: content.css gives
+    // `#bettersuno-panel.open { display: flex !important }`, and ensureVisibility()
+    // re-adds the class whenever `panelOpen` is still true — so the class survives
+    // every way Suno can make us invisible. A third failure mode is exactly that:
+    // root is still attached and still carries `.open`, but Suno stripped root's
+    // inline styles so nothing is on screen. Measuring the panel distinguishes
+    // "class says open" from "user can see the panel"; a detached or display:none
+    // subtree measures 0. Do not replace this with offsetParent — both root and
+    // panel are `position: fixed !important`, which always reports null.
+    const wasVisiblyOpen = document.documentElement.contains(root)
+      && panel.getBoundingClientRect().height > 0;
+
+    // Re-assert first: re-attaches a detached root, so the gesture that reports
+    // the problem is also the gesture that repairs it.
+    ensureVisibility();
+
+    panelOpen = !wasVisiblyOpen;
     panel.classList.toggle('open', panelOpen);
     if (panelOpen) {
       // refresh state immediately when the panel opens
@@ -1238,7 +1268,32 @@
     updateNotificationSentinelState();
   }
 
+  // Cheap identity for "the list we are already showing". Rebuilding the
+  // notification list is the most expensive thing this content script does while
+  // idle: it discards every DOM node and rebuilds from the full array. That array
+  // is re-delivered to *every* extension context on each background poll, and
+  // `refreshInterval` additionally asks for it every 30s *per tab* — so with
+  // BetterSuno open in several tabs every background tab re-rendered an identical
+  // list over and over. Compare this fingerprint and bail out when nothing moved.
+  function notificationFingerprint(notifications) {
+    if (!notifications || notifications.length === 0) {
+      return 'empty';
+    }
+
+    const newest = notifications[0];
+    const oldest = notifications[notifications.length - 1];
+    return [
+      notifications.length,
+      newest?.id || '',
+      oldest?.id || '',
+      newest?.updated_at || newest?.notified_at || newest?.created_at || ''
+    ].join('|');
+  }
+
   function renderNotifications(notifications, enabled) {
+    const nextFingerprint = notificationFingerprint(notifications);
+    const unchanged = nextFingerprint === renderedNotificationFingerprint;
+
     currentNotifCount = (notifications || []).length;
 
     // Badge (only show new ones since last panel open)
@@ -1250,8 +1305,21 @@
       badge.style.display = 'none';
     }
 
+    // Keep the model in sync with the array we were handed even when the DOM work
+    // is skipped: `loadOlderNotifications()` paginates from the last entry of
+    // `currentNotifications` and the sentinel derives its "load N more" count from
+    // it, so both must keep describing the list that is actually on screen. The
+    // badge above is recomputed unconditionally for the same reason.
+    if (unchanged) {
+      currentNotifications = notifications || [];
+      return;
+    }
+
+    renderedNotificationFingerprint = nextFingerprint;
+
     if (!notifications || notifications.length === 0) {
       list.textContent = '';
+      currentNotifications = [];
       const emptyDiv = document.createElement('div');
       emptyDiv.className = 'bettersuno-empty';
       emptyDiv.textContent = 'No notifications yet';
@@ -1371,6 +1439,10 @@
         const appendStart = currentNotifications.length;
         currentNotifications = newNotifs;
         currentNotifCount = newNotifs.length;
+        // The DOM now holds the grown array, so the fingerprint must follow it —
+        // otherwise the next identical broadcast would look "changed" and force a
+        // full rebuild, throwing away the incremental render we just did.
+        renderedNotificationFingerprint = notificationFingerprint(newNotifs);
         const end = Math.min(appendStart + NOTIFICATION_RENDER_BATCH_SIZE, currentNotifications.length);
         if (appendStart < end) {
           const fragment = document.createDocumentFragment();
@@ -1442,23 +1514,51 @@
     visibilityCheckInterval = setInterval(ensureVisibility, intervalMs);
   }
 
-  restartVisibilityCheckInterval();
-  ensureVisibility();
-
   // Watch for DOM mutations and re-assert visibility after route/layout changes.
-  // Debounced to avoid hammering on the many rapid mutations Suno's SPA produces.
+  //
+  // `root`'s only parent is document.body, so watching body's *direct children*
+  // is sufficient to notice every way our root can leave the document. The
+  // previous observer watched documentElement with `subtree: true`, which fired
+  // on essentially every mutation Suno's SPA makes; each burst debounced into an
+  // ensureVisibility() call that rewrote 14 `!important` inline styles (10 on
+  // root, 4 on bell). On a busy page that was dozens of style-invalidating writes
+  // per second *per open tab*,
+  // which is what made the extension crawl with BetterSuno open in several tabs.
   let _visibilityDebounce = null;
-  const visibilityObserver = new MutationObserver(() => {
+  const visibilityObserver = new MutationObserver((records) => {
+    const couldDetachRoot = records.some((record) => {
+      if (record.target !== document.body) return false;
+      for (let i = 0; i < record.removedNodes.length; i += 1) {
+        const node = record.removedNodes[i];
+        if (node === root || (typeof node.contains === 'function' && node.contains(root))) {
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (!couldDetachRoot) return;
+
     clearTimeout(_visibilityDebounce);
     _visibilityDebounce = setTimeout(() => {
       _visibilityDebounce = null;
       ensureVisibility();
     }, 50);
   });
-  visibilityObserver.observe(document.documentElement, {
-    childList: true,
-    subtree: true
-  });
+
+  // Arming is idempotent so it can be re-run on `pageshow`: a Firefox Android tab
+  // is commonly restored from the back/forward cache after the phone wakes from
+  // sleep, and that path used to leave us permanently without a self-heal.
+  function armVisibilityWatchers() {
+    restartVisibilityCheckInterval();
+    ensureVisibility();
+    if (document.body) {
+      visibilityObserver.disconnect();
+      visibilityObserver.observe(document.body, { childList: true });
+    }
+  }
+
+  armVisibilityWatchers();
 
   // ============================================================================
   // Notifications Initialization — (downloader.js handles Library tab)
@@ -1471,6 +1571,21 @@
   document.addEventListener('visibilitychange', () => {
     restartVisibilityCheckInterval();
     if (document.visibilityState === 'visible') {
+      requestAndroidFirefoxKeepAliveState();
+    }
+  }, { passive: true });
+
+  // A `pagehide` tears the visibility watchers down (the keepalive must not run
+  // inside a frozen back/forward-cache page), so a `pageshow` has to put them
+  // back. Without this, waking the phone restored a live document with no
+  // MutationObserver and no interval — and if Suno's SPA had dropped our root in
+  // the meantime, tapping the bell toggled a class on a detached subtree and
+  // nothing appeared. armVisibilityWatchers() is idempotent, so the initial
+  // pageshow (non-persisted) is harmless.
+  window.addEventListener('pageshow', (event) => {
+    armVisibilityWatchers();
+    if (event.persisted) {
+      claimRefreshHost().catch(() => {});
       requestAndroidFirefoxKeepAliveState();
     }
   }, { passive: true });
