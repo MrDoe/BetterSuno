@@ -28,6 +28,24 @@ DB `BetterSunoicationsDB` v3: `tabStates`, `songsList`, `userPreferences`, `audi
 
 `content-fetcher.js` keeps private copies of `normalizeHandle`/`pickFirstNonEmptyString` **on purpose**: it is MAIN-world injected as a classic script and cannot use ES module imports. Don't "deduplicate" it.
 
+## Library scroll performance
+The library list is **infinite-scroll, not virtualised** — rows are appended in batches of 40 and never removed, so any per-row work scales with the library size. Four rules keep scrolling smooth (fixed 2026-10-20, guard: `tests/library-scroll-performance.test.js`):
+
+- **Never measure rows.** `getVisibleSongIds()` reads the `IntersectionObserver` map (`visibleSongItems`, root `songList`, `rootMargin: '80px 0px 80px 0px'` — the same 80px buffer the old `getBoundingClientRect` scan used). The old scan survives as `scanVisibleSongIdsByRect()` but only answers until the observer has reported once (`visibleObserverHasReported`); do not put a `getBoundingClientRect()` loop back on the scroll path.
+- **Two song→element maps, not one.** `songItemCache` = creation cache (`delete` means "rebuild next time"; the old element is still rendered). `renderedSongItems` = the element currently in the DOM. Anything refreshing a rendered row must read `renderedSongItems` and guard with `oldItem.parentNode !== songList` — reading `songItemCache` breaks the 💾 chip that `autoCachePlayedSong()` paints.
+- **Look songs up by id, never by `.find()`.** `getSongLookupMap()` is memoised on the identity of `allSongs`/`playlistSongs` (both are always reassigned, never mutated in place). `getActiveSongs().find(...)` per visible id was O(songs × visible).
+- **The list is reconciled, not rebuilt.** `renderSongList` diffs the old and new element sequences by element identity (longest common prefix + suffix) and only moves the rows outside that window. `getOrCreateSongListItem()` reuses the cached row and **carries the thumbnail element over** when the image did not change — that is what stops a metadata refresh from re-requesting the cover art. The row count is rounded **up** to a whole batch of 40, exactly like the old chunk loop; rounding down would silently shrink the list on every metadata update.
+- **`content-visibility: auto` needs `contain-intrinsic-size`.** Without it a skipped `.song-item` collapses to zero height and the list jumps. Intrinsic size = real row height: 65px desktop, 93px under `max-width: 768px`; the test derives both from `content.css`, so changing the thumbnail or padding without updating them fails the build.
+
+`updateSelectedCount()` is a single pass, and the infinite-scroll path skips it (`renderSongListChunk(count, { updateCount: false })`) — appending rows of the same filtered list cannot change the counters.
+
+## Song ownership in the panel
+`isSongFromOtherArtist` decides the 👤 badge, the Download button, and whether a song can be saved as a file. Three rules (fixed 2026-10-20, guard: `tests/library-ownership.test.js`):
+
+- The API's `is_owned_by_current_user` is authoritative in **both** directions. It used to be checked only for `false`, so an explicitly-owned song could still be misclassified.
+- The background sends the resolved identity with the library payload (`currentUserIds` on `songs_fetched` / `songs_page_update`). Compare `owner_user_id` against that **set** — the identity carries several aliases (Suno uuid, Clerk id, `sub`) and a clip's owner id is only one of them.
+- **Never block on a guess.** With no identity evidence nothing is blocked: a false block costs the user their own song (same policy as `lib/ownership.js`). The old `sunoUserId = allSongs[0].owner_user_id` heuristic is gone — one foreign song at the head of the list misclassified the whole library.
+
 ## Verification
 `npm run verify` = `node --check` on every runtime source and test file, `node --test tests/*.test.js`, then `node build.js` for both targets. CI runs the same (`.github/workflows/verify.yml`). There are no runtime or dev dependencies; the toolchain is pure Node.
 

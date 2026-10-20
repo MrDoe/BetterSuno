@@ -1550,6 +1550,16 @@
   font-size: 12px !important;
   transition: background 0.15s !important;
   color: var(--bettersuno-text) !important;
+  /* Off-screen rows skip layout and paint. Without this the browser lays out
+     every one of the (potentially thousands of) library rows on every frame of
+     a scroll. The intrinsic height matches the real row height (44px
+     thumbnail + 10px padding + 1px border), so the scroll height stays exact
+     and the scrollbar does not jump while rows are still unrendered.
+     `content-visibility` and `contain-intrinsic-size` shipped together, so a
+     browser that understands one understands the other — without the intrinsic
+     size a skipped row would collapse to zero height. */
+  content-visibility: auto !important;
+  contain-intrinsic-size: 65px !important;
 }
 
 #bettersuno-panel .song-item:last-child {
@@ -2287,6 +2297,8 @@
   #bettersuno-panel .song-item {
     gap: 12px !important;
     padding: 6px !important;
+    /* Mobile rows are taller (52×80 thumbnail + 6px padding + 1px border). */
+    contain-intrinsic-size: 93px !important;
   }
 
   #bettersuno-panel .song-thumbnail {

@@ -1272,6 +1272,31 @@
   // notification list is the most expensive thing this content script does while
   // idle: it discards every DOM node and rebuilds from the full array. That array
   // is re-delivered to *every* extension context on each background poll, and
+  // The fields of one notification that the list actually renders. A
+  // fingerprint over these (rather than over the id alone) is what makes the
+  // "unchanged" check meaningful: an entry whose content changed while its id
+  // and timestamp did not would otherwise keep the stale DOM.
+  function notificationSignature(entry) {
+    if (!entry || typeof entry !== 'object') return '';
+
+    const users = entry.user_profiles || [];
+    const first = users[0] || {};
+
+    return [
+      entry.id || '',
+      entry.notification_type || entry.type || '',
+      entry.content_title || '',
+      entry.content_id || '',
+      entry.content_image_url || '',
+      entry.content_message || '',
+      entry.total_users ?? users.length,
+      first.display_name || '',
+      first.handle || '',
+      first.avatar_image_url || '',
+      entry.updated_at || entry.created_at || entry.notified_at || ''
+    ].join('\u0001');
+  }
+
   // `refreshInterval` additionally asks for it every 30s *per tab* — so with
   // BetterSuno open in several tabs every background tab re-rendered an identical
   // list over and over. Compare this fingerprint and bail out when nothing moved.
@@ -1286,7 +1311,14 @@
       notifications.length,
       newest?.id || '',
       oldest?.id || '',
-      newest?.updated_at || newest?.notified_at || newest?.created_at || ''
+      newest?.updated_at || newest?.notified_at || newest?.created_at || '',
+      // A signature of every entry. The length and the two end ids alone
+      // cannot tell a list whose *middle* entry changed from the list that is
+      // on screen: a notification edited, or its content resolved server-side,
+      // without bumping `updated_at`. The DOM would then keep the stale item.
+      // An O(n) pass over a few hundred entries every 30 s is trivially
+      // cheaper than the teardown it buys back.
+      notifications.map(notificationSignature).join('\u0002')
     ].join('|');
   }
 
@@ -1465,6 +1497,50 @@
   });
 
   // ---- Ensure button stays visible (combat Suno's CSS/JS that may hide it) ----
+
+  // The inline styles that keep the panel and its bell on top of Suno's page.
+  // They are re-asserted with `!important` because a stylesheet rule cannot
+  // outrank an important inline declaration.
+  const ROOT_INLINE_STYLES = [
+    ['position', 'fixed'],
+    ['top', '20px'],
+    ['left', '20px'],
+    ['right', 'auto'],
+    ['bottom', 'auto'],
+    ['display', 'block'],
+    ['visibility', 'visible'],
+    ['opacity', '1'],
+    ['pointer-events', 'auto'],
+    ['z-index', '9999999999']
+  ];
+
+  const BELL_INLINE_STYLES = [
+    ['display', 'flex'],
+    ['visibility', 'visible'],
+    ['opacity', '1'],
+    ['pointer-events', 'auto']
+  ];
+
+  // Re-assert only the declarations that are actually wrong.
+  //
+  // Writing all 14 of them unconditionally meant every check invalidated the
+  // style of the whole subtree, which was the per-tab idle cost: with
+  // BetterSuno open in several tabs the extension crawled. Reading an inline
+  // declaration is free — it does not touch layout — so the check is now
+  // 14 string comparisons and zero writes in the common case.
+  function applyImportantStyles(element, styles) {
+    if (!element) return;
+    for (let i = 0; i < styles.length; i += 1) {
+      const property = styles[i][0];
+      const value = styles[i][1];
+      if (element.style.getPropertyValue(property) === value
+        && element.style.getPropertyPriority(property) === 'important') {
+        continue;
+      }
+      element.style.setProperty(property, value, 'important');
+    }
+  }
+
   function ensureVisibility() {
     // Re-attach root if Suno replaces/removes body children during SPA updates.
     if (!document.documentElement.contains(root)) {
@@ -1475,21 +1551,15 @@
       }
     }
 
-    root.style.setProperty('position', 'fixed', 'important');
-    root.style.setProperty('top', '20px', 'important');
-    root.style.setProperty('left', '20px', 'important');
-    root.style.setProperty('right', 'auto', 'important');
-    root.style.setProperty('bottom', 'auto', 'important');
-    root.style.setProperty('display', 'block', 'important');
-    root.style.setProperty('visibility', 'visible', 'important');
-    root.style.setProperty('opacity', '1', 'important');
-    root.style.setProperty('pointer-events', 'auto', 'important');
-    root.style.setProperty('z-index', '9999999999', 'important');
+    // The observer is anchored to a *node*, so if Suno replaces the body node
+    // itself the watcher would be watching a detached node and never fire
+    // again. Re-anchor it as soon as the identity of document.body changes.
+    if (document.body && document.body !== observedBody) {
+      observeBody();
+    }
 
-    bell.style.setProperty('display', 'flex', 'important');
-    bell.style.setProperty('visibility', 'visible', 'important');
-    bell.style.setProperty('opacity', '1', 'important');
-    bell.style.setProperty('pointer-events', 'auto', 'important');
+    applyImportantStyles(root, ROOT_INLINE_STYLES);
+    applyImportantStyles(bell, BELL_INLINE_STYLES);
 
     if (panelOpen) {
       panel.classList.add('open');
@@ -1539,12 +1609,40 @@
 
     if (!couldDetachRoot) return;
 
+    scheduleVisibilityHeal();
+  });
+
+  // A style strip is the other way the panel can disappear while `root` stays
+  // attached: Suno resets `root.style` or removes the attribute, and the
+  // `!important` inline declarations go with it.
+  //
+  // The old whole-document observer noticed this "for free", because any SPA
+  // churn debounced into ensureVisibility(). Narrowing the observer to body
+  // childList dropped that, and recovery then waited for the 30 s/120 s
+  // interval. Watching root's own `style` attribute restores the fast path
+  // without going back to watching the whole document — and now that
+  // ensureVisibility() only writes what is actually wrong, the heal is cheap.
+  const rootStyleObserver = new MutationObserver(() => {
+    scheduleVisibilityHeal();
+  });
+
+  function scheduleVisibilityHeal() {
     clearTimeout(_visibilityDebounce);
     _visibilityDebounce = setTimeout(() => {
       _visibilityDebounce = null;
       ensureVisibility();
     }, 50);
-  });
+  }
+
+  // The body node the observer is currently anchored to.
+  let observedBody = null;
+
+  function observeBody() {
+    if (!document.body) return;
+    visibilityObserver.disconnect();
+    visibilityObserver.observe(document.body, { childList: true });
+    observedBody = document.body;
+  }
 
   // Arming is idempotent so it can be re-run on `pageshow`: a Firefox Android tab
   // is commonly restored from the back/forward cache after the phone wakes from
@@ -1552,10 +1650,11 @@
   function armVisibilityWatchers() {
     restartVisibilityCheckInterval();
     ensureVisibility();
-    if (document.body) {
-      visibilityObserver.disconnect();
-      visibilityObserver.observe(document.body, { childList: true });
-    }
+    observeBody();
+    // Watch our own inline styles: if Suno strips them, the panel disappears
+    // even though `root` is still attached.
+    rootStyleObserver.disconnect();
+    rootStyleObserver.observe(root, { attributes: true, attributeFilter: ['style'] });
   }
 
   armVisibilityWatchers();
@@ -1596,6 +1695,7 @@
       visibilityCheckInterval = null;
     }
     visibilityObserver.disconnect();
+    rootStyleObserver.disconnect();
 
     androidFirefoxKeepAliveManager.stop();
 

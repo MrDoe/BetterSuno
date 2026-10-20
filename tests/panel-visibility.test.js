@@ -44,6 +44,31 @@ async function readContentSource() {
   return fs.readFile(path.join(ROOT, 'content.js'), 'utf8');
 }
 
+// The same source, cached for the helpers that run synchronously.
+let cachedContentSource = null;
+function readContentSourceSync() {
+  assert.ok(cachedContentSource, 'call readContentSource() before the synchronous helper');
+  return cachedContentSource;
+}
+
+// The `[ ... ]` literal that follows a needle.
+function extractArrayAfter(source, needle, what) {
+  const at = source.indexOf(needle);
+  assert.notEqual(at, -1, `expected content.js to contain ${what}`);
+  const open = source.indexOf('[', at + needle.length);
+  assert.notEqual(open, -1, `expected an array literal for ${what}`);
+
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === '[') depth += 1;
+    else if (source[i] === ']') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  assert.fail(`unbalanced brackets while extracting ${what}`);
+}
+
 // Return the `{ ... }` block starting at `openIndex`, brace-matched while
 // skipping string literals, template literals and comments. A naive scan would
 // stop at a `}` inside a string; this file has deeply nested handlers, so being
@@ -96,6 +121,38 @@ function extractBlockAfter(source, needle, what) {
   return extractBraceBlock(source, source.indexOf('{', at + needle.length), what);
 }
 
+// `notificationFingerprint` calls `notificationSignature`, so both have to be
+// composed into one scope.
+function loadNotificationFingerprint(source) {
+  const signature = functionSource(source, 'notificationSignature');
+  const fingerprint = functionSource(source, 'notificationFingerprint');
+  return new Function(`${signature}\n${fingerprint}\nreturn notificationFingerprint;`)();
+}
+
+// The source text of a real `function name(...) { ... }` declaration, so it can
+// be composed into another scope.
+function functionSource(source, name) {
+  const decl = new RegExp(`^\\s*function ${name}\\(`, 'm');
+  const match = source.match(decl);
+  assert.ok(match, `expected content.js to declare ${name}`);
+
+  const start = source.indexOf('function ' + name, match.index);
+  const parenOpen = source.indexOf('(', start);
+  let parenDepth = 0;
+  let parenClose = -1;
+  for (let i = parenOpen; i < source.length; i += 1) {
+    if (source[i] === '(') parenDepth += 1;
+    else if (source[i] === ')') {
+      parenDepth -= 1;
+      if (parenDepth === 0) { parenClose = i; break; }
+    }
+  }
+  assert.notEqual(parenClose, -1, `expected ${name} to have a parameter list`);
+
+  return source.slice(start, parenClose + 1)
+    + extractBraceBlock(source, source.indexOf('{', parenClose), name);
+}
+
 // Turn a real `function name(...) { ... }` declaration into a callable. Only
 // valid for self-contained functions that do not close over the IIFE scope.
 function loadFunction(source, name) {
@@ -138,10 +195,21 @@ test('a pageshow handler re-arms the visibility watchers torn down on pagehide',
   const arm = extractBlockAfter(source, 'function armVisibilityWatchers()', 'armVisibilityWatchers');
   assert.match(arm, /restartVisibilityCheckInterval\(\)/,
     're-arming must restore the periodic visibility check');
-  assert.match(arm, /visibilityObserver\.observe\(/,
+  assert.match(arm, /observeBody\(\)/,
     're-arming must resume observing the DOM for a detached root');
-  assert.match(arm, /visibilityObserver\.disconnect\(\)/,
-    're-arming must disconnect first so repeated arming cannot stack observers');
+  assert.match(arm, /rootStyleObserver\.observe\(/,
+    're-arming must resume watching our own inline styles');
+
+  // The body watcher lives in its own function so it can also be re-anchored
+  // when Suno replaces the body node itself. It must still watch body's direct
+  // children only.
+  const observeBody = extractBlockAfter(source, 'function observeBody()', 'observeBody');
+  assert.match(observeBody, /visibilityObserver\.observe\(document\.body/,
+    'the body watcher must observe document.body');
+  assert.match(observeBody, /visibilityObserver\.disconnect\(\)/,
+    're-anchoring must disconnect first so observers cannot stack');
+  assert.match(observeBody, /observedBody\s*=\s*document\.body/,
+    'the anchored body node must be remembered, or a body replacement goes unnoticed');
 
   const pageshow = extractBlockAfter(source, "addEventListener('pageshow'", 'the pageshow handler');
   assert.match(pageshow, /armVisibilityWatchers\(\)/,
@@ -366,7 +434,7 @@ test('tapping the bell opens a panel that carries .open but renders nothing', as
 
 test('notificationFingerprint recognises a re-delivered identical list', async () => {
   const source = await readContentSource();
-  const fingerprint = loadFunction(source, 'notificationFingerprint');
+  const fingerprint = loadNotificationFingerprint(source);
 
   const list = [
     { id: 'n3', updated_at: '2026-10-11T10:00:00Z' },
@@ -452,4 +520,209 @@ test('renderNotifications clears currentNotifications for an empty list', async 
   const clearAt = fn.indexOf('currentNotifications = []', emptyAt);
   assert.ok(emptyAt !== -1 && clearAt !== -1 && emptyAt < clearAt,
     'the empty-list branch must reset currentNotifications');
+});
+// ---------------------------------------------------------------------------
+// The self-heal must be cheap, and it must not go blind
+// ---------------------------------------------------------------------------
+
+// The inline styles content.js keeps on `root` and `bell`.
+const EXPECTED_ROOT_STYLES = {
+  position: 'fixed',
+  top: '20px',
+  left: '20px',
+  right: 'auto',
+  bottom: 'auto',
+  display: 'block',
+  visibility: 'visible',
+  opacity: '1',
+  'pointer-events': 'auto',
+  'z-index': '9999999999'
+};
+
+const EXPECTED_BELL_STYLES = {
+  display: 'flex',
+  visibility: 'visible',
+  opacity: '1',
+  'pointer-events': 'auto'
+};
+
+// An element whose inline style can be read, written and stripped, and which
+// records every write.
+function createStyledElement(initialStyles) {
+  const props = new Map();
+  for (const [name, value] of Object.entries(initialStyles)) {
+    props.set(name, { value, priority: 'important' });
+  }
+
+  const writes = [];
+  return {
+    writes,
+    strip(name) { props.delete(name); },
+    style: {
+      getPropertyValue(name) { return props.get(name)?.value ?? ''; },
+      getPropertyPriority(name) { return props.get(name)?.priority ?? ''; },
+      setProperty(name, value, priority) {
+        writes.push(name);
+        props.set(name, { value, priority });
+      }
+    }
+  };
+}
+
+// Run the real ensureVisibility() against stubbed elements.
+function runEnsureVisibility({ stripRoot, stripBell, body, observedBody }) {
+  const source = readContentSourceSync();
+
+  const root = createStyledElement({ ...EXPECTED_ROOT_STYLES });
+  const bell = createStyledElement({ ...EXPECTED_BELL_STYLES });
+  if (stripRoot) root.strip(stripRoot);
+  if (stripBell) bell.strip(stripBell);
+
+  const calls = { observeBody: 0, addedOpenClass: 0 };
+
+  const applyStyles = functionSource(source, 'applyImportantStyles');
+  const ensureVisibility = functionSource(source, 'ensureVisibility');
+  const rootStylesArray = extractArrayAfter(source, 'const ROOT_INLINE_STYLES =', 'ROOT_INLINE_STYLES');
+  const bellStylesArray = extractArrayAfter(source, 'const BELL_INLINE_STYLES =', 'BELL_INLINE_STYLES');
+
+  const keys = ['root', 'bell', 'panel', 'panelOpen', 'document', 'observedBody', 'observeBody'];
+  const stubs = {
+    root,
+    bell,
+    panel: { classList: { add() { calls.addedOpenClass += 1; } } },
+    panelOpen: false,
+    document: {
+      documentElement: { contains: () => true },
+      body
+    },
+    observedBody,
+    observeBody() { calls.observeBody += 1; }
+  };
+
+  const ensure = new Function(
+    ...keys,
+    `
+    const ROOT_INLINE_STYLES = ${rootStylesArray};
+    const BELL_INLINE_STYLES = ${bellStylesArray};
+    ${applyStyles}
+    ${ensureVisibility}
+    return ensureVisibility;
+    `
+  )(...keys.map(k => stubs[k]));
+
+  ensure();
+  return { root, bell, calls };
+}
+
+test('ensureVisibility only writes the declarations that are actually wrong', async () => {
+  cachedContentSource = await readContentSource();
+
+  // The old implementation rewrote all 14 `!important` inline styles on every
+  // check. Each write invalidates the style of the whole subtree, which was
+  // the per-tab idle cost: with BetterSuno open in several tabs the extension
+  // crawled. Reading an inline declaration is free.
+  const body = { name: 'body' };
+  const healthy = runEnsureVisibility({ body, observedBody: body });
+
+  assert.deepEqual(healthy.root.writes, [],
+    'a healthy root must not be rewritten at all');
+  assert.deepEqual(healthy.bell.writes, [],
+    'a healthy bell must not be rewritten at all');
+
+  // Now strip one declaration and check that exactly that one is restored.
+  const body2 = { name: 'body' };
+  const stripped = runEnsureVisibility({ stripRoot: 'z-index', body: body2, observedBody: body2 });
+
+  assert.deepEqual(stripped.root.writes, ['z-index'],
+    'only the stripped declaration may be rewritten');
+  assert.deepEqual(stripped.bell.writes, [],
+    'the bell must not be rewritten when it is healthy');
+
+  const body3 = { name: 'body' };
+  const strippedBell = runEnsureVisibility({ stripBell: 'opacity', body: body3, observedBody: body3 });
+
+  assert.deepEqual(strippedBell.bell.writes, ['opacity'],
+    'only the stripped bell declaration may be rewritten');
+  assert.deepEqual(strippedBell.root.writes, [],
+    'the root must not be rewritten when it is healthy');
+});
+
+test('the body watcher is re-anchored when Suno replaces the body node', async () => {
+  cachedContentSource = await readContentSource();
+
+  // The observer watches a *node*. If Suno replaces document.body itself, the
+  // watcher would be watching a detached node and never fire again — the DOM
+  // churn watcher would be permanently blind.
+  const result = runEnsureVisibility({
+    body: { name: 'new-body' },
+    observedBody: { name: 'old-body' }
+  });
+
+  assert.equal(result.calls.observeBody, 1,
+    'a replaced body node must re-anchor the observer');
+});
+
+test('the body watcher is not re-anchored while the body is the same node', async () => {
+  cachedContentSource = await readContentSource();
+
+  const body = { name: 'body' };
+  const result = runEnsureVisibility({ body, observedBody: body });
+
+  assert.equal(result.calls.observeBody, 0,
+    'the observer must not be re-anchored on every check');
+});
+
+test('a stripped inline style is healed without waiting for the interval', async () => {
+  const source = await readContentSource();
+
+  // The old whole-document observer re-asserted the styles on any SPA churn,
+  // which is why the panel felt self-healing. Narrowing the observer to body
+  // childList dropped that, and recovery then waited for the 30s/120s interval.
+  // Watching root's own style attribute restores the fast path.
+  assert.match(source, /rootStyleObserver = new MutationObserver\(/,
+    'the style watcher must exist');
+  assert.match(source, /rootStyleObserver\.observe\(root,\s*\{ attributes: true, attributeFilter: \['style'\] \}\)/,
+    'root\'s style attribute must be watched so a style strip is healed quickly');
+});
+
+test('the notification fingerprint notices a changed middle entry', async () => {
+  const source = await readContentSource();
+  const fingerprint = loadNotificationFingerprint(source);
+
+  const list = [
+    { id: 'n3', updated_at: '2026-10-11T10:00:00Z' },
+    { id: 'n2', updated_at: '2026-10-11T09:00:00Z' },
+    { id: 'n1', updated_at: '2026-10-11T08:00:00Z' }
+  ];
+
+  // A middle entry changed, but the length, both end ids and the newest
+  // timestamp are identical. The old fingerprint could not see this, so the DOM
+  // kept the stale item.
+  const middleChanged = [
+    { id: 'n3', updated_at: '2026-10-11T10:00:00Z' },
+    { id: 'n2', updated_at: '2026-10-11T09:30:00Z' },
+    { id: 'n1', updated_at: '2026-10-11T08:00:00Z' }
+  ];
+
+  assert.notEqual(fingerprint(middleChanged), fingerprint(list),
+    'a changed middle entry must change the fingerprint — the DOM would keep the stale item');
+
+  // A middle entry that is *replaced* (same length, different id) must also be
+  // visible to the fingerprint.
+  const middleReplaced = [
+    { id: 'n3', updated_at: '2026-10-11T10:00:00Z' },
+    { id: 'nX', updated_at: '2026-10-11T09:00:00Z' },
+    { id: 'n1', updated_at: '2026-10-11T08:00:00Z' }
+  ];
+  assert.notEqual(fingerprint(middleReplaced), fingerprint(list),
+    'a replaced middle entry must change the fingerprint');
+
+  // The existing transitions must still be covered.
+  assert.notEqual(fingerprint([...list, { id: 'n0' }]), fingerprint(list),
+    'an appended older notification must change the fingerprint');
+  assert.notEqual(fingerprint(list.slice(1)), fingerprint(list),
+    'a list missing its newest entry must not share a fingerprint');
+  assert.equal(fingerprint([]), 'empty');
+  assert.equal(fingerprint(null), 'empty');
+  assert.equal(fingerprint(undefined), 'empty');
 });

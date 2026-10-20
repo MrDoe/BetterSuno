@@ -94,6 +94,10 @@ let isDownloading = false;
 let currentDownloadJobId = 0;
 let activeDownloadIds = new Set();
 let downloadRequestorTabId = null;
+// Every id that belongs to the current user (the Suno uuid, the Clerk id, `sub`).
+// The library payload is normalised against this set, and it is sent to the
+// content script so it does not have to guess whose songs it is showing.
+let lastResolvedIdentityIds = [];
 const DOWNLOAD_STATE_KEY = 'sunoDownloadState';
 const AUTH_TOKEN_STORAGE_PREFIX = 'bettersunoAuthToken:';
 const TOKEN_MAX_AGE_MS = 45 * 60 * 1000;
@@ -3782,7 +3786,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       chrome.tabs.sendMessage(destTab, {
         action: "songs_fetched",
         songs: msg.songs,
-        checkNewOnly: msg.checkNewOnly
+        checkNewOnly: msg.checkNewOnly,
+        // The MAIN-world fetcher resolves no identity of its own, so the ids
+        // come from the last identity the background resolved. Without them the
+        // panel has to guess whose songs it is showing.
+        currentUserIds: lastResolvedIdentityIds
       }).catch(() => {});
     }
   }
@@ -3796,7 +3804,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         songs: msg.songs,
         pageNum: msg.pageNum,
         totalSongs: msg.totalSongs,
-        checkNewOnly: msg.checkNewOnly
+        checkNewOnly: msg.checkNewOnly,
+        currentUserIds: lastResolvedIdentityIds
       }).catch(() => {});
     }
   }
@@ -4828,6 +4837,10 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
     const identity = await fetchCurrentUserIdentity(token);
     const allIdentityIds = getIdentityIds(identity);
     const userId = allIdentityIds[0] || null;
+    // Remember the resolved identity: the content script needs it to tell the
+    // user's own songs from other artists', and the relay path below may have
+    // to attach it without resolving it again.
+    lastResolvedIdentityIds = allIdentityIds;
 
     if (!checkNewOnly) {
       notifyTab({ action: "log", text: "✅ Token found! Fetching songs list..." });
@@ -4844,7 +4857,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
 
         if (Array.isArray(bulkSongs)) {
           isFetching = false;
-          notifyTab({ action: "songs_fetched", songs: bulkSongs, checkNewOnly: false });
+          notifyTab({ action: "songs_fetched", songs: bulkSongs, checkNewOnly: false, currentUserIds: allIdentityIds });
           return;
         }
 
@@ -4880,7 +4893,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
 
         if (Array.isArray(bulkSongs)) {
           isFetching = false;
-          notifyTab({ action: "songs_fetched", songs: bulkSongs, checkNewOnly: true });
+          notifyTab({ action: "songs_fetched", songs: bulkSongs, checkNewOnly: true, currentUserIds: allIdentityIds });
           return;
         }
 
@@ -4898,7 +4911,8 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
               songs: seededPage.songs,
               pageNum: 1,
               totalSongs: seededPage.songs.length,
-              checkNewOnly: true
+              checkNewOnly: true,
+              currentUserIds: allIdentityIds
             });
           }
         }
@@ -4922,7 +4936,8 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
               songs: pageSongs,
               pageNum: page,
               totalSongs,
-              checkNewOnly: true
+              checkNewOnly: true,
+              currentUserIds: allIdentityIds
             });
           }
         });
@@ -4932,7 +4947,7 @@ async function fetchSongsList(isPublicOnly, maxPages, checkNewOnly = false, know
         }
 
         isFetching = false;
-        notifyTab({ action: "songs_fetched", songs: pagedSongs, checkNewOnly: true });
+        notifyTab({ action: "songs_fetched", songs: pagedSongs, checkNewOnly: true, currentUserIds: allIdentityIds });
         return;
       } catch (err) {
         if (err?.name === 'AbortError') {

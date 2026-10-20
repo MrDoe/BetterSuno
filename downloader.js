@@ -29,6 +29,21 @@
     let songListSentinel = null;
     let songListObserver = null;
     const songItemCache = new Map(); // songId → DOM element; reused on re-renders to prevent image reload
+    // Which rendered items are actually on screen. The browser does the
+    // intersection math for us, so scrolling no longer forces a layout read per
+    // item (the old scan called getBoundingClientRect() on every .song-item).
+    let songListVisibleObserver = null;
+    const visibleSongItems = new Map(); // songId → element inside the list viewport
+    // songId → the element that is *currently in the list DOM*. Distinct from
+    // songItemCache, which is the creation cache: songItemCache.delete() only
+    // means "build a fresh element next time", the old element stays rendered
+    // until the next list re-render (e.g. the 💾 chip after auto-caching).
+    const renderedSongItems = new Map();
+    let visibleObserverHasReported = false; // false ⇒ fall back to the rect scan
+    let songListScrollRafPending = false;
+    let songChunkRenderRafPending = false;
+    // songId → song, rebuilt only when the underlying collections are replaced.
+    let songLookupCache = { allSongsRef: null, playlistRef: null, map: new Map() };
     let metadataRefreshInFlight = false;
     const pendingMetadataRefreshIds = new Set();
     let metadataRefreshBlockedUntil = 0;
@@ -88,7 +103,11 @@
     metadataRefreshInFlight = false;
     let syncMeta = createDefaultSyncMeta();
     let playlistSongs = null; // Active playlist songs when a playlist is selected, else null
-    let sunoUserId = null; // Set from the first own song when My Songs are loaded
+    let sunoUserId = null; // Owner id of a known-own song; last-resort fallback
+    // Every id that belongs to the current user. The identity carries several
+    // aliases (the Suno uuid, the Clerk id, `sub`) and a clip's `owner_user_id`
+    // is only one of them, so this has to be a set, not a single id.
+    const sunoUserIds = new Set();
     let cachedPlaylists = [];
 
     function createDefaultSyncMeta() {
@@ -106,6 +125,30 @@
 
     function getActiveSongs() {
         return Array.isArray(playlistSongs) ? playlistSongs : allSongs;
+    }
+
+    // songId → song lookup for the visible-song refresh path.
+    //
+    // The old code did `getActiveSongs().find(s => s.id === id) ||
+    // allSongs.find(s => s.id === id)` per visible id, i.e. an O(songs ×
+    // visible) scan on every scroll tick. Both collections are always
+    // *reassigned* (never mutated in place), so keying the cache on the array
+    // identities keeps it correct while making the lookup O(1).
+    function getSongLookupMap() {
+        if (songLookupCache.allSongsRef === allSongs && songLookupCache.playlistRef === playlistSongs) {
+            return songLookupCache.map;
+        }
+
+        const map = new Map();
+        if (Array.isArray(allSongs)) {
+            allSongs.forEach(song => { if (song?.id) map.set(song.id, song); });
+        }
+        if (Array.isArray(playlistSongs)) {
+            playlistSongs.forEach(song => { if (song?.id) map.set(song.id, song); });
+        }
+
+        songLookupCache = { allSongsRef: allSongs, playlistRef: playlistSongs, map };
+        return map;
     }
 
     function getPlaylistSongsCacheKey(playlistId) {
@@ -326,9 +369,40 @@
 
 
     function isSongFromOtherArtist(song) {
+        // The API's own ownership flag is authoritative in *both* directions.
+        // It used to be checked only for `false`, so a song the API had
+        // explicitly marked as the user's own could still be misclassified by
+        // the owner-id comparison below.
+        if (song?.is_owned_by_current_user === true) return false;
         if (song?.is_owned_by_current_user === false) return true;
-        if (sunoUserId && song?.owner_user_id && song.owner_user_id !== sunoUserId) return true;
+
+        const ownerId = song?.owner_user_id;
+        if (!ownerId) return false;
+
+        // The resolved identity is authoritative when it is available.
+        if (sunoUserIds.size > 0) {
+            return !sunoUserIds.has(ownerId);
+        }
+
+        // Without a resolved identity, only an explicitly-owned song gives a
+        // safe owner id to compare against. Anything else is a guess, and a
+        // false block costs the user their own song (see lib/ownership.js).
+        if (sunoUserId && ownerId !== sunoUserId) return true;
         return false;
+    }
+
+    // The background resolves the current user's ids and sends them with the
+    // library payload. Recording them here is what lets the panel tell the
+    // user's own songs from other artists' without guessing.
+    function applyCurrentUserIds(ids) {
+        if (!Array.isArray(ids)) {
+            return;
+        }
+        ids.forEach((id) => {
+            if (typeof id === 'string' && id.trim()) {
+                sunoUserIds.add(id.trim());
+            }
+        });
     }
 
     function getSongDisplayTitle(song) {
@@ -363,8 +437,15 @@
     }
 
     function initSunoUserId() {
-        if (!sunoUserId && allSongs.length > 0) {
-            sunoUserId = allSongs[0].owner_user_id || null;
+        // Only a song the API explicitly marked as owned by the current user is
+        // a safe source for the fallback owner id. "The first song in the list"
+        // is a guess — one foreign song at the head used to misclassify the
+        // whole library, and the guess was sticky: it was never revisited, so
+        // the damage lasted for the whole session.
+        const owned = allSongs.find(song => song?.is_owned_by_current_user === true && song?.owner_user_id);
+        if (owned) {
+            sunoUserId = owned.owner_user_id;
+            sunoUserIds.add(owned.owner_user_id);
         }
     }
 
@@ -649,6 +730,7 @@
             (leftSong?.lyrics || '') === (rightSong?.lyrics || '') &&
             (leftSong?.audio_url || '') === (rightSong?.audio_url || '') &&
             (leftSong?.video_url || '') === (rightSong?.video_url || '') &&
+            (leftSong?.video_cover_url || '') === (rightSong?.video_cover_url || '') &&
             (leftSong?.image_url || '') === (rightSong?.image_url || '') &&
             (leftSong?.owner_user_id || '') === (rightSong?.owner_user_id || '') &&
             (leftSong?.owner_handle || '') === (rightSong?.owner_handle || '') &&
@@ -693,6 +775,11 @@
             audio_encrypted: freshSong.audio_encrypted ?? existingSong.audio_encrypted,
             media_urls: freshSong.media_urls?.length ? freshSong.media_urls : existingSong.media_urls,
             video_url: freshSong.video_url || existingSong.video_url,
+            // The cover-art video is a separate asset from the song video, and
+            // it is what the Player tab's "cover art" mode plays. It used to be
+            // missing here, so a metadata refresh silently dropped a cover video
+            // the song had gained.
+            video_cover_url: freshSong.video_cover_url || existingSong.video_cover_url,
             image_url: freshSong.image_url || existingSong.image_url,
             lyrics: freshSong.lyrics ?? existingSong.lyrics,
             is_public: typeof freshSong.is_public === 'boolean' ? freshSong.is_public : existingSong.is_public,
@@ -2613,6 +2700,28 @@
             return [];
         }
 
+        if (visibleSongItems.size > 0) {
+            return Array.from(visibleSongItems.keys());
+        }
+
+        // The observer has not reported anything. That is normal for the very
+        // first frame after a render, but it would also be true if the observer
+        // silently stopped working — so fall back to the old rect scan until the
+        // observer has proved itself at least once since the last render.
+        if (!visibleObserverHasReported) {
+            return scanVisibleSongIdsByRect();
+        }
+
+        return [];
+    }
+
+    // The pre-IntersectionObserver implementation, kept as a fallback. It costs
+    // one layout read per rendered item, so it must not run on the scroll path.
+    function scanVisibleSongIdsByRect() {
+        if (!songList) {
+            return [];
+        }
+
         const containerRect = songList.getBoundingClientRect();
         const bufferedTop = containerRect.top - 80;
         const bufferedBottom = containerRect.bottom + 80;
@@ -2634,24 +2743,18 @@
             return;
         }
 
-        const visibleItemsById = new Map();
-        songList.querySelectorAll('.song-item[data-song-id]').forEach((item) => {
-            const id = item.dataset.songId;
-            if (id) {
-                visibleItemsById.set(id, item);
-            }
-        });
-
-        const activeSongMap = new Map(getActiveSongs().map(song => [song.id, song]));
-        const allSongMap = new Map(allSongs.map(song => [song.id, song]));
+        const songLookup = getSongLookupMap();
 
         songIds.forEach(songId => {
-            const oldItem = visibleItemsById.get(songId);
-            if (!oldItem) {
+            // renderedSongItems is the authority on "which element is this song
+            // rendered as" — the old querySelectorAll over the list was
+            // O(rendered items) on every scroll tick.
+            const oldItem = renderedSongItems.get(songId);
+            if (!oldItem || oldItem.parentNode !== songList) {
                 return;
             }
 
-            const song = activeSongMap.get(songId) || allSongMap.get(songId);
+            const song = songLookup.get(songId);
             if (!song) {
                 return;
             }
@@ -2660,16 +2763,17 @@
                 return;
             }
 
-            const newItem = createSongListItem(song);
-            if ((oldItem.dataset.thumbnailSignature || '') === (newItem.dataset.thumbnailSignature || '')) {
-                const oldThumbnail = oldItem.querySelector('.song-thumbnail');
-                const newThumbnail = newItem.querySelector('.song-thumbnail');
-                if (oldThumbnail && newThumbnail && newThumbnail.parentNode === newItem) {
-                    newItem.replaceChild(oldThumbnail, newThumbnail);
-                }
+            const newItem = getOrCreateSongListItem(song);
+            if (newItem === oldItem) {
+                return;
             }
+
+            if (songListVisibleObserver) {
+                songListVisibleObserver.unobserve(oldItem);
+            }
+            oldItem.dataset.visibleObserved = '0';
             songList.replaceChild(newItem, oldItem);
-            songItemCache.set(songId, newItem);
+            renderedSongItems.set(songId, newItem);
         });
     }
 
@@ -2706,7 +2810,24 @@
     }
 
     if (songList) {
-        songList.addEventListener('scroll', scheduleVisibleSongRefresh);
+        // rAF-throttled: a scroll gesture emits far more events than the frame
+        // rate, and each one reset the debounce timer. One call per frame keeps
+        // the debounce semantics and drops the timer churn.
+        songList.addEventListener('scroll', () => {
+            if (songListScrollRafPending) {
+                return;
+            }
+            songListScrollRafPending = true;
+            const run = () => {
+                songListScrollRafPending = false;
+                scheduleVisibleSongRefresh();
+            };
+            if (typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(run);
+            } else {
+                setTimeout(run, 0);
+            }
+        }, { passive: true });
         window.addEventListener('resize', scheduleVisibleSongRefresh);
     }
     const versionFooter = document.getElementById("versionFooter");
@@ -3497,8 +3618,9 @@
             const idsToCheck = Array.from(pendingMetadataRefreshIds);
             pendingMetadataRefreshIds.clear();
 
+            const songLookup = getSongLookupMap();
             const idsToRefresh = idsToCheck
-                .map(id => getActiveSongs().find(song => song.id === id) || allSongs.find(song => song.id === id))
+                .map(id => songLookup.get(id))
                 .filter(Boolean)
                 .filter(song => forceRefresh || shouldRefreshMetadataForSong(song))
                 .map(song => song.id);
@@ -4884,6 +5006,7 @@
         if (message.action === "songs_page_update") {
             // start or continue fetching, ensure UI shows stop button
             setFetchUiState(true);
+            applyCurrentUserIds(message.currentUserIds);
 
             const newSongs = message.songs || [];
             const wasCheckingNew = message.checkNewOnly && allSongs.length > 0;
@@ -4912,6 +5035,7 @@
 
         if (message.action === "songs_fetched") {
             setFetchUiState(false);
+            applyCurrentUserIds(message.currentUserIds);
             const newSongs = message.songs || [];
             const wasCheckingNew = message.checkNewOnly && allSongs.length > 0;
             const completedAt = Date.now();
@@ -4956,9 +5080,9 @@
                 runAddedCount = 0;
                 runMetadataUpdateCount = 0;
 
-                if (!sunoUserId) {
-                    initSunoUserId();
-                }
+                // The identity may have become resolvable since the first guess
+                // was made; an explicitly-owned song replaces it.
+                initSunoUserId();
 
                 // Only show song list if not already visible (page updates already showed it)
                 if (songListContainer.style.display !== "block") {
@@ -5038,12 +5162,76 @@
 
         songListObserver = new IntersectionObserver((entries) => {
             if (entries.some(entry => entry.isIntersecting)) {
-                renderSongListChunk();
+                scheduleSongListChunkRender();
             }
         }, {
             root: songList,
             rootMargin: '0px 0px 160px 0px'
         });
+    }
+
+    // Append the next batch of songs, coalesced into one animation frame so a
+    // burst of observer callbacks cannot turn into a burst of DOM insertions
+    // during a scroll.
+    function scheduleSongListChunkRender() {
+        if (songChunkRenderRafPending) {
+            return;
+        }
+        songChunkRenderRafPending = true;
+        const run = () => {
+            songChunkRenderRafPending = false;
+            renderSongListChunk(SONG_RENDER_BATCH_SIZE, { updateCount: false });
+        };
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(run);
+        } else {
+            setTimeout(run, 0);
+        }
+    }
+
+    // Tracks which rendered song items are inside the list viewport. The browser
+    // does the intersection math, so the scroll path no longer reads layout for
+    // every rendered item.
+    function ensureSongListVisibleObserver() {
+        if (songListVisibleObserver || !songList) {
+            return;
+        }
+
+        songListVisibleObserver = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                const target = entry.target;
+                const songId = target?.dataset?.songId;
+                if (!songId) {
+                    return;
+                }
+
+                if (entry.isIntersecting && target.isConnected) {
+                    visibleSongItems.set(songId, target);
+                    visibleObserverHasReported = true;
+                } else if (visibleSongItems.get(songId) === target) {
+                    visibleSongItems.delete(songId);
+                }
+            });
+        }, {
+            root: songList,
+            // Same 80px buffer the old getBoundingClientRect scan used.
+            rootMargin: '80px 0px 80px 0px'
+        });
+    }
+
+    function observeSongListItem(item) {
+        if (!item) {
+            return;
+        }
+        ensureSongListVisibleObserver();
+        if (!songListVisibleObserver) {
+            return;
+        }
+        if (item.dataset.visibleObserved === '1') {
+            return;
+        }
+        item.dataset.visibleObserved = '1';
+        songListVisibleObserver.observe(item);
     }
 
     function updateSongListSentinelState() {
@@ -5575,9 +5763,16 @@
         return item;
     }
 
-    function renderSongListChunk(count = SONG_RENDER_BATCH_SIZE) {
+    function renderSongListChunk(count = SONG_RENDER_BATCH_SIZE, options = {}) {
+        // The infinite-scroll path appends more of the *same* filtered list, so
+        // the selected/total counters cannot have changed. Recomputing them is
+        // an O(songs) pass and used to run on every batch during a scroll.
+        const { updateCount = true } = options;
+
         if (!sortedFilteredSongs.length) {
-            updateSelectedCount();
+            if (updateCount) {
+                updateSelectedCount();
+            }
             return;
         }
 
@@ -5593,19 +5788,17 @@
         const fragment = document.createDocumentFragment();
         for (let index = start; index < end; index++) {
             const song = sortedFilteredSongs[index];
-            let item = songItemCache.get(song.id);
-            if (!item) {
-                item = createSongListItem(song);
-                songItemCache.set(song.id, item);
-            }
+            const item = getOrCreateSongListItem(song);
+            renderedSongItems.set(song.id, item);
             fragment.appendChild(item);
         }
 
         songList.insertBefore(fragment, songListSentinel);
         renderedSongCount = end;
         updateSongListSentinelState();
-        updateSelectedCount();
-
+        if (updateCount) {
+            updateSelectedCount();
+        }
     }
 
     function refreshVisibleSongSelectionState() {
@@ -5795,14 +5988,99 @@
         });
     }
 
+    // ---- Rendered row bookkeeping -------------------------------------------
+    //
+    // `renderedSongItems` maps songId → the element that is currently in the
+    // list DOM, and its iteration order is the DOM order. `songItemCache` is a
+    // different thing: it is the *creation* cache, and it may hold entries for
+    // rows that are not rendered. Both are needed.
+
+    function detachRenderedSongItem(item) {
+        if (!item) {
+            return;
+        }
+
+        if (songListVisibleObserver) {
+            songListVisibleObserver.unobserve(item);
+        }
+        item.dataset.visibleObserved = '0';
+
+        const songId = item.dataset.songId;
+        if (songId && visibleSongItems.get(songId) === item) {
+            visibleSongItems.delete(songId);
+        }
+
+        if (item.parentNode === songList) {
+            songList.removeChild(item);
+        }
+    }
+
+    function clearRenderedSongItems() {
+        const items = Array.from(renderedSongItems.values());
+        renderedSongItems.clear();
+        visibleSongItems.clear();
+        items.forEach(detachRenderedSongItem);
+    }
+
+    // The element that should render `song`: the cached one when it still
+    // matches the song's data, otherwise a fresh one. The thumbnail element is
+    // carried over when the image did not change, so rebuilding a row does not
+    // re-request the cover art.
+    function getOrCreateSongListItem(song) {
+        const cached = songItemCache.get(song.id);
+        const existing = renderedSongItems.get(song.id);
+
+        const canReuse = cached
+            && (existing === undefined || existing === cached)
+            && (cached.dataset.renderSignature || '') === getSongItemRenderSignature(song);
+
+        if (canReuse) {
+            observeSongListItem(cached);
+            return cached;
+        }
+
+        const newItem = createSongListItem(song);
+
+        const previous = existing || cached;
+        if (previous && (previous.dataset.thumbnailSignature || '') === (newItem.dataset.thumbnailSignature || '')) {
+            const oldThumbnail = previous.querySelector('.song-thumbnail');
+            const newThumbnail = newItem.querySelector('.song-thumbnail');
+            if (oldThumbnail && newThumbnail && newThumbnail.parentNode === newItem) {
+                newItem.replaceChild(oldThumbnail, newThumbnail);
+            }
+        }
+
+        songItemCache.set(song.id, newItem);
+        observeSongListItem(newItem);
+        return newItem;
+    }
+
     function renderSongList(options = {}) {
         const { preserveScroll = false, minimumRenderCount = SONG_RENDER_BATCH_SIZE } = options;
         const previousScrollTop = preserveScroll ? songList.scrollTop : 0;
 
-        songList.textContent = '';
-        renderedSongCount = 0;
+        // The old implementation tore the whole list down and re-appended every
+        // row on every call. applyFilter() runs once per crawled page and on
+        // every metadata update, so that was O(rendered rows) of DOM churn for a
+        // list whose content had not changed — and it re-created the row of any
+        // song whose metadata had moved, which re-requested its cover art.
+        //
+        // The list is now reconciled: a row that stays keeps its element, its
+        // image and its observer registration, and only the rows that actually
+        // moved are touched.
+        //
+        // The row count is rounded up to a whole batch, exactly like the old
+        // chunk loop did, so a re-render never renders *fewer* rows than before.
+        const targetCount = Math.min(
+            Math.ceil(Math.max(minimumRenderCount, 1) / SONG_RENDER_BATCH_SIZE) * SONG_RENDER_BATCH_SIZE,
+            sortedFilteredSongs.length
+        );
 
         if (!sortedFilteredSongs.length) {
+            clearRenderedSongItems();
+            songList.textContent = '';
+            renderedSongCount = 0;
+
             const activeSongs = getActiveSongs();
             const emptyDiv = document.createElement('div');
             emptyDiv.className = 'bettersuno-empty';
@@ -5820,10 +6098,57 @@
 
         ensureSongListSentinel();
 
-        while (renderedSongCount < Math.min(minimumRenderCount, sortedFilteredSongs.length)) {
-            renderSongListChunk();
+        const newEls = [];
+        for (let index = 0; index < targetCount; index += 1) {
+            newEls.push(getOrCreateSongListItem(sortedFilteredSongs[index]));
         }
 
+        const currentEls = Array.from(renderedSongItems.values());
+
+        // Longest common prefix and suffix of the two element sequences. Rows
+        // outside that window are the only ones that have to move.
+        let prefix = 0;
+        while (prefix < currentEls.length && prefix < newEls.length && currentEls[prefix] === newEls[prefix]) {
+            prefix += 1;
+        }
+
+        let suffix = 0;
+        while (
+            suffix < currentEls.length - prefix &&
+            suffix < newEls.length - prefix &&
+            currentEls[currentEls.length - 1 - suffix] === newEls[newEls.length - 1 - suffix]
+        ) {
+            suffix += 1;
+        }
+
+        const newElSet = new Set(newEls);
+        for (let index = prefix; index < currentEls.length - suffix; index += 1) {
+            const item = currentEls[index];
+            if (newElSet.has(item)) {
+                continue; // only moving — the insertion below relocates it
+            }
+            detachRenderedSongItem(item);
+        }
+
+        if (newEls.length - suffix > prefix) {
+            const fragment = document.createDocumentFragment();
+            for (let index = prefix; index < newEls.length - suffix; index += 1) {
+                fragment.appendChild(newEls[index]);
+            }
+            const anchorEl = suffix > 0 ? newEls[newEls.length - suffix] : songListSentinel;
+            songList.insertBefore(fragment, anchorEl);
+        }
+
+        // Rebuild the bookkeeping in the new DOM order.
+        renderedSongItems.clear();
+        for (const item of newEls) {
+            renderedSongItems.set(item.dataset.songId, item);
+        }
+
+        renderedSongCount = targetCount;
+        updateSongListSentinelState();
+
+        updateSelectedCount();
         if (renderedSongCount > 0) {
             scheduleVisibleSongRefresh();
         }
@@ -5833,8 +6158,6 @@
         } else {
             songList.scrollTop = 0;
         }
-
-        updateSelectedCount();
     }
 
     function getSelectedSongIds() {
@@ -5885,17 +6208,29 @@
 
     function updateSelectedCount() {
         const total = filteredSongs.length;
-        const selected = filteredSongs.filter(song => selectedSongIds.has(song.id)).length;
+        // One pass over the filtered list instead of three (filter + every +
+        // filter). This runs on every selection change and on every filter
+        // change, and the list can hold thousands of songs.
+        let selected = 0;
+        let allChecked = total > 0;
+        const selectedSongs = [];
+        for (let index = 0; index < total; index += 1) {
+            const song = filteredSongs[index];
+            if (selectedSongIds.has(song.id)) {
+                selected += 1;
+                selectedSongs.push(song);
+            } else {
+                allChecked = false;
+            }
+        }
         songCount.textContent = `${selected}/${total} selected`;
 
         // Update select all button state
-        const allChecked = total > 0 && filteredSongs.every(song => selectedSongIds.has(song.id));
         const isPressed = allChecked && total > 0;
         selectAllButton.setAttribute('aria-pressed', String(isPressed));
         selectAllButton.textContent = isPressed ? 'Clear All' : 'Select All';
 
         // Show/hide & disable Download button based on selection + other-artist check
-        const selectedSongs = filteredSongs.filter(song => selectedSongIds.has(song.id));
         const hasAnySelectionCount = selectedSongIds.size > 0;
         const fromOtherArtist = selectedSongs.some(song => isSongFromOtherArtist(song));
         if (downloadBtn) {
