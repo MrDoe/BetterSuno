@@ -24,6 +24,10 @@ import {
   verifyAudioDownloadFilename,
 } from './lib/audio-filename.js';
 import {
+  SHOW_PANEL_MESSAGE,
+  isSunoUrl,
+} from './lib/panel-launch.js';
+import {
   decodeDataUrl,
   isDataUrl,
   normalizeHandle,
@@ -77,6 +81,22 @@ function log(...args) {
 
 // Log that background.js is loading
 log("=== BACKGROUND.JS LOADING ===");
+
+// ---- Browser-action (toolbar) launcher ----
+// The manifest declares an `action` with icons but no popup, so without this
+// listener a click on the toolbar icon does nothing at all. The icon is a
+// launcher, never a toggle: clicking it again must not hide the panel the first
+// click showed. It is deliberately a no-op on non-Suno tabs — it must not
+// navigate the user anywhere on its own.
+chrome.action.onClicked.addListener((tab) => {
+  const tabId = tab?.id;
+  if (typeof tabId !== 'number' || !isSunoUrl(tab?.url)) return;
+
+  // A tab without a content script (still loading, or a non-Suno host) rejects;
+  // there is nothing to show there, so the rejection is intentionally ignored.
+  const send = chrome.tabs.sendMessage(tabId, { type: SHOW_PANEL_MESSAGE });
+  if (send && typeof send.catch === 'function') send.catch(() => {});
+});
 
 // Browser detection: Firefox uses persistent background scripts instead of service workers
 const isFirefox = typeof browser !== 'undefined' && !!browser.runtime?.getBrowserInfo;

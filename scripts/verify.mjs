@@ -36,6 +36,7 @@ const RUNTIME_SOURCES = [
   'lib/util.js',
   'lib/suno-audio.js',
   'lib/library-stats.js',
+  'lib/panel-launch.js',
 ];
 
 // The extension's own test files, syntax-checked alongside the sources.

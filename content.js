@@ -786,48 +786,173 @@
     }
   }
   
-  // ---- Toggle panel ----
-  bell.addEventListener('click', () => {
-    // What the user can actually see right now — not the cached `panelOpen`.
-    // Two failure modes made a tap look like a no-op, both typical of Firefox
-    // Android after the phone wakes from sleep:
-    //   1. our root was detached (Suno's SPA replacing body children, or a
-    //      back/forward-cache restore), so the whole subtree was not rendered;
-    //   2. `panelOpen` survived the restore as `true` while the panel was not
-    //      actually open, so a blind toggle *closed* it instead of opening it.
-    // Reading the pre-tap visible state makes the tap open the panel whenever it
-    // is not on screen, and only close it when it genuinely is.
-    //
-    // The `open` class is deliberately NOT the test: content.css gives
-    // `#bettersuno-panel.open { display: flex !important }`, and ensureVisibility()
-    // re-adds the class whenever `panelOpen` is still true — so the class survives
-    // every way Suno can make us invisible. A third failure mode is exactly that:
-    // root is still attached and still carries `.open`, but Suno stripped root's
-    // inline styles so nothing is on screen. Measuring the panel distinguishes
-    // "class says open" from "user can see the panel"; a detached or display:none
-    // subtree measures 0. Do not replace this with offsetParent — both root and
-    // panel are `position: fixed !important`, which always reports null.
-    const wasVisiblyOpen = document.documentElement.contains(root)
-      && panel.getBoundingClientRect().height > 0;
+  // ---- Panel open / close ----
+  //
+  // Every open/close path funnels through showPanel()/hidePanel() so `panelOpen`
+  // and the `.open` class can never drift apart. The tap decision is derived from
+  // what is actually on screen — never from the cached `panelOpen` flag, which
+  // survives back/forward-cache restores and Suno's SPA route changes.
 
-    // Re-assert first: re-attaches a detached root, so the gesture that reports
-    // the problem is also the gesture that repairs it.
-    ensureVisibility();
+  // The state that made the old interactive probe wrong is "the panel has a box
+  // but the user still cannot see it": Suno paints a later, equal-z-index layer
+  // over us, or sets visibility/opacity on an ancestor. A rect alone reports full
+  // size in both cases, so a tap there *closed* an invisible panel and the next
+  // tap reopened it behind the same layer — indistinguishable from a dead button.
+  //
+  // This probe therefore checks, in order: attached to the document, a direct
+  // child of body, a non-zero box that intersects the viewport, the computed
+  // style, and finally whether the panel owns the topmost paint at its centre.
+  // Do not replace it with offsetParent: root and panel are `position: fixed
+  // !important`, which always reports null. elementFromPoint is the only check
+  // that can see z-index burial. When it is unavailable or returns null we fall
+  // through to "visible" rather than claiming hidden on uncertainty.
+  function isPanelVisiblyOpen() {
+    if (!document.documentElement.contains(root)) return false;
+    if (document.body && root.parentNode !== document.body) return false;
 
-    panelOpen = !wasVisiblyOpen;
-    panel.classList.toggle('open', panelOpen);
-    if (panelOpen) {
-      // refresh state immediately when the panel opens
-      refresh();
-      // Mark all current notifications as seen after fetching
-      lastSeenCount = currentNotifCount;
-      badge.style.display = 'none';
-      badge.textContent = '0';
-      if (currentTab === 'library') {
-        document.dispatchEvent(new CustomEvent('bettersuno:panel-opened'));
+    const rect = panel.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
+
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+
+    if (viewportWidth > 0 && viewportHeight > 0) {
+      const horizontalOverlap = Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0);
+      const verticalOverlap = Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0);
+      if (horizontalOverlap <= 0 || verticalOverlap <= 0) return false;
+    }
+
+    if (typeof window.getComputedStyle === 'function') {
+      const style = window.getComputedStyle(panel);
+      if (style) {
+        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') {
+          return false;
+        }
+        if (Number(style.opacity) === 0) return false;
       }
     }
-  });
+
+    if (typeof document.elementFromPoint === 'function'
+      && viewportWidth > 0 && viewportHeight > 0) {
+      const x = Math.max(0, Math.min(viewportWidth - 1, rect.left + (rect.width / 2)));
+      const y = Math.max(0, Math.min(viewportHeight - 1, rect.top + (rect.height / 2)));
+      let hit = null;
+      try {
+        hit = document.elementFromPoint(x, y);
+      } catch (e) {
+        hit = null;
+      }
+      if (hit && hit !== panel && !panel.contains(hit)) return false;
+    }
+
+    return true;
+  }
+
+  function showPanel() {
+    // A container can keep `root` in the document while making it unrenderable
+    // (display:none, a transformed ancestor that breaks fixed positioning).
+    // Moving it to body is the only state our fixed layout cannot be defeated
+    // by. Appending also moves it last, so it wins paint order against Suno
+    // layers that use the same (clamped) maximum z-index.
+    const host = document.body || document.documentElement;
+    if (host && (root.parentNode !== host || root.nextElementSibling)) {
+      host.appendChild(root);
+    }
+
+    // Re-assert first: re-attaches a detached root and restores stripped inline
+    // styles, so the gesture that reports the problem is also the gesture that
+    // repairs it.
+    ensureVisibility();
+
+    panelOpen = true;
+    panel.classList.add('open');
+    // The class rule lives in content.css. Asserting the same declarations
+    // inline means a Suno stylesheet or a style strip cannot keep the panel
+    // hidden after we decided to show it. hidePanel() removes them again so the
+    // stylesheet stays authoritative for the closed state.
+    applyImportantStyles(panel, PANEL_OPEN_INLINE_STYLES);
+
+    // refresh state immediately when the panel opens
+    refresh();
+    // Mark all current notifications as seen after fetching
+    lastSeenCount = currentNotifCount;
+    badge.style.display = 'none';
+    badge.textContent = '0';
+    if (currentTab === 'library') {
+      document.dispatchEvent(new CustomEvent('bettersuno:panel-opened'));
+    }
+  }
+
+  function hidePanel({ focusBell = false } = {}) {
+    panelOpen = false;
+    panel.classList.remove('open');
+    clearImportantStyles(panel, PANEL_OPEN_INLINE_STYLES);
+    if (focusBell) {
+      bell.focus();
+    }
+  }
+
+  // ---- Bell activation ----
+  //
+  // Three things made a tap look like a no-op:
+  //   1. our root was detached (Suno's SPA replacing body children, or a
+  //      back/forward-cache restore), so the whole subtree was not rendered;
+  //   2. the panel was in the document but not on screen (z-index burial,
+  //      visibility/opacity, a hidden ancestor);
+  //   3. an impatient second tap toggled off what the first tap had just opened.
+  // The first two are handled by isPanelVisiblyOpen() + showPanel(). The third
+  // is the coalescing window: a repeat activation inside it is dropped, so a
+  // double tap can only ever leave the panel open.
+  //
+  // The listener is registered on `window` in the *capture* phase. Suno's SPA
+  // installs capture-phase handlers around its modals; one that calls
+  // stopPropagation() would otherwise keep a bubble-phase bell listener from
+  // ever running. Capture at window fires before any document/body capture
+  // handler. pointerup makes the tap work even when a page `touchstart`
+  // preventDefault() suppresses the synthesized click; the click listener
+  // covers keyboard activation (Enter/Space), where no pointer events fire.
+  const BELL_ACTIVATION_COALESCE_MS = 400;
+  let lastBellActivationAt = 0;
+  let bellPointerDown = false;
+
+  function isBellTarget(target) {
+    return !!target && (target === bell || bell.contains(target));
+  }
+
+  function activateBell(now = Date.now()) {
+    if (now - lastBellActivationAt < BELL_ACTIVATION_COALESCE_MS) {
+      return 'coalesced';
+    }
+    lastBellActivationAt = now;
+
+    if (isPanelVisiblyOpen()) {
+      hidePanel({ focusBell: true });
+      return 'closed';
+    }
+
+    showPanel();
+    return 'opened';
+  }
+
+  window.addEventListener('pointerdown', (event) => {
+    bellPointerDown = isBellTarget(event.target);
+  }, true);
+
+  window.addEventListener('pointerup', (event) => {
+    if (!bellPointerDown) return;
+    bellPointerDown = false;
+    if (!isBellTarget(event.target)) return;
+    activateBell();
+  }, true);
+
+  window.addEventListener('pointercancel', () => {
+    bellPointerDown = false;
+  }, true);
+
+  window.addEventListener('click', (event) => {
+    if (!isBellTarget(event.target)) return;
+    activateBell();
+  }, true);
 
   // Playback can take an async detour through IndexedDB/background decryption.
   // Track that pending state so the panel cannot disappear before audio.paused
@@ -837,6 +962,7 @@
     betterSunoPlaybackActive = state === 'loading' || state === 'playing';
     if (betterSunoPlaybackActive && panelOpen) {
       panel.classList.add('open');
+      applyImportantStyles(panel, PANEL_OPEN_INLINE_STYLES);
     }
   });
 
@@ -849,9 +975,7 @@
     if (e.key === 'Escape' && panelOpen) {
       const activeDialog = root.querySelector('dialog[open]');
       if (!activeDialog) {
-        panelOpen = false;
-        panel.classList.remove('open');
-        bell.focus();
+        hidePanel({ focusBell: true });
       }
     }
   });
@@ -1450,6 +1574,15 @@
       return;
     }
 
+    // Toolbar (browser action) launcher. background.js sends this only from a
+    // Suno tab, and it only ever opens — never toggles — so repeated toolbar
+    // clicks cannot hide the panel the first click showed.
+    if (msg.type === 'bettersunoShowPanel') {
+      showPanel();
+      sendResponse({ ok: true });
+      return;
+    }
+
     if (msg.type === 'androidKeepAliveControl') {
       applyAndroidFirefoxKeepAliveControl(msg);
       return;
@@ -1521,6 +1654,22 @@
     ['pointer-events', 'auto']
   ];
 
+  // Declarations asserted inline only while the panel should be open. They
+  // mirror the `#bettersuno-panel.open` rule, so a stylesheet override or a
+  // stripped style cannot leave the panel invisible after a tap decided to
+  // show it. hidePanel() removes them, restoring the stylesheet's closed state.
+  const PANEL_OPEN_INLINE_STYLES = [
+    ['display', 'flex'],
+    ['visibility', 'visible'],
+    ['opacity', '1'],
+    ['pointer-events', 'auto'],
+    ['position', 'fixed'],
+    ['top', '0'],
+    ['left', '0'],
+    ['width', '100vw'],
+    ['height', '100vh']
+  ];
+
   // Re-assert only the declarations that are actually wrong.
   //
   // Writing all 14 of them unconditionally meant every check invalidated the
@@ -1541,14 +1690,24 @@
     }
   }
 
+  function clearImportantStyles(element, styles) {
+    if (!element) return;
+    for (let i = 0; i < styles.length; i += 1) {
+      const property = styles[i][0];
+      if (element.style.getPropertyValue(property) === '') continue;
+      element.style.removeProperty(property);
+    }
+  }
+
   function ensureVisibility() {
-    // Re-attach root if Suno replaces/removes body children during SPA updates.
-    if (!document.documentElement.contains(root)) {
-      if (document.body) {
-        document.body.appendChild(root);
-      } else {
-        document.documentElement.appendChild(root);
-      }
+    // Re-attach root if Suno replaces/removes body children during SPA updates,
+    // and also when root is still in the document but nested in another
+    // container: an ancestor can hide it (display:none) or break its fixed
+    // positioning (transform), and `documentElement.contains(root)` is blind to
+    // both. Root's only supported parent is body.
+    const host = document.body || document.documentElement;
+    if (host && (root.parentNode !== host || !document.documentElement.contains(root))) {
+      host.appendChild(root);
     }
 
     // The observer is anchored to a *node*, so if Suno replaces the body node
@@ -1563,6 +1722,7 @@
 
     if (panelOpen) {
       panel.classList.add('open');
+      applyImportantStyles(panel, PANEL_OPEN_INLINE_STYLES);
     }
   }
 

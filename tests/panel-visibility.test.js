@@ -255,47 +255,125 @@ test('the visibility observer ignores mutations that cannot detach our root', as
 // A2 — the tap must derive its next state from what is visible
 // ---------------------------------------------------------------------------
 
-// Execute the real bell click handler body against a minimal DOM, and return the
-// state it ended up in. Parameters are passed by value, so the post-click locals
-// have to be read back out of the function's own scope.
-async function clickBell(initial = {}) {
+// A2 — the tap must derive its next state from what is visible
+// ---------------------------------------------------------------------------
+
+// Compose the real showPanel/hidePanel/isPanelVisiblyOpen/activateBell source
+// into one scope and run it against a minimal DOM. The functions close over the
+// IIFE's own variables, so they are extracted (like ensureVisibility below)
+// rather than re-implemented: a re-implementation would keep passing after the
+// shipped code regressed.
+async function loadPanelControls(initial = {}) {
   const source = await readContentSource();
-  const body = extractBlockAfter(source, "bell.addEventListener('click'", 'the bell click handler');
 
   const dom = {
     rootMounted: true,
+    rootParent: 'body',          // 'body' | 'other' | null (detached)
+    rootIsLastChild: true,
     panelHasOpenClass: false,
-    // Rendered height, modelled separately from the class on purpose: a class
-    // check and a layout check disagree exactly in the state that broke the bell.
-    panelHeight: null,
+    // Geometry is modelled separately from the class on purpose: the class and
+    // what is actually rendered disagree exactly in the states that broke the
+    // bell. panelRect: null → derive from the class.
+    panelRect: null,
+    panelComputedStyle: { display: 'flex', visibility: 'visible', opacity: '1' },
+    // elementFromPoint result: null → the panel itself; an object → that
+    // element; 'throw' → the API is unavailable / cannot measure.
+    hit: null,
+    viewportWidth: 1280,
+    viewportHeight: 720,
     badgeStyleDisplay: '',
     badgeText: '',
     ...initial
   };
-  if (dom.panelHeight === null) {
-    dom.panelHeight = dom.panelHasOpenClass ? 720 : 0;
+  if (initial.panelComputedStyle) {
+    dom.panelComputedStyle = { ...dom.panelComputedStyle, ...initial.panelComputedStyle };
+  }
+  if (dom.panelRect === null) {
+    dom.panelRect = dom.panelHasOpenClass
+      ? { left: 0, top: 0, width: dom.viewportWidth, height: dom.viewportHeight, right: dom.viewportWidth, bottom: dom.viewportHeight }
+      : { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
   }
 
-  const calls = { ensureVisibility: 0, refresh: 0, dispatched: [] };
+  const body = { name: 'body' };
+  const otherContainer = { name: 'suno-container' };
+  const calls = { ensureVisibility: 0, refresh: 0, dispatched: [], reparented: 0, bellFocused: 0 };
 
-  const stubs = {
-    root: { id: 'bettersuno-root' },
-    panel: {
-      classList: {
-        contains(name) {
-          assert.equal(name, 'open');
-          return dom.panelHasOpenClass;
-        },
-        toggle(name, force) {
-          assert.equal(name, 'open');
-          dom.panelHasOpenClass = force;
-          dom.panelHeight = force ? 720 : 0;
-        }
+  function createStyleStore() {
+    const props = new Map();
+    return {
+      props,
+      getPropertyValue(name) { return props.get(name)?.value ?? ''; },
+      getPropertyPriority(name) { return props.get(name)?.priority ?? ''; },
+      setProperty(name, value, priority) { props.set(name, { value, priority }); },
+      removeProperty(name) { props.delete(name); }
+    };
+  }
+
+  const fullRect = () => ({
+    left: 0,
+    top: 0,
+    width: dom.viewportWidth,
+    height: dom.viewportHeight,
+    right: dom.viewportWidth,
+    bottom: dom.viewportHeight
+  });
+  const zeroRect = () => ({ left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 });
+
+  const panelStyle = createStyleStore();
+  const panel = {
+    style: panelStyle,
+    classList: {
+      add(name) {
+        assert.equal(name, 'open');
+        dom.panelHasOpenClass = true;
+        // A visible class gives the panel its box, exactly like the CSS rule.
+        if (!(dom.panelRect.height > 0)) dom.panelRect = fullRect();
       },
-      getBoundingClientRect() {
-        return { height: dom.panelHeight };
+      remove(name) {
+        assert.equal(name, 'open');
+        dom.panelHasOpenClass = false;
+        dom.panelRect = zeroRect();
+      },
+      contains(name) {
+        assert.equal(name, 'open');
+        return dom.panelHasOpenClass;
       }
     },
+    contains(node) {
+      return node === panel || node?.insidePanel === true;
+    },
+    getBoundingClientRect() { return dom.panelRect; }
+  };
+
+  const root = {
+    id: 'bettersuno-root',
+    style: createStyleStore(),
+    get parentNode() {
+      if (dom.rootParent === 'body') return body;
+      if (dom.rootParent === 'other') return otherContainer;
+      return null;
+    },
+    get nextElementSibling() { return dom.rootIsLastChild ? null : { name: 'suno-node' }; }
+  };
+
+  const bell = {
+    id: 'bettersuno-bell',
+    style: createStyleStore(),
+    contains(node) { return node === bell; },
+    focus() { calls.bellFocused += 1; }
+  };
+
+  body.appendChild = (node) => {
+    assert.equal(node, root, 'only root may be appended to body');
+    dom.rootParent = 'body';
+    dom.rootIsLastChild = true;
+    calls.reparented += 1;
+  };
+
+  const stubs = {
+    root,
+    bell,
+    panel,
     badge: {
       style: {
         set display(v) { dom.badgeStyleDisplay = v; },
@@ -305,43 +383,89 @@ async function clickBell(initial = {}) {
       get textContent() { return dom.badgeText; }
     },
     document: {
-      documentElement: { contains: () => dom.rootMounted },
-      body: { appendChild() {} },
+      documentElement: {
+        contains: () => dom.rootMounted,
+        clientWidth: dom.viewportWidth,
+        clientHeight: dom.viewportHeight
+      },
+      body,
+      elementFromPoint() {
+        if (dom.hit === 'throw') throw new Error('no layout in this environment');
+        if (dom.hit === null) return panel;
+        return dom.hit;
+      },
       dispatchEvent(evt) { calls.dispatched.push(evt.type); }
+    },
+    window: {
+      innerWidth: dom.viewportWidth,
+      innerHeight: dom.viewportHeight,
+      getComputedStyle: () => dom.panelComputedStyle
     },
     CustomEvent: class {
       constructor(type) { this.type = type; }
     },
     ensureVisibility() { calls.ensureVisibility += 1; },
     refresh() { calls.refresh += 1; },
-    panelOpen: initial.panelOpen ?? false,
+    panelOpen: initial.panelOpen ?? dom.panelHasOpenClass,
     lastSeenCount: 0,
     currentNotifCount: 7,
     currentTab: 'library'
   };
 
+  const panelStylesArray = extractArrayAfter(
+    source, 'const PANEL_OPEN_INLINE_STYLES =', 'PANEL_OPEN_INLINE_STYLES');
+  const coalesceMatch = source.match(/const BELL_ACTIVATION_COALESCE_MS = (\d+);/);
+  assert.ok(coalesceMatch, 'expected content.js to declare BELL_ACTIVATION_COALESCE_MS');
+
   const keys = Object.keys(stubs);
-  const after = new Function(
+  const controls = new Function(
     ...keys,
-    `${body}\nreturn { panelOpen, lastSeenCount };`
+    `
+    const PANEL_OPEN_INLINE_STYLES = ${panelStylesArray};
+    const BELL_ACTIVATION_COALESCE_MS = ${coalesceMatch[1]};
+    let lastBellActivationAt = 0;
+    ${functionSource(source, 'applyImportantStyles')}
+    ${functionSource(source, 'clearImportantStyles')}
+    ${functionSource(source, 'isPanelVisiblyOpen')}
+    ${functionSource(source, 'showPanel')}
+    ${functionSource(source, 'hidePanel')}
+    ${functionSource(source, 'activateBell')}
+    return {
+      activateBell,
+      showPanel,
+      hidePanel,
+      isPanelVisiblyOpen,
+      state: () => ({ panelOpen, lastSeenCount })
+    };
+    `
   )(...keys.map(k => stubs[k]));
 
-  return { dom, calls, after };
+  return { dom, calls, panelStyle, ...controls };
+}
+
+// One tap at a known timestamp (so the coalescing window is deterministic).
+async function tapBell(initial = {}, now = 1000) {
+  const controls = await loadPanelControls(initial);
+  const result = controls.activateBell(now);
+  return { ...controls, result, after: controls.state() };
 }
 
 test('tapping the bell opens the panel when our root was detached', async () => {
   // A1's user-visible symptom: the panel is not in the document, so the tap has
   // nothing to show. It must end up open, and it must repair the root on the way.
-  const { dom, calls, after } = await clickBell({
+  const tap = await tapBell({
     rootMounted: false,
+    rootParent: null,
     panelHasOpenClass: false
   });
 
-  assert.equal(after.panelOpen, true, 'a tap must open the panel when nothing is visible');
-  assert.equal(dom.panelHasOpenClass, true, 'the open class must end up applied');
-  assert.equal(calls.ensureVisibility, 1, 'the tap must re-assert visibility before toggling');
-  assert.equal(calls.refresh, 1, 'opening must trigger the existing refresh');
-  assert.deepEqual(calls.dispatched, ['bettersuno:panel-opened'],
+  assert.equal(tap.result, 'opened');
+  assert.equal(tap.after.panelOpen, true, 'a tap must open the panel when nothing is visible');
+  assert.equal(tap.dom.panelHasOpenClass, true, 'the open class must end up applied');
+  assert.equal(tap.calls.reparented, 1, 'a detached root must be re-parented before showing');
+  assert.equal(tap.calls.ensureVisibility, 1, 'the tap must re-assert visibility before opening');
+  assert.equal(tap.calls.refresh, 1, 'opening must trigger the existing refresh');
+  assert.deepEqual(tap.calls.dispatched, ['bettersuno:panel-opened'],
     'opening the library tab must still notify the rest of the content scripts');
 });
 
@@ -349,64 +473,33 @@ test('tapping the bell opens the panel after a stale-open restore', async () => 
   // A2's user-visible symptom: panelOpen survived the bfcache restore as `true`
   // while the panel was not on screen. Inverting the cached flag would close it,
   // and the user would see nothing happen.
-  const { dom, after } = await clickBell({
+  const tap = await tapBell({
     rootMounted: true,
     panelHasOpenClass: false,
     panelOpen: true
   });
 
-  assert.equal(after.panelOpen, true,
+  assert.equal(tap.result, 'opened');
+  assert.equal(tap.after.panelOpen, true,
     'a stale cached panelOpen=true must not make the tap close the panel');
-  assert.equal(dom.panelHasOpenClass, true, 'the panel must end up visibly open');
+  assert.equal(tap.dom.panelHasOpenClass, true, 'the panel must end up visibly open');
 });
 
 test('tapping the bell closes a panel that is genuinely open', async () => {
   // The fix must not turn the bell into an "open only" button.
-  const { dom, calls, after } = await clickBell({
+  const tap = await tapBell({
     rootMounted: true,
     panelHasOpenClass: true,
     panelOpen: true
   });
 
-  assert.equal(after.panelOpen, false, 'an open panel must close on tap');
-  assert.equal(dom.panelHasOpenClass, false);
-  assert.equal(calls.ensureVisibility, 1, 'the tap must still re-assert visibility');
-  assert.equal(calls.refresh, 0, 'closing must not trigger a refresh');
-});
-
-test('the bell handler does not blindly invert the cached panelOpen flag', async () => {
-  const source = await readContentSource();
-  const handler = extractBlockAfter(source, "bell.addEventListener('click'", 'the bell click handler');
-
-  assert.ok(!/panelOpen\s*=\s*!panelOpen/.test(handler),
-    'a bare toggle of the cached flag is what made a tap close an invisible panel');
-  assert.match(handler, /document\.documentElement\.contains\(root\)/,
-    'the next state must consider whether our root is still in the document');
-  assert.match(handler, /panel\.getBoundingClientRect\(\)\.height > 0/,
-    'the next state must come from the rendered panel, not the class. The `open` ' +
-    'class is set by CSS to display:flex and ensureVisibility() re-adds it from the ' +
-    'stale panelOpen flag, so it reads "open" even when nothing is on screen.');
-  // Isolate the sample statement (it wraps over two lines) so the negative
-  // assertion below cannot be satisfied by the rest of the handler.
-  const sampleMatch = handler.match(/^\s*const wasVisiblyOpen =[\s\S]*?;$/m);
-  assert.ok(sampleMatch, 'expected a `const wasVisiblyOpen = ...;` sample statement');
-  const sampleLine = sampleMatch[0];
-  assert.match(sampleLine, /panel\.getBoundingClientRect\(\)\.height > 0/,
-    'the sample must read the rendered panel');
-  assert.ok(!/panelOpen\s*\?|classList\.contains\(['"]open['"]\)/.test(sampleLine),
-    'the pre-tap sample must not fall back to the cached flag or the open class');
-
-  // The visible state has to be sampled before ensureVisibility() re-asserts the
-  // stale flag, otherwise it would read its own repair back as "already open".
-  // Both sides are matched as *statements*, not bare names: the handler's own
-  // comments mention both tokens, and a name match would silently compare the
-  // wrong pair of offsets (or invert them).
-  const sampleAt = handler.search(/^\s*const wasVisiblyOpen =/m);
-  const healAt = handler.search(/^\s*ensureVisibility\(\);$/m);
-  assert.ok(sampleAt !== -1, 'expected a `const wasVisiblyOpen =` sample statement');
-  assert.ok(healAt !== -1, 'expected a bare `ensureVisibility();` call statement');
-  assert.ok(sampleAt < healAt,
-    'sample the visible state before ensureVisibility() re-applies the stale panelOpen flag');
+  assert.equal(tap.result, 'closed');
+  assert.equal(tap.after.panelOpen, false, 'an open panel must close on tap');
+  assert.equal(tap.dom.panelHasOpenClass, false);
+  assert.equal(tap.calls.refresh, 0, 'closing must not trigger a refresh');
+  assert.equal(tap.calls.bellFocused, 1, 'closing must return focus to the bell');
+  assert.equal(tap.panelStyle.props.size, 0,
+    'the close path must remove the inline overrides so the CSS can hide the panel');
 });
 
 test('tapping the bell opens a panel that carries .open but renders nothing', async () => {
@@ -414,18 +507,166 @@ test('tapping the bell opens a panel that carries .open but renders nothing', as
   // on the panel, but Suno stripped root's inline styles so the panel has no box.
   // Sampling the class here reports "already open" and the tap removes it — the
   // bell reappears, the panel stays shut, and the user taps a second time.
-  const { dom, calls, after } = await clickBell({
+  const tap = await tapBell({
     rootMounted: true,
     panelHasOpenClass: true,
-    panelHeight: 0,
+    panelRect: { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 },
     panelOpen: true
   });
 
-  assert.equal(after.panelOpen, true,
+  assert.equal(tap.result, 'opened');
+  assert.equal(tap.after.panelOpen, true,
     'a zero-height panel is not visible, so the tap must open rather than close');
-  assert.equal(dom.panelHasOpenClass, true, 'the panel must end up open');
-  assert.equal(calls.ensureVisibility, 1, 'the tap must still re-assert visibility');
-  assert.equal(calls.refresh, 1, 'opening must trigger the existing refresh');
+  assert.equal(tap.dom.panelHasOpenClass, true, 'the panel must end up open');
+  assert.equal(tap.calls.refresh, 1, 'opening must trigger the existing refresh');
+});
+
+test('tapping the bell opens a panel buried under a Suno layer', async () => {
+  // The residual defect: the panel has a full-size box, but a later, equal-z-index
+  // Suno layer paints over it. A rect-only probe says "open", the tap *closes*
+  // the invisible panel, and every second tap repeats that. The hit test at the
+  // panel centre is the only check that can see this state.
+  const occluder = { name: 'suno-overlay', insidePanel: false };
+  const tap = await tapBell({
+    rootMounted: true,
+    panelHasOpenClass: true,
+    panelOpen: true,
+    hit: occluder
+  });
+
+  assert.equal(tap.isPanelVisiblyOpen(), false,
+    'a panel that does not own the topmost paint at its centre is not visible');
+  assert.equal(tap.result, 'opened',
+    'an occluded panel must be re-opened, never toggled closed');
+  assert.equal(tap.dom.panelHasOpenClass, true);
+});
+
+test('tapping the bell opens a panel whose computed style hides it', async () => {
+  for (const hidden of [
+    { visibility: 'hidden' },
+    { opacity: '0' },
+    { display: 'none' }
+  ]) {
+    const tap = await tapBell({
+      rootMounted: true,
+      panelHasOpenClass: true,
+      panelOpen: true,
+      panelComputedStyle: hidden
+    });
+
+    assert.equal(tap.result, 'opened',
+      `computed ${JSON.stringify(hidden)} must count as not visible`);
+    assert.equal(tap.dom.panelHasOpenClass, true);
+  }
+});
+
+test('a root nested in a Suno container is re-parented before the panel opens', async () => {
+  // `documentElement.contains(root)` is true here, so the old self-heal saw
+  // nothing to do. An ancestor with display:none or a transform can still make
+  // the fixed panel unrenderable or break its positioning.
+  const controls = await loadPanelControls({
+    rootMounted: true,
+    rootParent: 'other',
+    panelHasOpenClass: false,
+    panelOpen: false
+  });
+
+  assert.equal(controls.isPanelVisiblyOpen(), false,
+    'root must be a direct child of body to count as visible');
+  assert.equal(controls.activateBell(1000), 'opened');
+  assert.equal(controls.calls.reparented, 1, 'the tap must move root back to document.body');
+  assert.equal(controls.state().panelOpen, true);
+});
+
+test('a rapid second tap cannot close the panel the first tap opened', async () => {
+  // The impatient double tap: the first tap opens, the second arrives before the
+  // user can see the result. It must be coalesced, not treated as "close".
+  const controls = await loadPanelControls({
+    rootMounted: true,
+    panelHasOpenClass: false
+  });
+
+  assert.equal(controls.activateBell(1000), 'opened');
+  assert.equal(controls.activateBell(1200), 'coalesced',
+    'a repeat activation inside the coalescing window must be dropped');
+  assert.equal(controls.state().panelOpen, true,
+    'the panel must still be open after the second tap');
+
+  const coalesceMs = Number(
+    (await readContentSource()).match(/const BELL_ACTIVATION_COALESCE_MS = (\d+);/)[1]);
+  assert.equal(controls.activateBell(1000 + coalesceMs + 1), 'closed',
+    'after the window a tap is honoured again');
+});
+
+test('the tap decision comes from the rendered panel, not the cached flag', async () => {
+  const source = await readContentSource();
+
+  const probe = functionSource(source, 'isPanelVisiblyOpen');
+  assert.match(probe, /document\.documentElement\.contains\(root\)/,
+    'the probe must consider whether our root is still in the document');
+  assert.match(probe, /root\.parentNode !== document\.body/,
+    'an in-document root nested in a Suno container is not visible either');
+  assert.match(probe, /panel\.getBoundingClientRect\(\)/,
+    'the probe must read the rendered box');
+  assert.match(probe, /getComputedStyle\(panel\)/,
+    'a full rect is not enough: visibility/opacity/display can still hide it');
+  assert.match(probe, /document\.elementFromPoint\(/,
+    'z-index burial is only visible to a hit test');
+  assert.ok(!/offsetParent/.test(probe),
+    'offsetParent is permanently null for position:fixed elements');
+
+  const activate = functionSource(source, 'activateBell');
+  assert.match(activate, /isPanelVisiblyOpen\(\)/,
+    'the tap must derive its next state from the visible probe');
+  assert.match(activate, /showPanel\(\)/);
+  assert.match(activate, /hidePanel\(\{ focusBell: true \}\)/);
+  assert.ok(!/panelOpen\s*=\s*!panelOpen/.test(source),
+    'a bare toggle of the cached flag is what made a tap close an invisible panel');
+  assert.ok(!/classList\.contains\(['"]open['"]\)/.test(probe),
+    'the class is what CSS uses to make the panel visible, so it cannot be the test');
+});
+
+test('the open path asserts the panel styles and the close path removes them', async () => {
+  const source = await readContentSource();
+
+  const show = functionSource(source, 'showPanel');
+  assert.match(show, /applyImportantStyles\(panel, PANEL_OPEN_INLINE_STYLES\)/,
+    'opening must re-assert the panel declarations inline, or a stylesheet can keep it hidden');
+  assert.match(show, /root\.parentNode !== host/,
+    'opening must move root back to body');
+
+  const hide = functionSource(source, 'hidePanel');
+  assert.match(hide, /clearImportantStyles\(panel, PANEL_OPEN_INLINE_STYLES\)/,
+    'closing must remove the inline overrides, or the panel would never hide');
+
+  const ensure = functionSource(source, 'ensureVisibility');
+  assert.match(ensure, /root\.parentNode !== host/,
+    'the self-heal must repair a nested root, not just a fully detached one');
+  assert.match(ensure, /applyImportantStyles\(panel, PANEL_OPEN_INLINE_STYLES\)/,
+    'the periodic heal must also restore the open panel declarations');
+});
+
+test('the bell listens on window in the capture phase', async () => {
+  // A capture-phase handler on document/body that calls stopPropagation() must
+  // not be able to swallow the tap before a bubble-phase bell listener runs.
+  const source = await readContentSource();
+
+  for (const type of ['pointerdown', 'pointerup', 'click']) {
+    const at = source.indexOf(`window.addEventListener('${type}'`);
+    assert.notEqual(at, -1, `expected a window-level ${type} listener`);
+    const tail = source.slice(at, at + 600);
+    assert.match(tail, /\}, true\);/,
+      `the ${type} listener must be registered in the capture phase`);
+  }
+
+  assert.ok(!/bell\.addEventListener\('click'/.test(source),
+    'the bubble-phase bell listener is what Suno could swallow');
+
+  const pointerUp = source.slice(
+    source.indexOf("window.addEventListener('pointerup'"),
+    source.indexOf("window.addEventListener('pointercancel'"));
+  assert.match(pointerUp, /bellPointerDown/,
+    'pointerup must only activate when the pointer went down on the bell');
 });
 
 // ---------------------------------------------------------------------------
@@ -546,8 +787,8 @@ const EXPECTED_BELL_STYLES = {
   'pointer-events': 'auto'
 };
 
-// An element whose inline style can be read, written and stripped, and which
-// records every write.
+// An element whose inline style can be read, written, removed and stripped, and
+// which records every write.
 function createStyledElement(initialStyles) {
   const props = new Map();
   for (const [name, value] of Object.entries(initialStyles)) {
@@ -557,6 +798,7 @@ function createStyledElement(initialStyles) {
   const writes = [];
   return {
     writes,
+    parentNode: null,
     strip(name) { props.delete(name); },
     style: {
       getPropertyValue(name) { return props.get(name)?.value ?? ''; },
@@ -564,33 +806,53 @@ function createStyledElement(initialStyles) {
       setProperty(name, value, priority) {
         writes.push(name);
         props.set(name, { value, priority });
+      },
+      removeProperty(name) {
+        writes.push(`-${name}`);
+        props.delete(name);
       }
     }
   };
 }
 
 // Run the real ensureVisibility() against stubbed elements.
-function runEnsureVisibility({ stripRoot, stripBell, body, observedBody }) {
+function runEnsureVisibility({
+  stripRoot,
+  stripBell,
+  body,
+  observedBody,
+  rootParent,
+  panelOpen = false
+}) {
   const source = readContentSourceSync();
+
+  const calls = { observeBody: 0, addedOpenClass: 0, appended: 0 };
 
   const root = createStyledElement({ ...EXPECTED_ROOT_STYLES });
   const bell = createStyledElement({ ...EXPECTED_BELL_STYLES });
+  const panel = createStyledElement({});
+  panel.classList = { add() { calls.addedOpenClass += 1; } };
   if (stripRoot) root.strip(stripRoot);
   if (stripBell) bell.strip(stripBell);
+  root.parentNode = rootParent ?? body;
 
-  const calls = { observeBody: 0, addedOpenClass: 0 };
+  body.appendChild = (node) => {
+    calls.appended += 1;
+    node.parentNode = body;
+  };
 
   const applyStyles = functionSource(source, 'applyImportantStyles');
   const ensureVisibility = functionSource(source, 'ensureVisibility');
   const rootStylesArray = extractArrayAfter(source, 'const ROOT_INLINE_STYLES =', 'ROOT_INLINE_STYLES');
   const bellStylesArray = extractArrayAfter(source, 'const BELL_INLINE_STYLES =', 'BELL_INLINE_STYLES');
+  const panelStylesArray = extractArrayAfter(source, 'const PANEL_OPEN_INLINE_STYLES =', 'PANEL_OPEN_INLINE_STYLES');
 
   const keys = ['root', 'bell', 'panel', 'panelOpen', 'document', 'observedBody', 'observeBody'];
   const stubs = {
     root,
     bell,
-    panel: { classList: { add() { calls.addedOpenClass += 1; } } },
-    panelOpen: false,
+    panel,
+    panelOpen,
     document: {
       documentElement: { contains: () => true },
       body
@@ -604,6 +866,7 @@ function runEnsureVisibility({ stripRoot, stripBell, body, observedBody }) {
     `
     const ROOT_INLINE_STYLES = ${rootStylesArray};
     const BELL_INLINE_STYLES = ${bellStylesArray};
+    const PANEL_OPEN_INLINE_STYLES = ${panelStylesArray};
     ${applyStyles}
     ${ensureVisibility}
     return ensureVisibility;
@@ -611,7 +874,7 @@ function runEnsureVisibility({ stripRoot, stripBell, body, observedBody }) {
   )(...keys.map(k => stubs[k]));
 
   ensure();
-  return { root, bell, calls };
+  return { root, bell, panel, calls };
 }
 
 test('ensureVisibility only writes the declarations that are actually wrong', async () => {
@@ -670,6 +933,38 @@ test('the body watcher is not re-anchored while the body is the same node', asyn
 
   assert.equal(result.calls.observeBody, 0,
     'the observer must not be re-anchored on every check');
+});
+
+test('ensureVisibility moves a root nested in a Suno container back to body', async () => {
+  cachedContentSource = await readContentSource();
+
+  // `documentElement.contains(root)` is true in this state, so the old
+  // detached-only check left root under an ancestor that can hide it
+  // (display:none) or break its fixed positioning (transform).
+  const body = { name: 'body' };
+  const result = runEnsureVisibility({
+    body,
+    observedBody: body,
+    rootParent: { name: 'suno-container' }
+  });
+
+  assert.equal(result.calls.appended, 1,
+    'a root that is in the document but not a child of body must be re-parented');
+  assert.equal(result.root.parentNode, body);
+});
+
+test('ensureVisibility re-asserts the panel declarations while it is open', async () => {
+  cachedContentSource = await readContentSource();
+
+  const body = { name: 'body' };
+  const result = runEnsureVisibility({ body, observedBody: body, panelOpen: true });
+
+  assert.equal(result.calls.addedOpenClass, 1,
+    'the periodic heal must keep the open class applied');
+  assert.ok(result.panel.writes.includes('display'),
+    'a stylesheet override must not be able to keep the open panel hidden');
+  assert.ok(result.panel.writes.includes('opacity'),
+    'the panel declarations asserted on open must also survive the heal');
 });
 
 test('a stripped inline style is healed without waiting for the interval', async () => {
