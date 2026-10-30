@@ -523,8 +523,12 @@ async function handleMcpCaptchaRequest(captchaVersion) {
   );
 }
 
-// Retry MCP bridge connection periodically in case the server starts later
-setTimeout(connectMcpBridge, 2000);
+// Retry MCP bridge connection periodically in case the server starts later.
+// Skip in non-browser (Node/test) contexts: there is no MCP server to reach
+// and the reconnect loop would keep the process alive forever.
+if (typeof process === 'undefined' || !process.versions?.node) {
+  setTimeout(connectMcpBridge, 2000);
+}
 
 // ============================================================================
 // Persistence via IndexedDB (persistent across browser sessions)
