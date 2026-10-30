@@ -1553,6 +1553,106 @@
   }
 
   // ---- Listen for live updates ----
+// Rendered on demand by background.handleMcpCaptchaRequest when script
+// injection into the page fails (e.g. a sleeping/discarded tab): the content
+// script is alive on any loaded suno.com page, so the checkbox can still show.
+//
+// Deliberately avoids `wrappedJSObject` (Firefox denies it in some worlds) and
+// does not assume Suno exposes a `window.turnstile` global: the widget is
+// rendered by a page-world script we inject, and the token comes back through
+// a DOM attribute that both worlds can read.
+async function loadTurnstileApi() {
+  const src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+  if (document.querySelector(`script[src*="challenges.cloudflare.com/turnstile"]`)) return;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Could not load the Turnstile API script'));
+    (document.head || document.documentElement).appendChild(script);
+  });
+  // Give the API a moment to define its global.
+  for (let i = 0; i < 50; i++) {
+    if (document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]')) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  await new Promise(r => setTimeout(r, 500));
+}
+
+async function renderCaptchaWidget(fallbackSitekey) {
+  await loadTurnstileApi();
+
+  const container = document.createElement('div');
+  container.id = 'bettersuno-captcha-container';
+  container.style.cssText = 'position:fixed;top:14px;right:14px;z-index:2147483647;display:flex;flex-direction:column;align-items:flex-end;gap:6px;';
+  const hint = document.createElement('div');
+  hint.textContent = 'Suno verification — tick "Verify you are human"';
+  hint.style.cssText = 'background:#18181b;color:#fff;border:1px solid #3f3f46;border-radius:8px;padding:8px 12px;font:600 13px system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.45);max-width:340px;';
+  const host = document.createElement('div');
+  host.id = 'bettersuno-captcha-host';
+  host.dataset.token = '';
+  host.dataset.error = '';
+  container.appendChild(hint);
+  container.appendChild(host);
+  document.body.appendChild(container);
+
+  // Page-world renderer: only the page can talk to the Turnstile API.
+  const runner = document.createElement('script');
+  runner.textContent = `
+    (function () {
+      var host = document.getElementById('bettersuno-captcha-host');
+      if (!host) return;
+      var tries = 0;
+      (function attempt() {
+        if (typeof window.turnstile !== 'undefined' && window.turnstile.render) {
+          try {
+            window.turnstile.render(host, {
+              sitekey: ${JSON.stringify(fallbackSitekey)},
+              callback: function (token) { host.dataset.token = token || ''; },
+              'error-callback': function () { host.dataset.error = 'Cloudflare rejected the solve'; },
+            });
+          } catch (err) {
+            host.dataset.error = 'render failed: ' + (err && err.message ? err.message : err);
+          }
+          return;
+        }
+        if (++tries > 100) { host.dataset.error = 'Turnstile API did not become available'; return; }
+        setTimeout(attempt, 100);
+      })();
+    })();
+  `;
+  (document.head || document.documentElement).appendChild(runner);
+
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const tick = setInterval(() => {
+      if (host.dataset.token) {
+        clearInterval(tick);
+        const token = host.dataset.token;
+        container.remove();
+        runner.remove();
+        resolve(token);
+        return;
+      }
+      if (host.dataset.error) {
+        clearInterval(tick);
+        const message = host.dataset.error;
+        container.remove();
+        runner.remove();
+        reject(new Error(message));
+        return;
+      }
+      if (Date.now() - started > 110000) {
+        clearInterval(tick);
+        container.remove();
+        runner.remove();
+        reject(new Error('Turnstile widget timed out after 110s'));
+      }
+    }, 250);
+  });
+}
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'get_clerk_token') {
       const wjs = typeof wrappedJSObject !== 'undefined' ? wrappedJSObject : window;
@@ -1566,6 +1666,13 @@
       } else {
         sendResponse({ ok: false, error: 'no-clerk-session' });
       }
+      return true;
+    }
+
+    if (msg.type === 'renderCaptchaWidget') {
+      renderCaptchaWidget(msg.sitekey)
+        .then(token => sendResponse({ ok: true, token }))
+        .catch(err => sendResponse({ ok: false, error: err.message }));
       return true;
     }
 

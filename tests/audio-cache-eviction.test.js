@@ -42,7 +42,6 @@ const SOURCE = fs.readFileSync(path.join(ROOT, 'content-idb.js'), 'utf8');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AUDIO_MAX_AGE_MS = 7 * DAY_MS;
-const IMAGE_MAX_AGE_MS = 30 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Minimal in-memory IndexedDB stub.
@@ -111,15 +110,23 @@ function createFakeIndexedDB() {
         record.stores.set(storeName, { keyPath, rows: new Map() });
         return record.stores.get(storeName);
       },
-      transaction(storeName) {
-        const store = record.stores.get(storeName);
-        if (!store) throw new Error(`NotFoundError: no store ${storeName}`);
+      transaction(storeNames) {
+        const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+        for (const name of names) {
+          if (!record.stores.has(name)) throw new Error(`NotFoundError: no store ${name}`);
+        }
 
         const transaction = {
           oncomplete: null,
           onerror: null,
           error: null,
-          objectStore: () => makeStore(storeName, store),
+          // content-idb.js now uses multi-store transactions for the image
+          // blob + metadata sidecar; the stub has to resolve a name at call time.
+          objectStore: (storeName) => {
+            const store = record.stores.get(storeName);
+            if (!store) throw new Error(`NotFoundError: no store ${storeName}`);
+            return makeStore(storeName, store);
+          },
         };
 
         // The real API fires oncomplete after the microtask queue drains, which
@@ -283,25 +290,24 @@ test('the sweep is selective within one store, not all-or-nothing', async () => 
   assert.deepEqual(await audioIds(api), ['auto-stale', 'plain-fresh']);
 });
 
-test('auto_cached records are only skipped in audioCache, never in imageCache', async () => {
-  // imageCache is a different store with a different max age; the exemption must
-  // not leak across stores. An `auto_cached` flag there is meaningless, and the
-  // 30-minute image TTL must keep applying.
+test('imageCache is outside the audio age sweep (thumbnail cache is uncapped)', async () => {
+  // Thumbnails used to expire after 30 minutes, which made the image cache
+  // almost useless for scrolling. The unfreeze (2026-10-29) moved images out of
+  // evictStaleBlobs entirely: only audio records age out.
   const { api, indexedDB } = loadContentIdb();
   await seedRecord(indexedDB, api, 'audioCache', audioRow('img-probe', { ageMs: 0 }));
   await seedRecord(indexedDB, api, 'imageCache', {
     songId: 'img-probe',
     blob: { size: 10 },
-    timestamp: Date.now() - IMAGE_MAX_AGE_MS - 1000,
-    auto_cached: true,
+    url: 'https://cdn2.suno.ai/probe.jpeg?width=100',
+    timestamp: Date.now() - 365 * DAY_MS,
   });
 
   await api.evictStaleBlobs();
 
   const images = await records(api, 'imageCache');
-  assert.equal(images.length, 0, 'a stale imageCache record is evicted regardless of auto_cached');
-  // The audio record shares the songId but lives in a different store; deleting
-  // the image must not remove it.
+  assert.equal(images.length, 1, 'a one-year-old thumbnail survives the sweep');
+  // The audio record shares the songId but lives in a different store.
   assert.deepEqual(await audioIds(api), ['img-probe']);
 });
 

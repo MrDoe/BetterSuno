@@ -22,7 +22,7 @@
 | `build.js` | Copies `SHARED_FILES` + `SHARED_DIRS`; `verifyRelativeImports()` fails the build when a module is not shipped. |
 
 Content scripts ↔ `background.js` via `chrome.runtime.sendMessage`. `content.js` builds the DOM, `downloader.js` consumes it.
-DB `BetterSunoicationsDB` v3: `tabStates`, `songsList`, `userPreferences`, `audioCache`, `imageCache`.
+DB `BetterSunoicationsDB` v4: `tabStates`, `songsList`, `userPreferences`, `audioCache`, `imageCache`, `imageCacheMeta`.
 
 `audioCache` has two record classes. Untagged records (manual **Save to DB**, and any plain play of an encrypted clip) age out after 7 days via `evictStaleBlobs`. Records with `auto_cached: true` (written only by Settings → **Auto-cache songs I listen to**, via `downloader.cacheSongInDb(song, { autoCached: true })`) are exempt from the age sweep and survive until the 500 MB `evictBySize` trim or **Delete from DB** — that exemption is the point of the feature. Both `saveAudioBlobToIDB` and `resolveEncryptedAudioBlob` take the flag so the encrypted and plain paths tag identically.
 
@@ -38,6 +38,18 @@ The library list is **infinite-scroll, not virtualised** — rows are appended i
 - **`content-visibility: auto` needs `contain-intrinsic-size`.** Without it a skipped `.song-item` collapses to zero height and the list jumps. Intrinsic size = real row height: 65px desktop, 93px under `max-width: 768px`; the test derives both from `content.css`, so changing the thumbnail or padding without updating them fails the build.
 
 `updateSelectedCount()` is a single pass, and the infinite-scroll path skips it (`renderSongListChunk(count, { updateCount: false })`) — appending rows of the same filtered list cannot change the counters.
+
+## Thumbnail cache
+Every library cover is cached in IndexedDB and rendered from a blob URL; the network is a miss path, not the default. Added 2026-10-29 (guards: `tests/thumbnail-cache.test.js`, `tests/thumbnail-loader.test.js`).
+
+- **`imageCache` (blob) + `imageCacheMeta` (blob-free sidecar)**, both keyed by `songId`. A hit requires `meta.url === currentCoverUrl`; a regenerated cover is therefore a miss, never a stale image. `imageCacheMeta` is what startup/eviction/usage read — **never `getAll()` the blob store just to enumerate it**.
+- **Uncapped by design** (user decision 2026-10-29): no image TTL, no image size cap, and `evictStaleBlobs` no longer touches images at all. A cover is a few KB; evicting it only buys a re-download. `Delete from DB` / `Delete Library` are the explicit reclaim paths (`deleteImageBlobFromIDB` clears both stores; the latter also clears the in-memory state).
+- **`cachedSongIds` is audio-only.** Do not gate image reads on it again — that was the old bug: only "Save to DB" songs ever looked in `imageCache`.
+- **Render path:** `createSongListItem` creates an `<img>` with no `src` and calls `hydrateThumbnail()`. Order: in-memory object-URL LRU → `getImageBlobFromIDB` → network queue. Never assign a remote URL first (that reintroduces the scroll race); the container gradient is the placeholder. While the list is hidden (panel closed) cache reads still paint but the network is deferred; `refreshCurrentVisibleSongMetadata` re-hydrates on panel open/scroll.
+- **Loader:** 6 concurrent fetches, deduped by `songId|url` while queued *and* in flight, rows promoted to the front by the visibility observer, next 40 covers prefetched by `renderSongList` / `renderSongListChunk` (skipped when `navigator.connection.saveData` or the list is not visible). Failures fall back to a direct `img.src` once and are not retried; oversize/non-image responses are rejected.
+- **`?width` is an allowlist.** Suno's transform accepts only **100, 256, 360, 720**; anything else returns 403 with an empty JSON body (the old `?width=64` save was therefore a silent no-op). Keep 100 unless a larger thumbnail is genuinely needed.
+- **Row recycling:** async completions resolve the live row through `renderedSongItems` (with the `parentNode === songList` guard); a synchronous hit paints the element still being built. Object URLs are LRU-capped at 300 and revoked on eviction, not on `load`.
+- Both DB wrappers must stay on the same version (now **4**); `db.onversionchange` closes the connection so an old tab cannot block the upgrade.
 
 ## Song ownership in the panel
 `isSongFromOtherArtist` decides the 👤 badge, the Download button, and whether a song can be saved as a file. Three rules (fixed 2026-10-20, guard: `tests/library-ownership.test.js`):

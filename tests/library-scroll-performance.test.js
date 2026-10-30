@@ -224,7 +224,7 @@ test('rendered rows are handed to the observer when they are appended', async ()
   const chunk = extractFunctionBody(source, 'function renderSongListChunk(', 'renderSongListChunk');
   const factory = extractFunctionBody(source, 'function getOrCreateSongListItem(', 'getOrCreateSongListItem');
 
-  assert.match(chunk, /getOrCreateSongListItem\(song\)/,
+  assert.match(chunk, /getOrCreateSongListItem\(song, \{ allowThumbnails \}\)/,
     'appended rows must come from the shared element factory');
   assert.match(chunk, /renderedSongItems\.set\(song\.id, item\)/,
     'the rendered-rows map must be kept in sync with the DOM');
@@ -324,7 +324,12 @@ test('the infinite-scroll path does not recompute the selection counters', async
       songList: { insertBefore() {} },
       songListSentinel: {},
       updateSongListSentinelState() {},
-      SONG_RENDER_BATCH_SIZE: 40
+      SONG_RENDER_BATCH_SIZE: 40,
+      // Thumbnail warm-ahead is exercised in tests/thumbnail-loader.test.js;
+      // here it only has to be a no-op hook the chunk renderer can call.
+      isSongListVisible: () => true,
+      prefetchThumbnailsForSongs() {},
+      THUMBNAIL_PREFETCH_AHEAD: 40
     };
     const keys = Object.keys(stubs);
     new Function(...keys, `return (${fn.toString()})(${options ? '40, ' + options : '40'});`)
@@ -502,7 +507,12 @@ function createListHarness(source) {
     scheduleVisibleSongRefresh() {},
     getActiveSongs: () => [],
     filterOffline: { checked: false },
-    cachedSongIds: new Set()
+    cachedSongIds: new Set(),
+    // The full render now needs one visibility check and the warm-ahead hook;
+    // both are thumbnail concerns covered in tests/thumbnail-loader.test.js.
+    isSongListVisible: () => true,
+    prefetchThumbnailsForSongs() {},
+    THUMBNAIL_PREFETCH_AHEAD: 40
   };
 
   const composed = ['detachRenderedSongItem', 'clearRenderedSongItems', 'getOrCreateSongListItem', 'renderSongList']

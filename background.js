@@ -432,6 +432,23 @@ async function solveCaptchaInPage(fallbackSitekey) {
   });
 }
 
+function waitForTabComplete(tabId, timeoutMs) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (id, info) => {
+      if (id === tabId && info.status === 'complete') finish();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    setTimeout(finish, timeoutMs);
+  });
+}
+
 async function handleMcpCaptchaRequest(captchaVersion) {
   // Suno's /api/c/check reports which generation captcha is required:
   //   1 = hCaptcha, 2 = Turnstile. The web client prefers Turnstile and only
@@ -447,24 +464,63 @@ async function handleMcpCaptchaRequest(captchaVersion) {
     || sunoTabs.find(t => typeof t.id === 'number');
   if (!tab) throw new Error('No Suno tab available to solve the captcha — open https://suno.com/create');
 
-  const executeOptions = {
-    target: { tabId: tab.id, frameIds: [0] },
-    func: solveCaptchaInPage,
-    args: [{ value: FALLBACK_CAPTCHA_SITEKEY }],
-  };
-  if (!isFirefox) executeOptions.world = 'MAIN';
-
-  let results;
+  // A discarded or sleeping tab answers injection with an empty result set,
+  // which used to surface as "tick the checkbox" without ever rendering one.
   try {
-    results = await chrome.scripting.executeScript(executeOptions);
+    if (tab.discarded) {
+      await chrome.tabs.reload(tab.id);
+      await waitForTabComplete(tab.id, 20000);
+    }
+    await chrome.tabs.update(tab.id, { active: true });
   } catch (err) {
-    throw new Error(`Captcha solve failed: ${err && err.message ? err.message : String(err)}`);
+    log('mcp-bridge: could not wake Suno tab:', err.message);
   }
-  const validResult = Array.isArray(results) ? results.find(r => r && r.result != null) : null;
-  if (!validResult) {
-    throw new Error('Suno requires a human Turnstile check — tick the "Verify you are human" checkbox in the Suno tab, then retry');
+
+  // Injection retry ladder: Firefox can return an empty result set for a
+  // target form that does not match the live document.
+  const attempts = [];
+  const targets = [
+    { tabId: tab.id, frameIds: [0] },
+    { tabId: tab.id },
+    { tabId: tab.id, allFrames: true },
+  ];
+  for (const target of targets) {
+    const executeOptions = {
+      target,
+      func: solveCaptchaInPage,
+      args: [{ value: FALLBACK_CAPTCHA_SITEKEY }],
+    };
+    if (!isFirefox) executeOptions.world = 'MAIN';
+    let results;
+    try {
+      results = await chrome.scripting.executeScript(executeOptions);
+    } catch (err) {
+      attempts.push(`inject ${JSON.stringify(target)} threw: ${err && err.message ? err.message : String(err)}`);
+      continue;
+    }
+    const validResult = Array.isArray(results) ? results.find(r => r && r.result != null) : null;
+    if (validResult) return validResult.result;
+    attempts.push(`inject ${JSON.stringify(target)}: no result (${Array.isArray(results) ? results.length : 'non-array'})`);
   }
-  return validResult.result;
+
+  // Last resort: the content script is guaranteed to be alive on a loaded
+  // suno.com page, so it can render the widget even when injection fails.
+  try {
+    const reply = await chrome.tabs.sendMessage(tab.id, {
+      type: 'renderCaptchaWidget',
+      sitekey: FALLBACK_CAPTCHA_SITEKEY,
+    });
+    if (reply && reply.token) return reply.token;
+    attempts.push(`content-script: ${reply && reply.error ? reply.error : 'no token'}`);
+  } catch (err) {
+    attempts.push(`content-script: ${err && err.message ? err.message : String(err)}`);
+  }
+
+  throw new Error(
+    'Suno requires a human Turnstile check and no widget could be shown '
+    + `(${attempts.join('; ')}). Open https://suno.com/create in the Suno tab, `
+    + 'tick the "Verify you are human" checkbox, then retry'
+  );
 }
 
 // Retry MCP bridge connection periodically in case the server starts later

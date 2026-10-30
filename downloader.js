@@ -40,6 +40,33 @@
     // until the next list re-render (e.g. the 💾 chip after auto-caching).
     const renderedSongItems = new Map();
     let visibleObserverHasReported = false; // false ⇒ fall back to the rect scan
+
+    // ---- Thumbnail cache ----------------------------------------------------
+    //
+    // Thumbnails live in IndexedDB independently of the audio cache. They used
+    // to be gated on `cachedSongIds` (audio bakes) and to expire after 30
+    // minutes, so in practice almost every row re-downloaded its cover on every
+    // render. The cache is now always on, keyed by songId *and* source URL, and
+    // has no age/size cap: a cover is a few KB and evicting it only buys a
+    // re-download.
+    //
+    // `thumbnailMeta` is the in-memory hit/miss index (blob-free), hydrated once
+    // from imageCacheMeta at startup. The loader is a small bounded queue so a
+    // fast scroll cannot open hundreds of sockets at once; rows that become
+    // visible jump the queue.
+    const thumbnailMeta = new Map();       // songId → { url, size, timestamp }
+    const thumbnailObjectUrls = new Map();  // songId → { url, objectUrl } (LRU)
+    const thumbnailQueue = [];              // jobs waiting for a fetch slot
+    const thumbnailQueuedKeys = new Set();  // `${songId}|${url}` queued OR in flight
+    const thumbnailFailed = new Set();      // `${songId}|${url}` failed this session
+    let thumbnailActiveCount = 0;
+    const THUMBNAIL_MAX_CONCURRENT = 6;
+    const THUMBNAIL_QUEUE_LIMIT = 160;
+    const THUMBNAIL_OBJECT_URL_LIMIT = 300;
+    const THUMBNAIL_FETCH_TIMEOUT_MS = 15000;
+    const THUMBNAIL_MAX_BYTES = 512 * 1024;
+    const THUMBNAIL_PREFETCH_AHEAD = SONG_RENDER_BATCH_SIZE;
+
     let songListScrollRafPending = false;
     let songChunkRenderRafPending = false;
     // songId → song, rebuilt only when the underlying collections are replaced.
@@ -579,8 +606,10 @@
             return '';
         }
 
-        const isCached = cachedSongIds.has(song.id);
-        return `${source.type || 'unknown'}:${source.url}:${isCached ? 'cached' : 'remote'}`;
+        // Only the image itself. The audio-cache state is irrelevant now that
+        // every thumbnail is served from its own cache, and including it forced
+        // a needless row rebuild (and image re-read) on Save to DB.
+        return `${source.type || 'unknown'}:${source.url}`;
     }
 
     function getSunoThumbnailUrl(url) {
@@ -594,10 +623,347 @@
                 return url;
             }
 
+            // Suno's transform only accepts a fixed set of widths: 100, 256,
+            // 360 and 720 (verified 2026-10-29; anything else — 64, 128, 160,
+            // 200, 480 … — returns 403 with an empty JSON body). 100px covers
+            // the 44px desktop row and the 52×80 mobile row at ~2× DPR for
+            // ~3–9KB. Do not "improve" this without probing the CDN again.
             parsed.searchParams.set('width', '100');
             return parsed.toString();
         } catch {
             return url;
+        }
+    }
+
+    // ---- Thumbnail cache loader ---------------------------------------------
+
+    function getThumbnailCacheKey(songId, url) {
+        return `${songId}|${url}`;
+    }
+
+    function revokeThumbnailObjectUrl(songId) {
+        const entry = thumbnailObjectUrls.get(songId);
+        if (!entry) {
+            return;
+        }
+        thumbnailObjectUrls.delete(songId);
+        try {
+            URL.revokeObjectURL(entry.objectUrl);
+        } catch (e) {
+            // ignore
+        }
+    }
+
+    function getThumbnailObjectUrl(songId, url, blob) {
+        const existing = thumbnailObjectUrls.get(songId);
+        if (existing && existing.url === url) {
+            // Refresh LRU order without creating a second URL for the same blob.
+            thumbnailObjectUrls.delete(songId);
+            thumbnailObjectUrls.set(songId, existing);
+            return existing.objectUrl;
+        }
+
+        if (existing) {
+            revokeThumbnailObjectUrl(songId);
+        }
+
+        const objectUrl = URL.createObjectURL(blob);
+        thumbnailObjectUrls.set(songId, { url, objectUrl });
+
+        while (thumbnailObjectUrls.size > THUMBNAIL_OBJECT_URL_LIMIT) {
+            const oldestSongId = thumbnailObjectUrls.keys().next().value;
+            revokeThumbnailObjectUrl(oldestSongId);
+        }
+
+        return objectUrl;
+    }
+
+    // Drop every in-memory trace of a song's thumbnail. Used when the cached
+    // cover is invalidated (URL change) or the user deletes it from the DB.
+    function forgetThumbnail(songId) {
+        thumbnailMeta.delete(songId);
+        revokeThumbnailObjectUrl(songId);
+    }
+
+    function clearThumbnailCacheState() {
+        thumbnailMeta.clear();
+        thumbnailFailed.clear();
+        thumbnailQueuedKeys.clear();
+        thumbnailQueue.length = 0;
+        Array.from(thumbnailObjectUrls.keys()).forEach(revokeThumbnailObjectUrl);
+    }
+
+    function getRenderedThumbnail(songId) {
+        const item = renderedSongItems.get(songId);
+        if (!item || item.parentNode !== songList) {
+            return null;
+        }
+        return item.querySelector('.song-thumbnail');
+    }
+
+    function setThumbnailImageSrc(songId, url, src) {
+        const thumbnail = getRenderedThumbnail(songId);
+        if (!thumbnail) {
+            return;
+        }
+        applyThumbnailToImage(thumbnail.querySelector('img'), url, src);
+    }
+
+    // Applies to a specific element. This is what lets a synchronous cache hit
+    // paint the row that is still being built (it is not in `renderedSongItems`
+    // yet); async completions resolve the live row instead, so a recycled row
+    // can never receive the previous song's cover.
+    function applyThumbnailToImage(image, url, src) {
+        if (!image) {
+            return;
+        }
+
+        if (image.dataset.thumbnailUrl === url && image.getAttribute('src')) {
+            return;
+        }
+
+        image.dataset.thumbnailUrl = url;
+        image.src = src;
+
+        const container = typeof image.closest === 'function' ? image.closest('.song-thumbnail') : null;
+        if (container) {
+            container.classList.remove('is-fallback');
+        }
+    }
+
+    // The pre-fetch fallback. Cache reads/writes must never make a thumbnail
+    // *worse* than the old direct <img src>: if the blob route fails (offline,
+    // CORS on a non-Suno host, 4xx), let the browser try the URL itself.
+    function fallbackThumbnailSrc(songId, url) {
+        setThumbnailImageSrc(songId, url, url);
+    }
+
+    function promoteThumbnailJob(key) {
+        const index = thumbnailQueue.findIndex((job) => job.key === key);
+        if (index <= 0) {
+            return;
+        }
+        const [job] = thumbnailQueue.splice(index, 1);
+        job.priority = 'visible';
+        thumbnailQueue.unshift(job);
+    }
+
+    function requestThumbnailFetch(songId, url, { priority = 'background' } = {}) {
+        if (!songId || !url) {
+            return;
+        }
+
+        const key = getThumbnailCacheKey(songId, url);
+
+        const cachedObjectUrl = thumbnailObjectUrls.get(songId);
+        if (cachedObjectUrl && cachedObjectUrl.url === url) {
+            setThumbnailImageSrc(songId, url, cachedObjectUrl.objectUrl);
+            return;
+        }
+
+        const meta = thumbnailMeta.get(songId);
+        if (meta && meta.url === url) {
+            // Claimed as cached; hydrateThumbnail() owns the blob read.
+            return;
+        }
+
+        if (thumbnailFailed.has(key)) {
+            fallbackThumbnailSrc(songId, url);
+            return;
+        }
+
+        if (thumbnailQueuedKeys.has(key)) {
+            if (priority === 'visible') {
+                promoteThumbnailJob(key);
+            }
+            return;
+        }
+
+        if (thumbnailQueue.length >= THUMBNAIL_QUEUE_LIMIT && priority !== 'visible') {
+            // Bounded queue: during a fast scroll, drop speculative work rather
+            // than queueing the whole library.
+            return;
+        }
+
+        thumbnailQueue.push({ key, songId, url, priority });
+        thumbnailQueuedKeys.add(key);
+
+        if (priority === 'visible') {
+            promoteThumbnailJob(key);
+        }
+
+        flushThumbnailQueue();
+    }
+
+    function flushThumbnailQueue() {
+        while (thumbnailActiveCount < THUMBNAIL_MAX_CONCURRENT && thumbnailQueue.length > 0) {
+            const job = thumbnailQueue.shift();
+            // The key stays in `thumbnailQueuedKeys` while the request is in
+            // flight, so a re-render during the fetch cannot enqueue a duplicate.
+            thumbnailActiveCount += 1;
+            void runThumbnailJob(job).finally(() => {
+                thumbnailQueuedKeys.delete(job.key);
+                thumbnailActiveCount -= 1;
+                flushThumbnailQueue();
+            });
+        }
+    }
+
+    async function runThumbnailJob(job) {
+        const { songId, url } = job;
+        const key = job.key;
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const timeoutTimer = setTimeout(() => {
+            try { controller?.abort(); } catch (e) {}
+        }, THUMBNAIL_FETCH_TIMEOUT_MS);
+
+        try {
+            const response = await fetch(url, {
+                credentials: 'omit',
+                cache: 'default',
+                signal: controller?.signal
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const declaredLength = Number(response.headers?.get?.('content-length'));
+            if (Number.isFinite(declaredLength) && declaredLength > THUMBNAIL_MAX_BYTES) {
+                throw new Error(`Image too large: ${declaredLength} bytes`);
+            }
+
+            const blob = await response.blob();
+            if (!blob || !blob.size) {
+                throw new Error('Empty image response');
+            }
+            if (blob.size > THUMBNAIL_MAX_BYTES) {
+                throw new Error(`Image too large: ${blob.size} bytes`);
+            }
+            if (blob.type && !blob.type.startsWith('image/')) {
+                throw new Error(`Not an image: ${blob.type}`);
+            }
+
+            thumbnailMeta.set(songId, { url, size: blob.size, timestamp: Date.now() });
+            const objectUrl = getThumbnailObjectUrl(songId, url, blob);
+            // Paint first, persist second: the row should not wait on IDB.
+            setThumbnailImageSrc(songId, url, objectUrl);
+            await saveImageBlobToIDB(songId, blob, { url });
+        } catch (error) {
+            thumbnailFailed.add(key);
+            fallbackThumbnailSrc(songId, url);
+        } finally {
+            clearTimeout(timeoutTimer);
+        }
+    }
+
+    // Cache-first hydration for one rendered row. Returns synchronously only
+    // when the object URL is already in memory; otherwise the row fills in when
+    // the blob read or network fetch completes.
+    //
+    // `allowNetwork: false` is used while the library is hidden (the panel can
+    // be closed while the library loads): cached covers still paint from IDB,
+    // but speculative downloads wait until the list is actually on screen. The
+    // visibility observer / visible-song refresh re-hydrates later.
+    function hydrateThumbnail(song, source, image, { allowNetwork = true } = {}) {
+        if (!song?.id || !source?.url || source.type !== 'image') {
+            return;
+        }
+
+        const songId = song.id;
+        const url = source.url;
+        const failedKey = getThumbnailCacheKey(songId, url);
+
+        // A previous attempt failed (offline, 4xx, CORS on a foreign host).
+        // Skip the cache/queue and let the <img> try the URL directly.
+        if (thumbnailFailed.has(failedKey)) {
+            applyThumbnailToImage(image, url, url);
+            return;
+        }
+
+        const cachedObjectUrl = thumbnailObjectUrls.get(songId);
+        if (cachedObjectUrl && cachedObjectUrl.url === url) {
+            applyThumbnailToImage(image, url, cachedObjectUrl.objectUrl);
+            return;
+        }
+
+        const meta = thumbnailMeta.get(songId);
+        if (meta && meta.url === url) {
+            void getImageBlobFromIDB(songId).then((blob) => {
+                if (blob) {
+                    const objectUrl = getThumbnailObjectUrl(songId, url, blob);
+                    setThumbnailImageSrc(songId, url, objectUrl);
+                    return;
+                }
+                // Metadata without a blob (partial write, manual clear): treat
+                // the record as gone and fetch it again.
+                thumbnailMeta.delete(songId);
+                if (allowNetwork) {
+                    requestThumbnailFetch(songId, url, { priority: 'background' });
+                }
+            }).catch(() => {
+                thumbnailMeta.delete(songId);
+                if (allowNetwork) {
+                    requestThumbnailFetch(songId, url, { priority: 'background' });
+                }
+            });
+            return;
+        }
+
+        if (allowNetwork) {
+            requestThumbnailFetch(songId, url, { priority: 'background' });
+        }
+    }
+
+    // Re-run hydration for the rows currently in view. Called by the debounced
+    // visible-song refresh (panel open, scroll, tab return) — the path that
+    // turns "deferred while hidden" rows back into network work.
+    function hydrateVisibleThumbnails(songIds) {
+        if (!Array.isArray(songIds) || songIds.length === 0) {
+            return;
+        }
+
+        const songLookup = getSongLookupMap();
+        for (const songId of songIds) {
+            const item = renderedSongItems.get(songId);
+            if (!item || item.parentNode !== songList) {
+                continue;
+            }
+
+            const image = item.querySelector('.song-thumbnail img');
+            if (!image) {
+                continue;
+            }
+
+            const song = songLookup.get(songId);
+            const source = song ? getSongThumbnailSource(song) : null;
+            hydrateThumbnail(song, source, image, { allowNetwork: true });
+        }
+    }
+
+    function prefetchThumbnailsForSongs(songs) {
+        if (!Array.isArray(songs) || songs.length === 0) {
+            return;
+        }
+
+        // Nothing to warm while the list is not on screen. One rect read per
+        // batch, not per row.
+        if (!isSongListVisible()) {
+            return;
+        }
+
+        // Prefetching is speculative: respect the user's data-saver signal.
+        const connection = typeof navigator !== 'undefined' ? navigator.connection : null;
+        if (connection?.saveData === true) {
+            return;
+        }
+
+        for (const song of songs) {
+            const source = getSongThumbnailSource(song);
+            if (source?.type !== 'image' || !source.url) {
+                continue;
+            }
+            requestThumbnailFetch(song.id, source.url, { priority: 'background' });
         }
     }
 
@@ -2572,6 +2938,7 @@
         estimateDbUsageBytes,
         evictStaleBlobs,
         getAllCachedSongIdsFromIDB,
+        getAllImageCacheMeta,
         getAllRecordsFromStore,
         getAudioBlobFromIDB,
         getImageBlobFromIDB,
@@ -2784,6 +3151,9 @@
             return;
         }
 
+        // Panel open / scroll / tab return: rows whose covers were deferred
+        // while the list was hidden get their network work now.
+        hydrateVisibleThumbnails(visibleIds);
         refreshVisibleSongItems(visibleIds);
         void refreshVisibleSongsMetadata(visibleIds, { forceRefresh });
     }
@@ -3254,14 +3624,15 @@
         try {
             console.log('[Downloader] Loading songs from IndexedDB...');
             // Load songs and cached audio IDs from IndexedDB in parallel
-            const [savedSongs, savedFormat, savedSongsMeta, cachedIds, savedSyncMeta, persistedSelectedPlaylist, savedAutoCache] = await Promise.all([
+            const [savedSongs, savedFormat, savedSongsMeta, cachedIds, savedSyncMeta, persistedSelectedPlaylist, savedAutoCache, imageCacheMetaRecords] = await Promise.all([
                 loadSongsFromIDB(),
                 loadPreferenceFromIDB('sunoFormat'),
                 loadPreferenceFromIDB('sunoSongsList'),
                 getAllCachedSongIdsFromIDB(),
                 loadPreferenceFromIDB(SYNC_META_KEY),
                 loadPreferenceFromIDB(SELECTED_PLAYLIST_KEY),
-                loadPreferenceFromIDB(AUTO_CACHE_PREF_KEY)
+                loadPreferenceFromIDB(AUTO_CACHE_PREF_KEY),
+                getAllImageCacheMeta()
             ]);
             savedSelectedPlaylist = persistedSelectedPlaylist || '';
             autoCacheListenedEnabled = savedAutoCache === true;
@@ -3271,7 +3642,22 @@
                 ...createDefaultSyncMeta(),
                 ...(savedSyncMeta || {})
             };
-            console.log('[Downloader] Loaded', savedSongs?.length || 0, 'songs,', cachedSongIds.size, 'cached audio blobs from IndexedDB');
+
+            // Hydrate the thumbnail hit/miss index before the first render so a
+            // cached cover is painted without touching the network.
+            thumbnailMeta.clear();
+            (Array.isArray(imageCacheMetaRecords) ? imageCacheMetaRecords : []).forEach((record) => {
+                if (!record?.songId || !record.url) {
+                    return;
+                }
+                thumbnailMeta.set(record.songId, {
+                    url: record.url,
+                    size: Number(record.size) || 0,
+                    timestamp: Number(record.timestamp) || 0
+                });
+            });
+
+            console.log('[Downloader] Loaded', savedSongs?.length || 0, 'songs,', cachedSongIds.size, 'cached audio blobs,', thumbnailMeta.size, 'cached thumbnails from IndexedDB');
             
             // Evict stale blobs on startup (fire-and-forget)
             if (typeof evictStaleBlobs === 'function') {
@@ -3499,7 +3885,10 @@
         }
 
         if (staleImageSongIds.length > 0) {
-            void Promise.all(staleImageSongIds.map(songId => deleteImageBlobFromIDB(songId)));
+            void Promise.all(staleImageSongIds.map(songId => {
+                forgetThumbnail(songId);
+                return deleteImageBlobFromIDB(songId);
+            }));
         }
 
         return {
@@ -3573,7 +3962,10 @@
         }
 
         if (staleImageSongIds.size > 0) {
-            void Promise.all(staleImageSongIds.map(songId => deleteImageBlobFromIDB(songId)));
+            void Promise.all(Array.from(staleImageSongIds).map(songId => {
+                forgetThumbnail(songId);
+                return deleteImageBlobFromIDB(songId);
+            }));
         }
 
         return { metadataUpdateCount: changedIds.size };
@@ -3689,16 +4081,26 @@
             await saveAudioBlobToIDB(song.id, blob, { autoCached });
         }
 
-        // Also cache a small thumbnail (64px wide via CDN query param)
-        const rawImageUrl = song.image_url || song.thumbnail_url || song.cover_image_url || song.artwork_url || null;
-        if (rawImageUrl) {
+        // Cache the same thumbnail the row loader uses. One URL helper for both
+        // paths, so "Save to DB" and scroll-time caching can never store two
+        // different resolutions of the same cover.
+        const thumbSource = getSongThumbnailSource(song);
+        if (thumbSource?.type === 'image' && thumbSource.url) {
             try {
-                const thumbUrl = rawImageUrl.split('?')[0] + '?width=64';
-                const imgResponse = await fetch(thumbUrl);
+                const imgResponse = await fetch(thumbSource.url, { credentials: 'omit' });
                 if (imgResponse.ok) {
                     const imgBlob = await imgResponse.blob();
-                    await saveImageBlobToIDB(song.id, imgBlob);
-                    delete song.image_cache_bust;
+                    if (imgBlob?.size) {
+                        await saveImageBlobToIDB(song.id, imgBlob, { url: thumbSource.url });
+                        thumbnailMeta.set(song.id, {
+                            url: thumbSource.url,
+                            size: imgBlob.size,
+                            timestamp: Date.now()
+                        });
+                        const objectUrl = getThumbnailObjectUrl(song.id, thumbSource.url, imgBlob);
+                        setThumbnailImageSrc(song.id, thumbSource.url, objectUrl);
+                        delete song.image_cache_bust;
+                    }
                 }
             } catch (imgErr) {
                 // thumbnail failure is non-fatal
@@ -3799,6 +4201,7 @@
                 try {
                     await deleteAudioBlobFromIDB(songId);
                     await deleteImageBlobFromIDB(songId);
+                    forgetThumbnail(songId);
                     cachedSongIds.delete(songId);
                     songItemCache.delete(songId); // force re-creation without cached state
                     deleted++;
@@ -4710,11 +5113,13 @@
     document.addEventListener('bettersuno:delete-library', async () => {
         try {
             await clearStorage();
-            // Also wipe the audio and image caches
+            // Also wipe the audio and image caches. clearStore('imageCache')
+            // clears the metadata sidecar with it.
             try {
                 await idbApi.clearStore('audioCache');
                 await idbApi.clearStore('imageCache');
             } catch (e) { /* non-fatal */ }
+            clearThumbnailCacheState();
             allSongs = [];
             playlistSongs = null;
             selectedSongIds.clear();
@@ -5208,6 +5613,14 @@
                 if (entry.isIntersecting && target.isConnected) {
                     visibleSongItems.set(songId, target);
                     visibleObserverHasReported = true;
+
+                    // A row that is on screen must not wait behind speculative
+                    // prefetch work.
+                    const song = getSongLookupMap().get(songId);
+                    const source = song ? getSongThumbnailSource(song) : null;
+                    if (source?.type === 'image' && source.url) {
+                        requestThumbnailFetch(songId, source.url, { priority: 'visible' });
+                    }
                 } else if (visibleSongItems.get(songId) === target) {
                     visibleSongItems.delete(songId);
                 }
@@ -5343,7 +5756,7 @@
         ].join('|');
     }
 
-    function createSongListItem(song) {
+    function createSongListItem(song, options = {}) {
         const item = document.createElement("div");
         item.className = "song-item";
         item.dataset.songId = song.id;
@@ -5375,41 +5788,45 @@
             togglePlay(song);
         });
 
-        function attachThumbnail(src, type) {
-            if (!src) return;
-            
+        function clearThumbnailContainer() {
             thumbnail.classList.remove('is-fallback');
             thumbnail.textContent = '';
             thumbnail.innerHTML = '';
+        }
 
-            if (type === 'video') {
-                const videoEl = document.createElement('video');
-                videoEl.className = 'song-thumbnail-image';
-                videoEl.src = src;
-                videoEl.autoplay = true;
-                videoEl.loop = true;
-                videoEl.muted = true;
-                videoEl.playsInline = true;
-                videoEl.preload = 'metadata';
-                videoEl.style.display = 'block';
-                videoEl.style.width = '100%';
-                videoEl.style.height = '100%';
-                videoEl.style.objectFit = 'cover';
-                videoEl.addEventListener('error', () => {
-                    videoEl.remove();
-                    thumbnail.classList.add('is-fallback');
-                    thumbnail.textContent = '♪';
-                }, { once: true });
-                videoEl.addEventListener('loadedmetadata', () => {
-                    thumbnail.classList.remove('is-fallback');
-                }, { once: true });
-                thumbnail.appendChild(videoEl);
-                return;
-            }
+        function attachVideoThumbnail(src) {
+            clearThumbnailContainer();
+
+            const videoEl = document.createElement('video');
+            videoEl.className = 'song-thumbnail-image';
+            videoEl.src = src;
+            videoEl.autoplay = true;
+            videoEl.loop = true;
+            videoEl.muted = true;
+            videoEl.playsInline = true;
+            videoEl.preload = 'metadata';
+            videoEl.style.display = 'block';
+            videoEl.style.width = '100%';
+            videoEl.style.height = '100%';
+            videoEl.style.objectFit = 'cover';
+            videoEl.addEventListener('error', () => {
+                videoEl.remove();
+                showThumbnailFallback();
+            }, { once: true });
+            videoEl.addEventListener('loadedmetadata', () => {
+                thumbnail.classList.remove('is-fallback');
+            }, { once: true });
+            thumbnail.appendChild(videoEl);
+        }
+
+        // No src yet: the container gradient is the placeholder and the loader
+        // fills it from IndexedDB (or the network on a miss). Setting the remote
+        // URL up front is what used to make every row race the scroll.
+        function attachImageThumbnail() {
+            clearThumbnailContainer();
 
             const thumbnailImage = document.createElement("img");
             thumbnailImage.className = "song-thumbnail-image";
-            thumbnailImage.src = src;
             thumbnailImage.alt = song.title ? `${song.title} cover art` : 'Song cover art';
             thumbnailImage.loading = 'lazy';
             thumbnailImage.decoding = 'async';
@@ -5418,46 +5835,31 @@
             thumbnailImage.style.height = '100%';
             thumbnailImage.addEventListener('load', () => {
                 thumbnail.classList.remove('is-fallback');
-                thumbnail.textContent = '';
-                thumbnail.innerHTML = '';
-                if (thumbnail.querySelector('img') !== thumbnailImage) {
-                    thumbnail.innerHTML = '';
-                    thumbnail.appendChild(thumbnailImage);
-                }
             }, { once: true });
             thumbnailImage.addEventListener('error', () => {
-                thumbnail.classList.add('is-fallback');
-                thumbnail.innerHTML = '';
-                thumbnail.textContent = '♪';
+                if (thumbnailImage.getAttribute('src')) {
+                    showThumbnailFallback();
+                }
             }, { once: true });
             thumbnail.appendChild(thumbnailImage);
+            return thumbnailImage;
         }
 
-        const isCachedSong = cachedSongIds.has(song.id) && !song.image_cache_bust;
+        function showThumbnailFallback() {
+            thumbnail.classList.add('is-fallback');
+            thumbnail.innerHTML = '';
+            thumbnail.textContent = '♪';
+        }
 
-        const attachSource = (source) => {
-            if (!source || !source.url) {
-                thumbnail.classList.add('is-fallback');
-                thumbnail.textContent = '♪';
-                return;
-            }
-            attachThumbnail(source.url, source.type);
-        };
-
-        if (isCachedSong) {
-            getImageBlobFromIDB(song.id).then(imgBlob => {
-                if (imgBlob) {
-                    const objUrl = URL.createObjectURL(imgBlob);
-                    attachThumbnail(objUrl, 'image');
-                    thumbnail.querySelector('img')?.addEventListener('load', () => URL.revokeObjectURL(objUrl), { once: true });
-                } else {
-                    attachSource(thumbnailSource);
-                }
-            }).catch(() => {
-                attachSource(thumbnailSource);
-            });
+        if (!thumbnailSource?.url) {
+            showThumbnailFallback();
+        } else if (thumbnailSource.type === 'video') {
+            attachVideoThumbnail(thumbnailSource.url);
         } else {
-            attachSource(thumbnailSource);
+            const thumbnailImage = attachImageThumbnail();
+            hydrateThumbnail(song, thumbnailSource, thumbnailImage, {
+                allowNetwork: options.allowThumbnails !== false
+            });
         }
 
         const songInfo = document.createElement("div");
@@ -5785,16 +6187,27 @@
             return;
         }
 
+        // One layout read per batch, never per row.
+        const allowThumbnails = isSongListVisible();
+
         const fragment = document.createDocumentFragment();
         for (let index = start; index < end; index++) {
             const song = sortedFilteredSongs[index];
-            const item = getOrCreateSongListItem(song);
+            const item = getOrCreateSongListItem(song, { allowThumbnails });
             renderedSongItems.set(song.id, item);
             fragment.appendChild(item);
         }
 
         songList.insertBefore(fragment, songListSentinel);
         renderedSongCount = end;
+
+        // Warm the NEXT batch before the sentinel observer asks for it, so a
+        // normal scroll arrives at already-loaded covers instead of a row of
+        // placeholders. Bounded by the loader queue; speculative priority.
+        if (end < sortedFilteredSongs.length) {
+            prefetchThumbnailsForSongs(sortedFilteredSongs.slice(end, end + THUMBNAIL_PREFETCH_AHEAD));
+        }
+
         updateSongListSentinelState();
         if (updateCount) {
             updateSelectedCount();
@@ -6026,7 +6439,7 @@
     // matches the song's data, otherwise a fresh one. The thumbnail element is
     // carried over when the image did not change, so rebuilding a row does not
     // re-request the cover art.
-    function getOrCreateSongListItem(song) {
+    function getOrCreateSongListItem(song, options = {}) {
         const cached = songItemCache.get(song.id);
         const existing = renderedSongItems.get(song.id);
 
@@ -6039,7 +6452,7 @@
             return cached;
         }
 
-        const newItem = createSongListItem(song);
+        const newItem = createSongListItem(song, options);
 
         const previous = existing || cached;
         if (previous && (previous.dataset.thumbnailSignature || '') === (newItem.dataset.thumbnailSignature || '')) {
@@ -6098,9 +6511,13 @@
 
         ensureSongListSentinel();
 
+        // One layout read for the whole render. While the panel is closed the
+        // rows still hydrate from IndexedDB, but no cover is downloaded.
+        const allowThumbnails = isSongListVisible();
+
         const newEls = [];
         for (let index = 0; index < targetCount; index += 1) {
-            newEls.push(getOrCreateSongListItem(sortedFilteredSongs[index]));
+            newEls.push(getOrCreateSongListItem(sortedFilteredSongs[index], { allowThumbnails }));
         }
 
         const currentEls = Array.from(renderedSongItems.values());
@@ -6146,6 +6563,13 @@
         }
 
         renderedSongCount = targetCount;
+
+        // Same warm-ahead as the chunk path: the first screen is followed by a
+        // prefetched second screen, so scrolling starts with covers ready.
+        if (targetCount < sortedFilteredSongs.length) {
+            prefetchThumbnailsForSongs(sortedFilteredSongs.slice(targetCount, targetCount + THUMBNAIL_PREFETCH_AHEAD));
+        }
+
         updateSongListSentinelState();
 
         updateSelectedCount();

@@ -3,7 +3,10 @@
 import { requestToPromise, withStore } from './idb-helpers.js';
 
 const DB_NAME = 'BetterSunoicationsDB';
-const DB_VERSION = 3;
+// Must match content-idb.js. A background context opening a LOWER version than
+// a tab already upgraded throws a VersionError and every background IDB read
+// fails; a HIGHER version blocks the content script behind the upgrade.
+const DB_VERSION = 4;
 
 let dbInstance = null;
 
@@ -23,8 +26,18 @@ async function initDB() {
       reject(request.error);
     };
 
+    request.onblocked = () => {
+      console.warn('[IDB] Upgrade blocked by another context holding an older version');
+    };
+
     request.onsuccess = () => {
       dbInstance = request.result;
+      // Release the connection when a tab upgrades the schema, otherwise the
+      // upgrade stalls until this worker/tab goes away.
+      dbInstance.onversionchange = () => {
+        try { dbInstance.close(); } catch (e) {}
+        dbInstance = null;
+      };
       console.log('[IDB] Database initialized successfully');
       resolve(dbInstance);
     };
@@ -55,6 +68,19 @@ async function initDB() {
       if (!db.objectStoreNames.contains('audioCache')) {
         db.createObjectStore('audioCache', { keyPath: 'songId' });
         console.log('[IDB] Created audioCache store');
+      }
+
+      // Created here too (not only in content-idb.js): on a fresh profile the
+      // background can win the race to open the DB, and a store missing from
+      // that upgrade is then missing for the content script as well.
+      if (!db.objectStoreNames.contains('imageCache')) {
+        db.createObjectStore('imageCache', { keyPath: 'songId' });
+        console.log('[IDB] Created imageCache store');
+      }
+
+      if (!db.objectStoreNames.contains('imageCacheMeta')) {
+        db.createObjectStore('imageCacheMeta', { keyPath: 'songId' });
+        console.log('[IDB] Created imageCacheMeta store');
       }
 
       if (!db.objectStoreNames.contains('promptLibrary')) {

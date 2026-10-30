@@ -26,9 +26,10 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 
 ### 💾 Offline Database
 - **Local song cache** - Persist your library in IndexedDB
+- **Automatic thumbnail cache** - Every cover is saved locally and rendered from IndexedDB, so scrolling never waits on the CDN
 - **Save to DB** - Cache selected songs for offline playback
 - **Offline-only filter** - Show only tracks that are stored locally
-- **Delete from DB** - Remove selected cached tracks from local storage
+- **Delete from DB** - Remove selected cached tracks (and their covers) from local storage
 - **Auto-cache played songs** - Optional: save a song to the local DB the first time you play it
 - **Usage display** - See local DB usage in Settings
 
