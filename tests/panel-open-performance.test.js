@@ -111,8 +111,7 @@ function loadRefresh() {
     'renderCurrentState',
     'claimRefreshHost',
     'chrome',
-    `let isNotificationsRefreshHost = false;
-     ${declaration}
+    `${declaration}
      return refresh;`
   );
 
