@@ -111,7 +111,7 @@ async function loadActionHandler() {
   const body = extractBraceBlock(source, source.indexOf('{', arrowAt));
   const handlerSource = `(tab) => ${body}`;
 
-  const calls = { sent: [] };
+  const calls = { sent: [], fallbacks: [] };
   const chromeStub = {
     tabs: {
       sendMessage(tabId, message) {
@@ -121,12 +121,39 @@ async function loadActionHandler() {
     }
   };
 
-  const handler = new Function(
-    'chrome', 'isSunoUrl', 'SHOW_PANEL_MESSAGE',
-    `return (${handlerSource});`
-  )(chromeStub, isSunoUrl, SHOW_PANEL_MESSAGE);
+  const openPanelInTab = (tabId) => {
+    calls.fallbacks.push(tabId);
+    return Promise.resolve();
+  };
 
-  return { source, handler, calls, chromeStub };
+  const handler = new Function(
+    'chrome', 'isSunoUrl', 'SHOW_PANEL_MESSAGE', 'openPanelInTab',
+    `return (${handlerSource});`
+  )(chromeStub, isSunoUrl, SHOW_PANEL_MESSAGE, openPanelInTab);
+
+  return { source, handler, calls, chromeStub, openPanelInTab };
+}
+
+// The full declaration text of a (possibly async) top-level function, so it can
+// be re-scoped with stubs for `chrome` / `document`.
+function extractFunctionBlock(source, name) {
+  const needle = `function ${name}(`;
+  const at = source.indexOf(needle);
+  assert.notEqual(at, -1, `background.js must declare ${name}`);
+
+  const open = source.indexOf('{', source.indexOf(')', at));
+  assert.notEqual(open, -1, `expected a body for ${name}`);
+  const lineStart = source.lastIndexOf('\n', at) + 1;
+  return source.slice(lineStart, open) + extractBraceBlock(source, open);
+}
+
+function loadOpenPanelInTab(source) {
+  const block = extractFunctionBlock(source, 'openPanelInTab');
+  const factory = new Function('chrome', 'document', 'CustomEvent', 'SHOW_PANEL_MESSAGE', `return (${block});`);
+  return {
+    openPanelInTab: (tabId, chromeStub, dom) =>
+      factory(chromeStub, dom.document, dom.CustomEvent, SHOW_PANEL_MESSAGE)(tabId)
+  };
 }
 
 test('the toolbar action opens the panel on a Suno tab', async () => {
@@ -153,18 +180,100 @@ test('the toolbar action is a no-op on non-Suno tabs', async () => {
   assert.deepEqual(calls.sent, [], 'no message may be sent off a Suno page');
 });
 
-test('a missing receiver on the Suno tab is swallowed', async () => {
-  const { handler, chromeStub } = await loadActionHandler();
+test('a missing receiver on the Suno tab falls back to the injection path', async () => {
+  const { handler, chromeStub, calls } = await loadActionHandler();
 
-  // The tab may still be loading, so the content script does not exist yet.
+  // The tab may still be loading, or the content script may be orphaned by an
+  // extension update, so the runtime message rejects. The click must not be a
+  // no-op: background.js retries through the DOM/injection fallback.
   chromeStub.tabs.sendMessage = () => Promise.reject(new Error('Receiving end does not exist'));
   assert.doesNotThrow(() => handler({ id: 11, url: 'https://suno.com/' }));
 
-  // Some browsers/harnesses return undefined instead of a promise.
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(calls.fallbacks, [11], 'a rejected message must try the fallback launcher');
+
+  // Some browsers/harnesses return undefined instead of a promise; there is no
+  // failure signal to act on then, and it must not throw.
   chromeStub.tabs.sendMessage = () => undefined;
   assert.doesNotThrow(() => handler({ id: 12, url: 'https://suno.com/' }));
 
   await new Promise(resolve => setTimeout(resolve, 0));
+});
+
+test('the fallback dispatches a DOM event to an orphaned content script', async () => {
+  const source = await fs.readFile(path.join(ROOT, 'background.js'), 'utf8');
+  const { openPanelInTab } = loadOpenPanelInTab(source);
+
+  const calls = { events: [], css: [], files: [], messages: [] };
+  const chromeStub = {
+    scripting: {
+      executeScript: async (options) => {
+        if (options.files) {
+          calls.files.push(options.files);
+          return [{ result: undefined }];
+        }
+        // Simulate a page where the panel DOM is already there.
+        const result = options.func();
+        calls.events.push(result);
+        return [{ result }];
+      },
+      insertCSS: async (options) => { calls.css.push(options.files); }
+    },
+    tabs: {
+      sendMessage: async (tabId, message) => { calls.messages.push({ tabId, message }); }
+    }
+  };
+
+  // The probe runs against a document that already holds our root.
+  const dom = {
+    document: {
+      getElementById: () => ({}),
+      dispatchEvent: () => { calls.events.push('dispatched-event'); }
+    },
+    CustomEvent: class CustomEvent { constructor(type) { this.type = type; } }
+  };
+
+  await openPanelInTab(21, chromeStub, dom);
+
+  assert.deepEqual(calls.files, [], 'an existing panel must not be re-injected');
+  assert.deepEqual(calls.css, [], 'an existing panel must not re-inject the stylesheet');
+  assert.ok(calls.events.includes('dispatched-event'),
+    'an orphaned content script can only be reached through the document');
+});
+
+test('the fallback injects the content scripts when the panel DOM is absent', async () => {
+  const source = await fs.readFile(path.join(ROOT, 'background.js'), 'utf8');
+  const { openPanelInTab } = loadOpenPanelInTab(source);
+
+  const calls = { css: [], files: [], messages: [] };
+  const chromeStub = {
+    scripting: {
+      executeScript: async (options) => {
+        if (options.files) {
+          calls.files.push(options.files);
+          return [{ result: undefined }];
+        }
+        return [{ result: options.func() }];
+      },
+      insertCSS: async (options) => { calls.css.push(options.files); }
+    },
+    tabs: {
+      sendMessage: async (tabId, message) => { calls.messages.push({ tabId, message }); }
+    }
+  };
+
+  const dom = {
+    document: { getElementById: () => null, dispatchEvent: () => {} },
+    CustomEvent: class CustomEvent {}
+  };
+
+  await openPanelInTab(22, chromeStub, dom);
+
+  assert.deepEqual(calls.css, [['content.css']], 'the stylesheet must ship with the injected DOM');
+  assert.deepEqual(calls.files, [['content.js', 'content-idb.js', 'downloader.js', 'create.js']],
+    'injection order must match manifest.json (content.js builds the DOM downloader consumes)');
+  assert.deepEqual(calls.messages, [{ tabId: 22, message: { type: SHOW_PANEL_MESSAGE } }],
+    'the freshly injected script still has to be asked to open the panel');
 });
 
 test('background.js registers exactly one action listener and imports the pure rules', async () => {

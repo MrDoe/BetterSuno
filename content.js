@@ -18,7 +18,6 @@
   let notificationsObserver = null;
   let olderNotificationsFetching = false;
   let olderNotificationsExhausted = false;
-  let isNotificationsRefreshHost = false;
   const isAndroidFirefox = /Android/i.test(navigator.userAgent) && /Firefox/i.test(navigator.userAgent);
   let androidFirefoxKeepAliveEnabled = false;
   let androidFirefoxKeepAliveIsOwner = false;
@@ -954,6 +953,14 @@
     activateBell();
   }, true);
 
+  // Launcher bridge for background.js. A runtime message cannot reach an
+  // orphaned content script (the extension was updated while the tab stayed
+  // open), but its DOM listeners are still alive, so the toolbar icon falls
+  // back to dispatching this event. It only opens — same rule as the icon.
+  document.addEventListener('bettersuno:show-panel', () => {
+    showPanel();
+  });
+
   // Playback can take an async detour through IndexedDB/background decryption.
   // Track that pending state so the panel cannot disappear before audio.paused
   // flips to false.
@@ -1522,8 +1529,7 @@
             return;
           }
 
-          isNotificationsRefreshHost = response.isOwner === true;
-          resolve(isNotificationsRefreshHost);
+          resolve(response.isOwner === true);
         });
       } catch (e) {
         resolve(false);
@@ -1531,18 +1537,56 @@
     });
   }
 
+  // An orphaned content script (the extension was updated or reloaded while the
+  // Suno tab stayed open) cannot reach the background again: `chrome.runtime.id`
+  // is gone and every message throws. Removing `root` here used to make the
+  // panel vanish on the first bell tap after an update — the star looked dead.
+  // Keep the DOM and say what happened instead: the bell still opens, and the
+  // page is the only thing that can be reloaded to reconnect.
+  let contextInvalidNoticeShown = false;
+
+  function renderContextInvalidNotice() {
+    if (contextInvalidNoticeShown || !root) {
+      return;
+    }
+
+    contextInvalidNoticeShown = true;
+
+    const notice = document.createElement('div');
+    notice.id = 'bettersuno-context-invalid';
+    notice.setAttribute('role', 'status');
+    notice.textContent = 'BetterSuno was updated or reloaded. Reload this page to reconnect.';
+    notice.style.cssText = [
+      'margin: 10px 12px 0',
+      'padding: 10px 12px',
+      'border-radius: 6px',
+      'background: #7f1d1d',
+      'color: #fff',
+      'font: 13px/1.4 system-ui, sans-serif'
+    ].join(';');
+
+    const anchor = root.querySelector('#bettersuno-panel') || root;
+    anchor.insertBefore(notice, anchor.firstChild);
+  }
+
   async function refresh() {
     if (!isContextValid()) {
       clearInterval(refreshInterval);
       androidFirefoxKeepAliveManager.stop();
-      root.remove();
+      renderContextInvalidNotice();
       return;
     }
 
-    await claimRefreshHost();
+    // Paint whatever the background already holds before any round trip. This
+    // used to wait for claimRefreshHost() (and, for the host tab, a network
+    // fetch) before the first notification row existed, so opening the panel on
+    // a cold service worker showed an empty list for as long as the wake-up
+    // took. The cached paint is a local message callback, not a network wait.
+    renderCurrentState();
 
-    if (!isNotificationsRefreshHost) {
-      renderCurrentState();
+    const isOwner = await claimRefreshHost();
+
+    if (!isOwner) {
       return;
     }
 

@@ -96,6 +96,14 @@
         ownerUserId: ['user_id', 'owner_user_id', 'user.id', 'user.user_id']
     };
 
+    function isExtensionContextValid() {
+        try {
+            return !!api?.runtime?.id;
+        } catch (e) {
+            return false;
+        }
+    }
+
     async function sendMessageWithRetry(message, { retries = 10, initialDelayMs = 150 } = {}) {
         let lastError = null;
         for (let attempt = 0; attempt <= retries; attempt++) {
@@ -103,6 +111,13 @@
                 return await api.runtime.sendMessage(message);
             } catch (e) {
                 lastError = e;
+                // An orphaned content script (the extension was updated or
+                // reloaded while this tab stayed open) can never reach the
+                // background again. Retrying only stalls the panel for seconds
+                // before failing with the same error.
+                if (!isExtensionContextValid()) {
+                    throw e;
+                }
                 const msg = e?.message || String(e);
                 if (!msg.includes('Could not establish connection') && !msg.includes('Receiving end does not exist')) {
                     throw e;
@@ -113,6 +128,17 @@
             }
         }
         throw lastError;
+    }
+
+    // Run work once the panel has painted. Startup used to deserialise every
+    // cached audio blob (eviction and DB-usage measurement) on the same main
+    // thread that renders the first library rows.
+    function whenIdle(callback, timeoutMs = 2000) {
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(() => callback(), { timeout: timeoutMs });
+            return;
+        }
+        setTimeout(callback, 0);
     }
 
     let currentFetchMode = 'idle';
@@ -3263,14 +3289,34 @@
         }
     }
 
-    async function refreshDbUsageDisplay() {
+    // Measuring usage means reading the whole songs store *and* deserialising
+    // every cached audio blob (estimateDbUsageBytes). It used to run at startup
+    // and on every saveSyncMeta() — several times per session, on the same main
+    // thread the panel opens on — to fill a label that only the Settings tab
+    // can display. Compute it lazily, when it is actually on screen.
+    let dbUsageLastComputedAt = 0;
+    const DB_USAGE_RECOMPUTE_MS = 30 * 1000;
+
+    async function refreshDbUsageDisplay(options = {}) {
+        const { force = false } = options;
         if (!dbUsageValue) {
+            return;
+        }
+
+        const isVisible = typeof dbUsageValue.getClientRects === 'function'
+            && dbUsageValue.getClientRects().length > 0;
+        if (!isVisible && !force) {
+            return;
+        }
+
+        if (!force && dbUsageLastComputedAt && (Date.now() - dbUsageLastComputedAt) < DB_USAGE_RECOMPUTE_MS) {
             return;
         }
 
         dbUsageValue.textContent = 'Calculating...';
         try {
             const bytes = await estimateDbUsageBytes();
+            dbUsageLastComputedAt = Date.now();
             dbUsageValue.textContent = `${formatBytes(bytes)} used locally`;
             dbUsageValue.title = `Approximate IndexedDB usage for BetterSuno: ${bytes.toLocaleString()} bytes`;
         } catch (e) {
@@ -3316,8 +3362,12 @@
         }
     }
 
-    // Load from storage on startup
-    loadFromStorage();
+    // Load from storage on startup. Show that something is happening: an empty
+    // list for the first moments looked like a failed panel, not a load.
+    if (statusDiv) {
+        statusDiv.innerText = "Loading library...";
+    }
+    void loadFromStorage();
 
     // Settings > "Auto-cache songs I listen to" can be toggled while this page stays
     // open, and must also work with the panel closed, so re-read the pref on demand
@@ -3486,7 +3536,10 @@
 
     async function checkFetchState() {
         try {
-            const response = await sendMessageWithRetry({ action: "get_fetch_state" });
+            // Two attempts, not ten: this is a startup probe, and a background
+            // that is unreachable must not spend ~8s of retry churn before the
+            // panel can settle. The library crawl keeps the full retry budget.
+            const response = await sendMessageWithRetry({ action: "get_fetch_state" }, { retries: 2 });
             if (response && response.isFetching) {
                 currentFetchMode = syncMeta.lastSyncMode || 'incremental';
                 statusDiv.innerText = "Fetching in progress...";
@@ -3609,7 +3662,7 @@
 
     async function checkDownloadState() {
         try {
-            const response = await sendMessageWithRetry({ action: "get_download_state" });
+            const response = await sendMessageWithRetry({ action: "get_download_state" }, { retries: 2 });
             if (response && response.isDownloading) {
                 setDownloadUiState(true);
                 statusDiv.innerText = "Download in progress...";
@@ -3619,12 +3672,14 @@
         }
     }
 
+    let libraryLoadFailed = false;
+
     async function loadFromStorage() {
         let savedSelectedPlaylist = '';
         try {
             console.log('[Downloader] Loading songs from IndexedDB...');
             // Load songs and cached audio IDs from IndexedDB in parallel
-            const [savedSongs, savedFormat, savedSongsMeta, cachedIds, savedSyncMeta, persistedSelectedPlaylist, savedAutoCache, imageCacheMetaRecords] = await Promise.all([
+            const [loadedSongs, savedFormat, savedSongsMeta, cachedIds, savedSyncMeta, persistedSelectedPlaylist, savedAutoCache, imageCacheMetaRecords] = await Promise.all([
                 loadSongsFromIDB(),
                 loadPreferenceFromIDB('sunoFormat'),
                 loadPreferenceFromIDB('sunoSongsList'),
@@ -3634,6 +3689,10 @@
                 loadPreferenceFromIDB(AUTO_CACHE_PREF_KEY),
                 getAllImageCacheMeta()
             ]);
+            // null means the read failed (blocked upgrade, timed-out open), []
+            // means the library is genuinely empty. The two need different UI.
+            const savedSongs = Array.isArray(loadedSongs) ? loadedSongs : null;
+            libraryLoadFailed = savedSongs === null;
             savedSelectedPlaylist = persistedSelectedPlaylist || '';
             autoCacheListenedEnabled = savedAutoCache === true;
 
@@ -3658,12 +3717,16 @@
             });
 
             console.log('[Downloader] Loaded', savedSongs?.length || 0, 'songs,', cachedSongIds.size, 'cached audio blobs,', thumbnailMeta.size, 'cached thumbnails from IndexedDB');
-            
-            // Evict stale blobs on startup (fire-and-forget)
-            if (typeof evictStaleBlobs === 'function') {
-                evictStaleBlobs().catch(() => {});
-            }
-            void refreshDbUsageDisplay();
+
+            // Eviction and the usage estimate both deserialise every cached
+            // audio blob. Run them once the panel has painted instead of in
+            // front of the first library render.
+            whenIdle(() => {
+                if (typeof evictStaleBlobs === 'function') {
+                    evictStaleBlobs().catch(() => {});
+                }
+                void refreshDbUsageDisplay();
+            });
 
             // Load saved format preference first
             if (savedFormat) {
@@ -3703,22 +3766,34 @@
                 }
 
                 console.log('[Downloader] Showing cached songs, checking for new songs...');
-                setTimeout(() => checkForNewSongs(), 100);
+                // The automatic check is not urgent: letting the panel paint and
+                // the user's first click land before a crawl starts keeps the
+                // open path free of token acquisition and per-page re-renders.
+                whenIdle(() => checkForNewSongs(), 1500);
                 return;
             }
         } catch (e) {
+            libraryLoadFailed = true;
             console.error('[Downloader] Error loading from storage:', e);
+            statusDiv.innerText = "Could not read the local library. Reload the page to try again.";
         }
 
-        void refreshDbUsageDisplay();
-
-        console.log('[Downloader] No cached songs found, will prompt before auto-fetch...');
-        // No cached songs — ask user before starting a full fetch
         songListContainer.style.display = "block";
         void loadPlaylists();
         if (savedSelectedPlaylist) {
             void selectPlaylist(savedSelectedPlaylist);
         }
+
+        // A failed read is not an empty library. Falling through to the
+        // full-refresh prompt put a blocking confirm() in front of a page whose
+        // database never opened, and started a crawl nobody asked for.
+        if (libraryLoadFailed) {
+            console.log('[Downloader] Local library could not be read; not auto-fetching.');
+            return;
+        }
+
+        console.log('[Downloader] No cached songs found, will prompt before auto-fetch...');
+        // No cached songs — ask user before starting a full fetch
         startAutoFetch();
     }
 
@@ -5104,10 +5179,17 @@
 
     document.addEventListener('bettersuno:panel-opened', () => {
         scheduleVisibleSongRefresh();
+
+        // A blocked or timed-out IndexedDB open used to leave the panel empty
+        // for the rest of the page's life. Every panel open is a cheap retry.
+        if (libraryLoadFailed && allSongs.length === 0) {
+            libraryLoadFailed = false;
+            void loadFromStorage();
+        }
     });
 
     document.addEventListener('bettersuno:settings-opened', () => {
-        void refreshDbUsageDisplay();
+        void refreshDbUsageDisplay({ force: true });
     });
 
     document.addEventListener('bettersuno:delete-library', async () => {

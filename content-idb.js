@@ -134,6 +134,9 @@
         }
     }
 
+    // A failed read must be distinguishable from an empty library: the caller
+    // would otherwise offer a full re-fetch (a blocking confirm()) on top of a
+    // broken database. `null` means "could not read", `[]` means "no songs".
     async function loadSongsFromIDB() {
         try {
             return await withObjectStore('songsList', 'readonly', (store) => {
@@ -141,7 +144,7 @@
             });
         } catch (e) {
             console.error('[IDB] Failed to load songs:', e);
-            return [];
+            return null;
         }
     }
 

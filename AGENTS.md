@@ -58,6 +58,16 @@ Every library cover is cached in IndexedDB and rendered from a blob URL; the net
 - The background sends the resolved identity with the library payload (`currentUserIds` on `songs_fetched` / `songs_page_update`). Compare `owner_user_id` against that **set** — the identity carries several aliases (Suno uuid, Clerk id, `sub`) and a clip's owner id is only one of them.
 - **Never block on a guess.** With no identity evidence nothing is blocked: a false block costs the user their own song (same policy as `lib/ownership.js`). The old `sunoUserId = allSongs[0].owner_user_id` heuristic is gone — one foreign song at the head of the list misclassified the whole library.
 
+## Panel open path
+The star (bell) and the toolbar icon must open instantly and always — including on a stale session (extension updated, service worker asleep, IndexedDB blocked). Guards: `tests/panel-open-performance.test.js`, `tests/panel-launch.test.js`.
+
+- **Never put a round trip in front of the first paint.** `refresh()` renders the cached notification list before `claimRefreshHost()` / `contentFetchExisting`. Library rows are local IndexedDB data; `loadFromStorage()` must not await eviction or the DB-usage estimate (both deserialise every cached audio blob) — they run in `whenIdle()`.
+- **The automatic "check for new songs" pass is idle-scheduled**, not started 100 ms after load. A crawl at page load competes with the first open for the token and the main thread.
+- **An invalid extension context keeps the panel.** `chrome.runtime.id` disappears after an extension update; the old code removed `root`, so the first star tap after an update made the panel vanish. It now inserts a "Reload this page" banner.
+- **`loadSongsFromIDB()` returns `null` when the read fails**, `[]` only for a genuinely empty library. A failed read must never fall through to the `confirm()`-gated full refresh, and every panel open retries it.
+- **The toolbar icon has a second chance.** When `tabs.sendMessage` rejects, `openPanelInTab()` dispatches `bettersuno:show-panel` on the document (this reaches an orphaned content script, which runtime messages cannot) or injects `content.css` + the content scripts when the panel DOM is absent.
+- `sendMessageWithRetry()` stops after one attempt when the extension context is gone, and the startup probes (`get_fetch_state`, `get_download_state`) use `retries: 2`; only the library crawl keeps the full budget.
+
 ## Verification
 `npm run verify` = `node --check` on every runtime source and test file, `node --test tests/*.test.js`, then `node build.js` for both targets. CI runs the same (`.github/workflows/verify.yml`). There are no runtime or dev dependencies; the toolchain is pure Node.
 

@@ -92,11 +92,45 @@ chrome.action.onClicked.addListener((tab) => {
   const tabId = tab?.id;
   if (typeof tabId !== 'number' || !isSunoUrl(tab?.url)) return;
 
-  // A tab without a content script (still loading, or a non-Suno host) rejects;
-  // there is nothing to show there, so the rejection is intentionally ignored.
+  // A tab without a content script (still loading, a page that predates the
+  // extension, or an update that orphaned the script) rejects. Fall through to
+  // openPanelInTab() instead of leaving the click with nothing to show.
   const send = chrome.tabs.sendMessage(tabId, { type: SHOW_PANEL_MESSAGE });
-  if (send && typeof send.catch === 'function') send.catch(() => {});
+  if (send && typeof send.catch === 'function') {
+    send.catch(() => { openPanelInTab(tabId).catch(() => {}); });
+  }
 });
+
+// Second chance for a tab where the runtime message found no receiver.
+//
+// An orphaned content script cannot receive runtime messages (its extension
+// context is gone), but it is still running and still listens on the document,
+// so a DOM event reaches it where a message cannot. If the panel DOM is absent
+// entirely — the tab was already open when the extension was installed — the
+// content scripts are injected here for the first time.
+async function openPanelInTab(tabId) {
+  const probe = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      if (document.getElementById('bettersuno-root')) {
+        document.dispatchEvent(new CustomEvent('bettersuno:show-panel'));
+        return 'dispatched';
+      }
+      return 'missing';
+    }
+  });
+
+  if (probe?.[0]?.result === 'dispatched') {
+    return;
+  }
+
+  await chrome.scripting.insertCSS({ target: { tabId }, files: ['content.css'] });
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content.js', 'content-idb.js', 'downloader.js', 'create.js']
+  });
+  await chrome.tabs.sendMessage(tabId, { type: SHOW_PANEL_MESSAGE });
+}
 
 // Browser detection: Firefox uses persistent background scripts instead of service workers
 const isFirefox = typeof browser !== 'undefined' && !!browser.runtime?.getBrowserInfo;
