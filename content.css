@@ -593,6 +593,28 @@
   color: #cfcfcf !important;
 }
 
+/* Tri-state filters: exclude is a crossed-out label plus the native
+   indeterminate dash (red via accent-color), so the state is visible even
+   without relying on color alone. */
+#bettersuno-panel .filter-tri-state.filter-excluded {
+  color: #ef4444 !important;
+  text-decoration: line-through !important;
+}
+
+#bettersuno-panel .filter-tri-state.filter-excluded::after {
+  content: '✕';
+  display: inline-block;
+  margin-left: 2px;
+  font-size: 10px;
+  line-height: 1;
+  color: #ef4444 !important;
+  text-decoration: none !important;
+}
+
+#bettersuno-panel input[type="checkbox"]:indeterminate {
+  accent-color: #ef4444 !important;
+}
+
 #bettersuno-panel button {
   padding: 8px 12px !important;
   cursor: pointer !important;

@@ -20,7 +20,8 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
   - **WAV (local)** - Rendered in your browser from the stream; no credits, quality limited to the stream
   - **WAV (1 credit)** - Official lossless WAV from Suno; uses one Suno download credit and falls back to a local render if unavailable
 - **Complete packages** - Include lyrics and cover images with downloads of your own songs
-- **Smart filtering** - Filter by liked songs, stems, public/private, offline-only, or search by title
+- **New songs from the star** - Opening the panel quietly checks for new tracks after the first paint (at most once a minute)
+- **Smart filtering** - Tri-state filters for liked songs, stems, public/private, offline-only and unplayed: click once to include, twice to exclude, a third time to turn off; plus search by title
 - **Playlist picker** - Load your Suno playlists into a dropdown and view playlist tracks directly
 - **Playlist persistence** - Playlists and playlist songs are cached in the browser database for faster reopen
 
@@ -28,7 +29,7 @@ Enhance your Suno.com experience with real-time notifications and powerful song 
 - **Local song cache** - Persist your library in IndexedDB
 - **Automatic thumbnail cache** - Every cover is saved locally and rendered from IndexedDB, so scrolling never waits on the CDN
 - **Save to DB** - Cache selected songs for offline playback
-- **Offline-only filter** - Show only tracks that are stored locally
+- **Offline filter** - Show only tracks that are stored locally, exclude them, or turn the filter off
 - **Delete from DB** - Remove selected cached tracks (and their covers) from local storage
 - **Auto-cache played songs** - Optional: save a song to the local DB the first time you play it
 - **Usage display** - See local DB usage in Settings

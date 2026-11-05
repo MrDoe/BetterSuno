@@ -506,7 +506,8 @@ function createListHarness(source) {
     updateSelectedCount() {},
     scheduleVisibleSongRefresh() {},
     getActiveSongs: () => [],
-    filterOffline: { checked: false },
+    filterOffline: null,
+    getFilterState: () => 'off',
     cachedSongIds: new Set(),
     // The full render now needs one visibility check and the warm-ahead hook;
     // both are thumbnail concerns covered in tests/thumbnail-loader.test.js.

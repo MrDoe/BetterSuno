@@ -409,7 +409,7 @@ async function loadPanelControls(initial = {}) {
     panelOpen: initial.panelOpen ?? dom.panelHasOpenClass,
     lastSeenCount: 0,
     currentNotifCount: 7,
-    currentTab: 'library'
+    currentTab: initial.currentTab ?? 'library'
   };
 
   const panelStylesArray = extractArrayAfter(
@@ -465,8 +465,15 @@ test('tapping the bell opens the panel when our root was detached', async () => 
   assert.equal(tap.calls.reparented, 1, 'a detached root must be re-parented before showing');
   assert.equal(tap.calls.ensureVisibility, 1, 'the tap must re-assert visibility before opening');
   assert.equal(tap.calls.refresh, 1, 'opening must trigger the existing refresh');
-  assert.deepEqual(tap.calls.dispatched, ['bettersuno:panel-opened'],
-    'opening the library tab must still notify the rest of the content scripts');
+  assert.deepEqual(tap.calls.dispatched, ['bettersuno:panel-opened', 'bettersuno:check-new-songs'],
+    'opening must still notify the rest of the content scripts, and ask for a new-song scan');
+});
+
+test('a toolbar open from another tab still asks for a new-song scan', async () => {
+  const tap = await tapBell({ currentTab: 'player' });
+
+  assert.deepEqual(tap.calls.dispatched, ['bettersuno:check-new-songs'],
+    'the scan is requested on every open; the library-tab refresh is not');
 });
 
 test('tapping the bell opens the panel after a stale-open restore', async () => {

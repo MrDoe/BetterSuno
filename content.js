@@ -72,20 +72,20 @@
 
             <div id="filterControls">
               <label>Filter:</label>
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="filterLiked" /> ❤️ Liked
+              <label class="checkbox-label filter-tri-state" style="margin: 0; padding: 0" title="Click to cycle: filter off → only matching → exclude matching">
+                <input type="checkbox" id="filterLiked" data-filter-state="off" /> ❤️ Liked
               </label>
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="filterStems" /> 🎹 Stems
+              <label class="checkbox-label filter-tri-state" style="margin: 0; padding: 0" title="Click to cycle: filter off → only matching → exclude matching">
+                <input type="checkbox" id="filterStems" data-filter-state="off" /> 🎹 Stems
               </label>
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="filterPublic" checked /> 🌐 Public
+              <label class="checkbox-label filter-tri-state" style="margin: 0; padding: 0" title="Click to cycle: filter off → only matching → exclude matching">
+                <input type="checkbox" id="filterPublic" data-filter-state="include" checked /> 🌐 Public
               </label>
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="filterOffline" /> 💾 Offline
+              <label class="checkbox-label filter-tri-state" style="margin: 0; padding: 0" title="Click to cycle: filter off → only matching → exclude matching">
+                <input type="checkbox" id="filterOffline" data-filter-state="off" /> 💾 Offline
               </label>
-              <label class="checkbox-label" style="margin: 0; padding: 0">
-                <input type="checkbox" id="filterUnplayed" /> 🆕 Unplayed
+              <label class="checkbox-label filter-tri-state" style="margin: 0; padding: 0" title="Click to cycle: filter off → only matching → exclude matching">
+                <input type="checkbox" id="filterUnplayed" data-filter-state="off" /> 🆕 Unplayed
               </label>
               <label style="margin-left: 12px !important">Model:</label>
               <select id="filterModel" class="bettersuno-select">
@@ -880,6 +880,11 @@
     if (currentTab === 'library') {
       document.dispatchEvent(new CustomEvent('bettersuno:panel-opened'));
     }
+    // A star/toolbar open is the user's natural "anything new?" gesture. The
+    // event is declared on every open, whatever tab is active, but the
+    // downloader only schedules the incremental scan for idle time, so the
+    // first paint never waits on a token or a crawl.
+    document.dispatchEvent(new CustomEvent('bettersuno:check-new-songs'));
   }
 
   function hidePanel({ focusBell = false } = {}) {

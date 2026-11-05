@@ -304,6 +304,91 @@ test('the automatic library check is deferred until the panel has painted', () =
     'the old 100 ms crawl start is what made the open path feel busy');
 });
 
+// ---------------------------------------------------------------------------
+// downloader.js — a star open asks for new songs, but only when it can help
+// ---------------------------------------------------------------------------
+
+function loadCheckForNewSongs() {
+  const declaration = functionSource(DOWNLOADER_SOURCE, 'checkForNewSongs');
+  return (overrides = {}) => {
+    const calls = { starts: 0, options: null };
+    const controls = new Function(
+      'isExtensionContextValid',
+      'startIncrementalSync',
+      `
+      let allSongs = [{ id: 'song-1' }];
+      let libraryLoadFailed = false;
+      let currentFetchMode = 'idle';
+      const NEW_SONG_SCAN_MIN_INTERVAL_MS = 60 * 1000;
+      let lastNewSongScanAt = 0;
+      ${declaration}
+      return {
+        check: checkForNewSongs,
+        setSongs(value) { allSongs = value; },
+        setLibraryLoadFailed(value) { libraryLoadFailed = value; },
+        setFetchMode(value) { currentFetchMode = value; },
+        getLastScanAt() { return lastNewSongScanAt; }
+      };
+      `
+    )(
+      overrides.isExtensionContextValid ?? (() => true),
+      (options) => {
+        calls.starts += 1;
+        calls.options = options;
+      }
+    );
+    return { ...controls, calls };
+  };
+}
+
+test('a star open starts an automatic scan once the panel is idle', () => {
+  const scan = loadCheckForNewSongs()();
+
+  assert.equal(scan.check(1_000), true);
+  assert.deepEqual(scan.calls.options, { automatic: true },
+    'the open path may only use the cheap incremental scan');
+  assert.equal(scan.calls.starts, 1);
+  assert.equal(scan.getLastScanAt(), 1_000);
+});
+
+test('a star open skips the scan when it cannot help', () => {
+  const empty = loadCheckForNewSongs()();
+  empty.setSongs([]);
+  assert.equal(empty.check(1_000), false, 'an empty library needs the first-crawl prompt, not a scan');
+
+  const failedRead = loadCheckForNewSongs()();
+  failedRead.setLibraryLoadFailed(true);
+  assert.equal(failedRead.check(1_000), false, 'a failed IndexedDB read must not turn into a crawl');
+
+  const deadContext = loadCheckForNewSongs()({ isExtensionContextValid: () => false });
+  assert.equal(deadContext.check(1_000), false, 'an orphaned content script cannot fetch');
+
+  const fetching = loadCheckForNewSongs()();
+  fetching.setFetchMode('incremental');
+  assert.equal(fetching.check(1_000), false, 'a second scan must not compete with the running one');
+
+  for (const scan of [empty, failedRead, deadContext, fetching]) {
+    assert.equal(scan.calls.starts, 0);
+  }
+});
+
+test('repeated star taps are coalesced by the 60-second cooldown', () => {
+  const scan = loadCheckForNewSongs()();
+
+  assert.equal(scan.check(1_000), true);
+  assert.equal(scan.check(1_000 + 59_999), false,
+    'a second tap inside the cooldown must not start another crawl');
+  assert.equal(scan.check(1_000 + 60_000), true,
+    'the cooldown expires after a minute');
+  assert.equal(scan.calls.starts, 2);
+});
+
+test('the panel-open scan is deferred until idle', () => {
+  assert.match(DOWNLOADER_SOURCE,
+    /document\.addEventListener\('bettersuno:check-new-songs', \(\) => \{\s*whenIdle\(\(\) => checkForNewSongs\(\), 1500\);\s*\}\);/,
+    'the event must not put a token round trip in front of the first paint');
+});
+
 test('a failed library read never falls through to the full-refresh prompt', () => {
   const loadFromStorage = bodyOf(DOWNLOADER_SOURCE, 'loadFromStorage');
 

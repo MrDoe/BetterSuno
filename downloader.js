@@ -2441,7 +2441,9 @@
             }
         }
 
-        if (filterUnplayed?.checked) {
+        // Both "Unplayed" and "Played" views lose the row when its play count
+        // changes, so a re-render is needed whenever the filter is active.
+        if (getFilterState(filterUnplayed) !== 'off') {
             applyFilter({
                 preserveScroll: true,
                 minimumRenderCount: Math.max(renderedSongCount, SONG_RENDER_BATCH_SIZE)
@@ -3797,8 +3799,23 @@
         startAutoFetch();
     }
 
-    function checkForNewSongs() {
-        startIncrementalSync({ automatic: true });
+    // A star/toolbar open asks "anything new?", but a crawl is expensive and a
+    // dead context or an in-flight refresh cannot be helped by starting another.
+    // The cooldown only advances when a scan actually starts, so a tap during a
+    // crawl is retried on the next open instead of being swallowed for a minute.
+    const NEW_SONG_SCAN_MIN_INTERVAL_MS = 60 * 1000;
+    let lastNewSongScanAt = 0;
+
+    function checkForNewSongs(now = Date.now()) {
+        if (!isExtensionContextValid()) return false;
+        if (libraryLoadFailed) return false;
+        if (!allSongs.length) return false;
+        if (currentFetchMode !== 'idle') return false;
+        if (lastNewSongScanAt && now - lastNewSongScanAt < NEW_SONG_SCAN_MIN_INTERVAL_MS) return false;
+
+        lastNewSongScanAt = now;
+        void startIncrementalSync({ automatic: true });
+        return true;
     }
 
     async function saveToStorage() {
@@ -3841,12 +3858,64 @@
         void saveToStorage();
     }
 
+    // The five boolean filters are tri-state: off (filter inactive), include
+    // (only matching songs), exclude (matching songs removed). The explicit
+    // state lives on `data-filter-state`; the native checkbox only mirrors it
+    // (`checked` for include, `indeterminate` for exclude). Never read
+    // `.checked` directly — a click flips it before `change` fires.
+    function normalizeFilterState(value, fallback = 'off') {
+        if (value === true) return 'include';
+        if (value === false) return 'off';
+        if (value === 'include' || value === 'exclude' || value === 'off') return value;
+        return fallback;
+    }
+
+    function getFilterState(input, fallback = 'off') {
+        if (!input) return fallback;
+        const raw = input.dataset ? input.dataset.filterState : undefined;
+        return normalizeFilterState(raw, fallback);
+    }
+
+    function setFilterState(input, state, fallback = 'off') {
+        if (!input) return fallback;
+        const next = normalizeFilterState(state, fallback);
+        if (input.dataset) {
+            input.dataset.filterState = next;
+        }
+        input.checked = next === 'include';
+        input.indeterminate = next === 'exclude';
+
+        const label = typeof input.closest === 'function' ? input.closest('.filter-tri-state') : null;
+        if (label?.classList) {
+            label.classList.toggle('filter-excluded', next === 'exclude');
+        }
+        if (typeof input.setAttribute === 'function') {
+            const text = (label?.textContent || input.getAttribute('aria-label') || input.id || 'Filter')
+                .replace(/^[^A-Za-z]+/, '')
+                .trim();
+            input.setAttribute('aria-label', `${text || 'Filter'}: ${next}`);
+        }
+        return next;
+    }
+
+    function cycleFilterState(input, fallback = 'off') {
+        const current = getFilterState(input, fallback);
+        const next = current === 'include' ? 'exclude' : current === 'exclude' ? 'off' : 'include';
+        return setFilterState(input, next, fallback);
+    }
+
+    function matchesTriState(state, matched) {
+        if (state === 'include') return !!matched;
+        if (state === 'exclude') return !matched;
+        return true;
+    }
+
     async function saveFilterPreferences() {
         try {
-            await savePreferenceToIDB('sunoFilterLiked', filterLiked.checked);
-            await savePreferenceToIDB('sunoFilterStems', filterStems.checked);
-            await savePreferenceToIDB('sunoFilterPublic', filterPublic.checked);
-            await savePreferenceToIDB('sunoFilterOffline', !!filterOffline?.checked);
+            await savePreferenceToIDB('sunoFilterLiked', getFilterState(filterLiked));
+            await savePreferenceToIDB('sunoFilterStems', getFilterState(filterStems));
+            await savePreferenceToIDB('sunoFilterPublic', getFilterState(filterPublic, 'include'));
+            await savePreferenceToIDB('sunoFilterOffline', getFilterState(filterOffline));
             await savePreferenceToIDB('sunoFilterModel', filterModel ? filterModel.value : '');
         } catch (e) {
             console.error('Failed to save filter preferences:', e);
@@ -3869,21 +3938,17 @@
             const offline = await loadPreferenceFromIDB('sunoFilterOffline');
             const model = await loadPreferenceFromIDB('sunoFilterModel');
             
-            if (liked !== null) filterLiked.checked = liked;
-            if (stems !== null) filterStems.checked = stems;
-            filterPublic.checked = (pub !== null) ? pub : true;
-            if (filterOffline) {
-                filterOffline.checked = offline === true;
-            }
+            setFilterState(filterLiked, liked !== null ? liked : 'off');
+            setFilterState(filterStems, stems !== null ? stems : 'off');
+            setFilterState(filterPublic, pub !== null ? pub : 'include', 'include');
+            setFilterState(filterOffline, offline !== null ? offline : 'off');
             if (filterModel && typeof model === 'string') {
                 filterModel.value = model;
             }
         } catch (e) {
             console.error('Failed to load filter preferences:', e);
-            filterPublic.checked = true;
-            if (filterOffline) {
-                filterOffline.checked = false;
-            }
+            setFilterState(filterPublic, 'include', 'include');
+            setFilterState(filterOffline, 'off');
             if (filterModel) {
                 filterModel.value = '';
             }
@@ -4310,34 +4375,25 @@
         }, 140);
     });
 
-    // Filter checkboxes
-    filterLiked.addEventListener("change", () => {
-        applyFilter();
-        saveFilterPreferences();
-    });
-
-    filterStems.addEventListener("change", () => {
-        applyFilter();
-        saveFilterPreferences();
-    });
-
-    filterPublic.addEventListener("change", () => {
-        applyFilter();
-        saveFilterPreferences();
-    });
-
-    if (filterOffline) {
-        filterOffline.addEventListener("change", () => {
+    // Filter checkboxes — cycle off → include → exclude on each click. The
+    // native toggle is ignored: the explicit state lives in data-filter-state.
+    function setupTriStateFilter(input, { persist = false, fallback = 'off' } = {}) {
+        if (!input) return;
+        input.addEventListener("change", () => {
+            cycleFilterState(input, fallback);
             applyFilter();
-            saveFilterPreferences();
+            if (persist) {
+                void saveFilterPreferences();
+            }
         });
     }
 
-    if (filterUnplayed) {
-        filterUnplayed.addEventListener("change", () => {
-            applyFilter();
-        });
-    }
+    setupTriStateFilter(filterLiked, { persist: true });
+    setupTriStateFilter(filterStems, { persist: true });
+    setupTriStateFilter(filterPublic, { persist: true, fallback: 'include' });
+    setupTriStateFilter(filterOffline, { persist: true });
+    // Unplayed is deliberately not persisted: it starts off on every page load.
+    setupTriStateFilter(filterUnplayed);
 
     if (filterModel) {
         filterModel.addEventListener("change", () => {
@@ -5186,6 +5242,13 @@
             libraryLoadFailed = false;
             void loadFromStorage();
         }
+    });
+
+    // Every star/toolbar open dispatches this, whatever panel tab is active.
+    // Deferring keeps the first paint free: the scan starts after the panel is
+    // visible, and checkForNewSongs() dedupes repeated taps with its cooldown.
+    document.addEventListener('bettersuno:check-new-songs', () => {
+        whenIdle(() => checkForNewSongs(), 1500);
     });
 
     document.addEventListener('bettersuno:settings-opened', () => {
@@ -6346,11 +6409,11 @@
     function getSongFilterState() {
         return {
             searchText: filterInput.value.toLowerCase(),
-            showLikedOnly: filterLiked.checked,
-            showStemsOnly: filterStems.checked,
-            showPublicOnly: filterPublic.checked,
-            showOfflineOnly: !!filterOffline?.checked,
-            showUnplayedOnly: !!filterUnplayed?.checked,
+            liked: getFilterState(filterLiked),
+            stems: getFilterState(filterStems),
+            public: getFilterState(filterPublic, 'include'),
+            offline: getFilterState(filterOffline),
+            unplayed: getFilterState(filterUnplayed),
             currentSongId: currentPlayingSongId,
             modelVersion: filterModel ? filterModel.value : ''
         };
@@ -6390,23 +6453,27 @@
             return false;
         }
 
-        if (filterState.showLikedOnly && !song.is_liked) {
+        if (!matchesTriState(filterState.liked, song.is_liked)) {
             return false;
         }
 
-        if (filterState.showStemsOnly && !song.is_stem) {
+        if (!matchesTriState(filterState.stems, song.is_stem)) {
             return false;
         }
 
-        if (filterState.showPublicOnly && !song.is_public) {
+        if (!matchesTriState(filterState.public, song.is_public)) {
             return false;
         }
 
-        if (filterState.showOfflineOnly && !cachedSongIds.has(song.id)) {
+        if (!matchesTriState(filterState.offline, cachedSongIds.has(song.id))) {
             return false;
         }
 
-        if (filterState.showUnplayedOnly && song.play_count !== 0 && song.id !== filterState.currentSongId) {
+        // The currently playing song stays visible in every Unplayed state, so
+        // the row cannot vanish under the mini player. Everything else follows
+        // include/exclude.
+        if (song.id !== filterState.currentSongId
+            && !matchesTriState(filterState.unplayed, normalizePlayCount(song.play_count) === 0)) {
             return false;
         }
 
@@ -6579,7 +6646,7 @@
             const activeSongs = getActiveSongs();
             const emptyDiv = document.createElement('div');
             emptyDiv.className = 'bettersuno-empty';
-            if (filterOffline?.checked) {
+            if (getFilterState(filterOffline) === 'include') {
                 emptyDiv.textContent = cachedSongIds.size > 0
                     ? 'No offline songs match the current filters'
                     : 'No offline songs cached yet. Select songs and use Save to DB.';

@@ -58,11 +58,21 @@ Every library cover is cached in IndexedDB and rendered from a blob URL; the net
 - The background sends the resolved identity with the library payload (`currentUserIds` on `songs_fetched` / `songs_page_update`). Compare `owner_user_id` against that **set** — the identity carries several aliases (Suno uuid, Clerk id, `sub`) and a clip's owner id is only one of them.
 - **Never block on a guess.** With no identity evidence nothing is blocked: a false block costs the user their own song (same policy as `lib/ownership.js`). The old `sunoUserId = allSongs[0].owner_user_id` heuristic is gone — one foreign song at the head of the list misclassified the whole library.
 
+## Library filters are tri-state
+Liked, Stems, Public, Offline and Unplayed are **off → include → exclude**, not binary checkboxes (guard: `tests/library-filters.test.js`).
+
+- **The explicit state is `data-filter-state`; the native checkbox is a mirror.** `checked` means include, `indeterminate` means exclude. A click flips `.checked` before `change` fires, so never read it back — use `getFilterState()` / `setFilterState()` / `cycleFilterState()`.
+- **Persistence stores strings** in the existing keys (`sunoFilterLiked`, `sunoFilterStems`, `sunoFilterPublic`, `sunoFilterOffline`). Legacy booleans decode `true → include`, `false → off`; Public still defaults to `include`. **Unplayed is deliberately not persisted** and starts `off` on every page load.
+- **Exclude is visible three ways**: the native indeterminate dash (red via `accent-color`), a red struck-through label with `✕` (`content.css`), and a dynamic `aria-label` (`"Liked: exclude"`). Do not rely on colour alone.
+- **Matching goes through `matchesTriState`.** The currently playing song is always kept by the Unplayed filter; `markSongPlayed()` re-renders whenever Unplayed is not `off`, so both directions update.
+- **The empty-state message** says "No offline songs cached yet" only when Offline is in **include**; exclude uses the generic "No songs match" message.
+
 ## Panel open path
 The star (bell) and the toolbar icon must open instantly and always — including on a stale session (extension updated, service worker asleep, IndexedDB blocked). Guards: `tests/panel-open-performance.test.js`, `tests/panel-launch.test.js`.
 
 - **Never put a round trip in front of the first paint.** `refresh()` renders the cached notification list before `claimRefreshHost()` / `contentFetchExisting`. Library rows are local IndexedDB data; `loadFromStorage()` must not await eviction or the DB-usage estimate (both deserialise every cached audio blob) — they run in `whenIdle()`.
 - **The automatic "check for new songs" pass is idle-scheduled**, not started 100 ms after load. A crawl at page load competes with the first open for the token and the main thread.
+- **A star/toolbar open also asks for new songs.** `showPanel()` dispatches `bettersuno:check-new-songs` on every open (whatever tab is active); the downloader defers `checkForNewSongs()` through `whenIdle(..., 1500)`. It skips a dead extension context, a failed library read, an empty library, an in-flight fetch, and repeats inside **60 s** (`NEW_SONG_SCAN_MIN_INTERVAL_MS`). The cooldown only advances when a scan actually starts.
 - **An invalid extension context keeps the panel.** `chrome.runtime.id` disappears after an extension update; the old code removed `root`, so the first star tap after an update made the panel vanish. It now inserts a "Reload this page" banner.
 - **`loadSongsFromIDB()` returns `null` when the read fails**, `[]` only for a genuinely empty library. A failed read must never fall through to the `confirm()`-gated full refresh, and every panel open retries it.
 - **The toolbar icon has a second chance.** When `tabs.sendMessage` rejects, `openPanelInTab()` dispatches `bettersuno:show-panel` on the document (this reaches an orphaned content script, which runtime messages cannot) or injects `content.css` + the content scripts when the panel DOM is absent.
